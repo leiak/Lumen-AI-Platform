@@ -26,12 +26,14 @@ import {
   Tag,
   Space,
 } from "antd";
-import { PlusOutlined, DeleteOutlined, AppstoreAddOutlined } from "@ant-design/icons";
+import { PlusOutlined, DeleteOutlined, AppstoreAddOutlined, AudioOutlined, FileTextOutlined } from "@ant-design/icons";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { createVideoCompose } from "@/services/video";
 import { imageGenerationApi } from "@/services/image-generation";
 import PlaybookSelect from "@/components/PlaybookSelect";
 import { ImagePickerModal } from "./ImagePickerModal";
+import { AudioPickerModal } from "./AudioPickerModal";
+import { SubtitlePickerModal } from "./SubtitlePickerModal";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:11335/api/v1";
@@ -101,6 +103,10 @@ export function ComposeModal({ open, onClose }: ComposeModalProps) {
   // 已有 image id 集合初始化。
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerEditingIndex, setPickerEditingIndex] = useState<number | null>(null);
+
+  // M36.1.1: audio / subtitle picker modal 状态。
+  const [audioPickerOpen, setAudioPickerOpen] = useState(false);
+  const [subtitlePickerOpen, setSubtitlePickerOpen] = useState(false);
 
   // 解析当前 source_images 里所有 image id(URL 形态)给 picker 初始高亮。
   const currentImageIds = sourceImages
@@ -247,10 +253,39 @@ export function ComposeModal({ open, onClose }: ComposeModalProps) {
           </Form.Item>
 
           <Form.Item name="audio_path" label="音频 (可选)">
-            <Input placeholder="本地路径 或 generated_audios.id (整数)" />
+            <Space.Compact style={{ width: "100%" }}>
+              <Input
+                placeholder="本地路径 或 generated_audios.id (整数)"
+                style={{ width: "calc(100% - 160px)" }}
+              />
+              <Button
+                icon={<AudioOutlined />}
+                onClick={() => setAudioPickerOpen(true)}
+                style={{ width: 160 }}
+              >
+                从我的音频库选
+              </Button>
+            </Space.Compact>
           </Form.Item>
-          <Form.Item name="subtitle_path" label="字幕 (可选)">
-            <Input placeholder="本地 .srt/.vtt 路径 或 subtitles.id (整数)" />
+          <Form.Item
+            name="subtitle_path"
+            label="字幕 (可选)"
+            // 没 subtitle 时不展示错误红框(M36.1 阶段 1.1 仍允许留空)。
+            rules={[]}
+          >
+            <Space.Compact style={{ width: "100%" }}>
+              <Input
+                placeholder="本地 .srt/.vtt 路径 或 subtitles.id (整数)"
+                style={{ width: "calc(100% - 160px)" }}
+              />
+              <Button
+                icon={<FileTextOutlined />}
+                onClick={() => setSubtitlePickerOpen(true)}
+                style={{ width: 160 }}
+              >
+                从我的字幕库选
+              </Button>
+            </Space.Compact>
           </Form.Item>
 
           <Form.Item name="playbook_id" label="Playbook (可选)">
@@ -324,6 +359,22 @@ export function ComposeModal({ open, onClose }: ComposeModalProps) {
           setPickerEditingIndex(null);
         }}
         onConfirm={handlePickerConfirm}
+      />
+      <AudioPickerModal
+        open={audioPickerOpen}
+        onClose={() => setAudioPickerOpen(false)}
+        onConfirm={(id) => {
+          form.setFieldValue("audio_path", String(id));
+          setAudioPickerOpen(false);
+        }}
+      />
+      <SubtitlePickerModal
+        open={subtitlePickerOpen}
+        onClose={() => setSubtitlePickerOpen(false)}
+        onConfirm={(id) => {
+          form.setFieldValue("subtitle_path", String(id));
+          setSubtitlePickerOpen(false);
+        }}
       />
     </>
   );

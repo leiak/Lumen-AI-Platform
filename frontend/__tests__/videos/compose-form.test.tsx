@@ -135,4 +135,20 @@ describe("ComposeModal", () => {
     const payload = mockCreateVideoCompose.mock.calls[0][0];
     expect(payload.audio_path).toBe("42");
   });
+
+  it("ComposeModal exposes 从我的音频库选 + 从我的字幕库选 buttons", async () => {
+    render(
+      <TestWrapper>
+        <VideosPage />
+      </TestWrapper>
+    );
+    await waitFor(() => expect(mockListVideos).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /新建合成/ }));
+    expect(
+      await screen.findByRole("button", { name: /从我的音频库选/ })
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: /从我的字幕库选/ })
+    ).toBeInTheDocument();
+  });
 });
