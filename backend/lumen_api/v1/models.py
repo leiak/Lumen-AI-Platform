@@ -27,6 +27,7 @@ async def list_models(
     is_image_generation: Optional[bool] = None,
     is_tts: Optional[bool] = None,
     is_subtitle_generation: Optional[bool] = None,
+    is_video: Optional[bool] = None,
     is_active: Optional[bool] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -65,6 +66,8 @@ async def list_models(
         query = query.filter(ModelConfig.is_tts == is_tts)
     if is_subtitle_generation is not None:
         query = query.filter(ModelConfig.is_subtitle_generation == is_subtitle_generation)
+    if is_video is not None:
+        query = query.filter(ModelConfig.is_video == is_video)
     if is_active is not None:
         query = query.filter(ModelConfig.is_active == is_active)
 

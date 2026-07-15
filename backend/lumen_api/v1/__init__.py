@@ -76,3 +76,8 @@ from . import tts, subtitles, playbooks
 router.include_router(tts.router)
 router.include_router(subtitles.router)
 router.include_router(playbooks.router)
+
+# M36: 视频合成(image + audio + subtitle → mp4)
+#   /api/v1/videos/*  (compose / list / detail / download / cancel / delete)
+from . import videos
+router.include_router(videos.router)

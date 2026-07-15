@@ -23,5 +23,6 @@ class ModelConfig(BaseModel):
     is_image_generation = Column(Boolean, default=False, comment="Usable as an image generation model")
     is_tts = Column(Boolean, default=False, comment="M35: Usable as a TTS (text-to-speech) model")
     is_subtitle_generation = Column(Boolean, default=False, comment="M35: Usable as a subtitle generation model")
+    is_video = Column(Boolean, default=False, comment="M36: Usable as a video generation model (Kling/Sora/Veo future)")
     tenant_id = Column(Integer, nullable=True, comment="Tenant ID (null for global)")
     description = Column(Text, nullable=True, comment="Model description")

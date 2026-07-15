@@ -22,6 +22,7 @@ class ModelConfigBase(BaseModel):
     is_image_generation: bool = Field(False, description="Usable as an image generation model")
     is_tts: bool = Field(False, description="M35: Usable as a TTS (text-to-speech) model")
     is_subtitle_generation: bool = Field(False, description="M35: Usable as a subtitle generation model")
+    is_video: bool = Field(False, description="M36: Usable as a video generation model (Kling/Sora/Veo future)")
     description: Optional[str] = Field(None, description="Model description")
 
     # Legacy rows inserted before the ORM `default=False` was applied (or
@@ -61,6 +62,7 @@ class ModelConfigUpdate(BaseModel):
     is_image_generation: Optional[bool] = None
     is_tts: Optional[bool] = None
     is_subtitle_generation: Optional[bool] = None
+    is_video: Optional[bool] = None
     description: Optional[str] = None
 
 

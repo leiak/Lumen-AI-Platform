@@ -24,11 +24,13 @@ from lumen_core.database import (
     ensure_agent_kb_retrieval_config,  # M21
     ensure_model_configs_image_flag,  # M22
     ensure_model_configs_tts_subtitle_flags,  # M35
+    ensure_model_configs_video_flag,  # M36
     ensure_settings_model_fk_columns,  # M31
     ensure_generated_images_table,  # M22
     ensure_generated_audios_table,  # M35
     ensure_subtitles_table,  # M35
     ensure_playbooks_table,  # M35
+    ensure_generated_videos_table,  # M36
     ensure_llm_call_logs_table,  # M26
     ensure_embedding_call_logs_table,  # M27
     ensure_soft_delete_columns,  # M27
@@ -200,11 +202,13 @@ async def startup_event():
     ensure_agent_kb_retrieval_config()  # M21: agents.kb_retrieval_config
     ensure_model_configs_image_flag()  # M22: model_configs.is_image_generation
     ensure_model_configs_tts_subtitle_flags()  # M35: model_configs.is_tts + is_subtitle_generation
+    ensure_model_configs_video_flag()  # M36: model_configs.is_video
     ensure_settings_model_fk_columns()  # M31: system_settings.default_model/embedding_model → INT FK
     ensure_generated_images_table()  # M22: generated_images
     ensure_generated_audios_table()  # M35: TTS
     ensure_subtitles_table()  # M35: subtitle
     ensure_playbooks_table()  # M35: playbook
+    ensure_generated_videos_table()  # M36: generated_videos (composition)
     ensure_llm_call_logs_table()  # M26: llm_call_logs
     ensure_embedding_call_logs_table()  # M27: embedding_call_logs
     ensure_soft_delete_columns()  # M27: archived_at on llm + embedding logs

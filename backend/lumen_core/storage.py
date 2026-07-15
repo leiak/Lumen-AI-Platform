@@ -22,6 +22,9 @@ _EXT_MAP = {
     "audio/opus": ".opus",
     "audio/flac": ".flac",
     "audio/aac": ".aac",
+    # M36 video (mp4). FFmpeg always emits mp4 from build_video_from_assets
+    # so this is the canonical extension.
+    "video/mp4": ".mp4",
 }
 
 

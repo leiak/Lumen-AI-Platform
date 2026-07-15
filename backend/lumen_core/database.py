@@ -737,6 +737,30 @@ def ensure_model_configs_tts_subtitle_flags() -> None:
             ))
 
 
+def ensure_model_configs_video_flag() -> None:
+    """M36: add ``is_video`` to ``model_configs``.
+
+    Capability flag for the future video-generation provider layer
+    (Kling / Sora / Veo / Wan). M36 ships the composition side
+    (``video_compose`` workflow node + ``build_video_from_assets``), but
+    no provider consumes this flag yet — it's reserved so the API filter
+    ``?is_video=true`` and the frontend model dropdown are wired from
+    day one.
+
+    Idempotent via ``_column_exists``. Default FALSE so legacy model
+    rows are not retroactively flagged; admins opt-in by configuring a
+    video-gen provider (M36.2).
+    """
+    if _column_exists("model_configs", "is_video"):
+        return
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE model_configs "
+            "ADD COLUMN is_video BOOLEAN NOT NULL DEFAULT FALSE "
+            "COMMENT 'M36: Usable as a video generation model (Kling/Sora/Veo future)'"
+        ))
+
+
 def ensure_settings_model_fk_columns() -> None:
     """M31: convert ``system_settings.default_model`` /
     ``.embedding_model`` from VARCHAR(50) (free-text) to INT FK → ``model_configs.id``.
@@ -1210,6 +1234,25 @@ def ensure_playbooks_table() -> None:
     """
     from lumen_models.playbook import Playbook  # noqa
     Base.metadata.create_all(bind=engine, tables=[Playbook.__table__])
+
+
+def ensure_generated_videos_table() -> None:
+    """M36: create ``generated_videos`` table if it doesn't exist.
+
+    Mirrors ``ensure_generated_audios_table`` (M35) — ``Base.metadata.
+    create_all`` is idempotent, so re-running is a no-op. The composite
+    index ``ix_gen_videos_tenant_status_created`` is declared on
+    ``GeneratedVideo.__table_args__`` and created automatically, keeping
+    the per-tenant history list query O(log n) on
+    (tenant_id, status, created_at DESC).
+
+    The table also references ``conversations`` / ``generated_audios`` /
+    ``subtitles`` / ``playbooks`` via FK — those tables are created by
+    earlier ``ensure_*`` calls (M22/M35/M1), so this must run AFTER
+    them in the startup sequence (wired in ``lumen_main.py``).
+    """
+    from lumen_models.video import GeneratedVideo  # noqa
+    Base.metadata.create_all(bind=engine, tables=[GeneratedVideo.__table__])
 
 
 def ensure_agent_kb_retrieval_config() -> None:

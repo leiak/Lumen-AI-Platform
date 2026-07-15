@@ -27,6 +27,7 @@ from lumen_core.workflow.nodes.tool import ToolNode
 from lumen_core.workflow.nodes.tts import TTSNode  # M35
 from lumen_core.workflow.nodes.variable_assigner import VariableAssignerNode
 from lumen_core.workflow.nodes.variable_aggregator import VariableAggregatorNode
+from lumen_core.workflow.nodes.video_compose import VideoComposeNode  # M36
 
 DEFAULT_VERSION = "1"
 
@@ -53,6 +54,8 @@ NODE_TYPE_CLASSES_MAPPING: dict[str, dict[str, type[BaseNode]]] = {
     # M35: 多模态节点
     "tts":             {DEFAULT_VERSION: TTSNode},
     "playbook_inject": {DEFAULT_VERSION: PlaybookInjectNode},
+    # M36: 视频合成节点(同步)
+    "video_compose":   {DEFAULT_VERSION: VideoComposeNode},
 }
 
 

@@ -207,6 +207,32 @@ _NODE_TYPE_METADATA: dict[tuple[str, str], NodeMetadata] = {
             {"name": "playbook_id", "type": "number"},
         ],
     ),
+    # M36: 视频合成(图+音+字 → mp4,同步阻塞)
+    ("video_compose", "1"): NodeMetadata(
+        type="video_compose", label="视频合成",
+        description="把图像+音频+字幕合成 mp4(同步等待)。"
+                    "下游可拿 video_url。",
+        icon="🎬", color="magenta", category="integration",
+        default_config={
+            "source_images": [],
+            "audio_path": None,
+            "subtitle_path": None,
+            "resolution": "1280x720",
+            "fps": 24,
+            "audio_fade_in": 0.0,
+            "audio_fade_out": 0.0,
+            "subtitle_font": None,
+            "per_image_seconds": None,
+        },
+        inputs=[{"name": "source_images", "type": "array", "required": True}],
+        outputs=[
+            {"name": "video_id", "type": "number"},
+            {"name": "video_url", "type": "string"},
+            {"name": "status", "type": "string"},
+            {"name": "duration_ms", "type": "number"},
+            {"name": "file_size", "type": "number"},
+        ],
+    ),
 }
 
 
