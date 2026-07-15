@@ -23,6 +23,7 @@ import {
   PictureOutlined,
   SendOutlined,
   DatabaseOutlined,
+  PlayCircleOutlined,
 } from "@ant-design/icons";
 import { ProLayout } from "@ant-design/pro-components";
 import zhCN from "antd/locale/zh_CN";
@@ -86,6 +87,13 @@ const menuItems = [
     path: "/dashboard/image-generation",
     name: "图片生成",
     icon: <PictureOutlined />,
+  },
+  // M36.1 视频合成 — placed between Image Generation and 智能问数 (media
+  // generation tools 聚集,运营常用)。
+  {
+    path: "/dashboard/videos",
+    name: "视频合成",
+    icon: <PlayCircleOutlined />,
   },
   // M33 智能问数(Text2SQL) — placed between Image Generation and Memory
   // (数据 / 业务问数聚集,运营常用)。
