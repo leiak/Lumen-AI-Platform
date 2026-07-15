@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>在线客服</title>
+</head>
+<body>
+    <h1>欢迎使用在线客服</h1>
+    <p>点击右下角聊天图标开始对话。</p>
+
+    <!-- widget 产物挂在后端 (11335) 的 /static,不是前端 (11334) -->
+    <script src="http://localhost:11335/static/widget/lc-chat.js"></script>
+    <lc-chat
+        server="http://localhost:11335"
+        app-key="lc_pub_9ab4b61bf56cd1c1086ee7cd9a5226e1"
+        theme="auto">
+    </lc-chat>
+</body>
+</html>

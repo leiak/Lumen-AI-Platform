@@ -1,0 +1,4 @@
+html, body { margin: 0; padding: 0; background: #0a0e1a; color: #e6e8eb; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+.screen-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; padding: 16px; }
+.panel { background: #131a2c; border: 1px solid rgba(0, 217, 255, 0.2); border-radius: 6px; padding: 16px; }
+.panel-title { color: #00d9ff; font-size: 14px; margin-bottom: 12px; letter-spacing: 1px; }

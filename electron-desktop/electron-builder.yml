@@ -1,0 +1,15 @@
+appId: com.lumenplatform.electron
+productName: LumenPlatform
+directories:
+  output: dist
+files:
+  - src/**/*
+win:
+  target:
+    - nsis
+mac:
+  target:
+    - dmg
+linux:
+  target:
+    - AppImage

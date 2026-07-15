@@ -1,0 +1,85 @@
+:host {
+  position: relative;
+  width: 100%;
+}
+.lc-container {
+  display: flex;
+  flex-direction: column;
+  background: var(--lc-bg-page);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-lg);
+  box-shadow: var(--lc-shadow);
+  overflow: hidden;
+  height: var(--lc-height, 600px);
+  width: var(--lc-width, 400px);
+  max-width: 100%;
+}
+.lc-header {
+  background: var(--lc-header-bg);
+  border-bottom: 1px solid var(--lc-border);
+  height: var(--lc-header-height);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--lc-spacing-md);
+  gap: var(--lc-spacing-sm);
+}
+.lc-header h1 {
+  font-size: var(--lc-font-size-base);
+  margin: 0;
+  flex: 1;
+  font-weight: 600;
+}
+.lc-kb-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--lc-radius-sm, 4px);
+  font-size: 14px;
+  line-height: 1;
+  cursor: help;
+  /* Subtle background so the icon stands out from the header text but
+     doesn't compete with the close button. */
+  background: var(--lc-bg-bubble-user, rgba(0, 0, 0, 0.05));
+  color: var(--lc-text-primary, inherit);
+  user-select: none;
+}
+.lc-kb-badge[data-kb-count="0"] {
+  opacity: 0.45;
+}
+.lc-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--lc-spacing-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-spacing-sm);
+}
+.lc-input-row {
+  border-top: 1px solid var(--lc-border);
+  display: flex;
+  align-items: center;
+  padding: var(--lc-spacing-sm);
+  gap: var(--lc-spacing-sm);
+  min-height: var(--lc-input-height);
+}
+.lc-input-row textarea {
+  flex: 1;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--lc-text-primary);
+  font: inherit;
+}
+@media (max-width: 768px) {
+  :host(:not([floating="false"])) .lc-container {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    border-radius: 0;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}

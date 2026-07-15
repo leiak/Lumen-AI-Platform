@@ -1,0 +1,115 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: lumen-platform-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: ai_platform
+      MYSQL_USER: ai_user
+      MYSQL_PASSWORD: ai_password
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+    container_name: lumen-platform-es
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: lumen-platform-redis
+    ports:
+      - "16379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: lumen-platform-ollama
+    # Ollama listens on 11434. Expose to host so manual `ollama` CLI
+    # calls (e.g. `ollama pull`) also work from the Windows shell.
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      # The ollama image is minimal — it ships neither `curl` nor
+      # `wget`. The cleanest way to confirm the daemon is responsive
+      # is to ask it to list its models: `ollama list` exits 0 once
+      # the HTTP server is up and the model cache is hydrated.
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lumen-platform-celery
+    command: celery -A lumen_tasks.celery_app worker --loglevel=info
+    env_file:
+      - .env.docker
+    # The /app/data mount must be writable so the BM25 index
+    # (`./data/faiss/<collection>.bm25.pkl`) can be persisted. A
+    # read-only mount makes the save() call silently no-op, which is
+    # what caused the second half of the "search returns nothing"
+    # bug. The upload dir is on the same path so re-running the
+    # worker against a fresh checkout doesn't lose uploaded files.
+    # /app bind-mount keeps the worker's Python source in sync with
+    # the host checkout — no rebuild needed for code-only changes
+    # (the prebuilt image's site-packages still provide the
+    # third-party deps that the pip install baked in).
+    volumes:
+      - D:/work-ai/0401-lingclaw-to-langchain-demo/backend/data:/app/data
+      - D:/work-ai/0401-lingclaw-to-langchain-demo/backend:/app
+      # M33.5 (2026-06-26): bind-mount EasyOCR model cache out to the
+      # host. EasyOCR downloads ~80MB (en) + ~200MB (zh) detection/recog
+      # models into ``/root/.EasyOCR`` on first use. Without this
+      # mount, every container restart = re-download (the model is
+      # baked into the container's overlay FS, gone the moment the
+      # container exits). Mounting it to ``backend/data/easyocr`` makes
+      # the model survive restarts, image rebuilds, and lets other
+      # team members reuse the cache (just clone the dir).
+      - D:/work-ai/0401-lingclaw-to-langchain-demo/backend/data/easyocr:/root/.EasyOCR
+      # PPT / storage files: STORAGE_DIR=/storage inside container, needs host mapping
+      - D:/work-ai/0401-lingclaw-to-langchain-demo/storage:/storage
+    depends_on:
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+  es_data:
+  redis_data:
+  ollama_data:

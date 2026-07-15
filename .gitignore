@@ -1,0 +1,141 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.manifest
+*.spec
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env.local
+
+# Pytest
+**/.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Backend
+backend/__pycache__/
+backend/*.pyc
+backend/.env
+backend/.env.local
+backend/data/uploads/*
+backend/data/faiss/*.index
+backend/data/faiss/*.meta
+backend/*.log
+# Image generation storage (M22) — runtime files, .gitkeep tracks the dirs
+backend/storage/*
+!backend/storage/.gitkeep
+!backend/storage/generated_images/
+!backend/storage/generated_images/.gitkeep
+# Runtime-generated image artifacts (per-tenant / per-date subdirs)
+backend/storage/generated_images/**/*.png
+backend/storage/generated_images/**/*.jpg
+backend/storage/generated_images/**/*.jpeg
+backend/storage/generated_images/**/*.webp
+backend/storage/generated_images/**/*.gif
+
+# Root-level dev fixtures (KB upload smoke 测试文件)
+/*.docx
+/*.pdf
+
+# Frontend
+**/.next/
+frontend/node_modules/.package-lock.json
+frontend/.env.local
+frontend/.env.production
+frontend/tsconfig.tsbuildinfo
+
+# node_modules — covers root + 4 sub-projects (frontend / widget / electron-desktop / frontend-overview)
+**/node_modules/
+# Build artifacts (widget esbuild output + generic dist/build)
+**/dist/
+**/build/
+# Mypy cache (root + per-subdir)
+**/.mypy_cache/
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.sqlite3
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Next.js auto-generated next-env.d.ts (frontend 已 tracked;frontend-overview 未 tracked)
+/**/next-env.d.ts
+
+# Workflow API dumps (debug 产物,排查 zombie 时 curl 出来的临时快照)
+/wf*.json
+/wflist.json
+
+# Dev DB snapshots (backend/sql/*.sql) — see backend/sql/README.md
+# 5 MB per snapshot; regenerated on demand via scripts/dump_dev_db.py
+backend/sql/*.sql
+!backend/sql/.gitkeep
+!backend/sql/README.md
+
+# ============================================================================
+# 1.0 release cleanup — dev-time artifacts NOT shipped to GitHub
+# ============================================================================
+
+# Internal docs archive — M5-M33 历史 spec / plan / 抓取参考 / assessment,
+# 不适合公开仓库 (137 文件 + 内部评估)。本地保留,GitHub 不上传。
+# 想 push 给特定 reviewer 用 `git add -f <file>`。
+docs-internal/
+
+# .git directory backup (created by some git recovery tools, can be 800MB+)
+.gitback/
+
+# Root-level dev snapshots (类似 backend/sql/*.sql:dev DB dump + dev OpenAPI spec dump)
+# 这些都 dev-only,需用 scripts/dump_dev_db.py 或 curl /openapi.json 重新生成
+/ai_platform.sql
+/openapi.json
+/Modelfile.fix
+
+# Root imgs/ — 整个目录是 dev 调试产物(产品截图 / Snipaste / 测试 docx)不上 release
+/imgs/
+# 兼容兜底:deep imgs/ 路径(目前没有,防 future)
+**/imgs/Snipaste_*.jpg
+**/imgs/chat-*.docx
+
+# .claude/ 里 dev-only 的运行时残留 (.claude/skills/ 和 .claude/hooks/ 仍 tracked)
+/.claude/scheduled_tasks.lock
+/.claude/find-uvicorn.ps1
+
+# Claude Code 续作 session log(根目录会有)
+/2026-*-this-session-is-being-continued-from-a-previous-co*.txt
+
+# Misc dev-only root 临时文件
+/*.tmp
+/*.bak
+/*.orig
+/*.rej
+/coverage/
+/.nyc_output/
+

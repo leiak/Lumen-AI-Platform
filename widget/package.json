@@ -1,0 +1,29 @@
+{
+  "name": "@lumen-platform/chat-widget",
+  "version": "0.1.0",
+  "description": "Embeddable <lumen-chat> Web Component for the Lumen AI Platform external chat API",
+  "type": "module",
+  "main": "dist/lumen-chat.esm.js",
+  "browser": "dist/lumen-chat.js",
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "dev": "node esbuild.config.mjs --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check:size": "node scripts/check-bundle-size.mjs",
+    "ci": "npm run build && npm run check:size && npm test"
+  },
+  "dependencies": {
+    "lit": "^3.1.4",
+    "markdown-it": "^14.1.0",
+    "highlight.js": "^11.10.0"
+  },
+  "devDependencies": {
+    "@open-wc/testing": "^4.0.0",
+    "esbuild": "^0.20.2",
+    "jsdom": "^24.0.0",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  }
+}

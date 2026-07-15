@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <title>精准停车 Widget 调试页</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      max-width: 1280px;
+      margin: 24px auto;
+      padding: 0 20px;
+      color: #1f2937;
+    }
+    h1 { font-size: 1.4em; margin: 0 0 4px; }
+    .hint { color: #6b7280; font-size: 13px; margin: 0 0 16px; }
+    code { background: #f3f4f6; padding: 2px 6px; border-radius: 3px; font-size: 12px; }
+    /* 工具栏 */
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      padding: 12px;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      margin-bottom: 16px;
+    }
+    .toolbar label {
+      font-size: 12px;
+      color: #6b7280;
+      margin-right: 4px;
+    }
+    .toolbar select, .toolbar button {
+      font-size: 13px;
+      padding: 4px 10px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      background: white;
+      cursor: pointer;
+    }
+    .toolbar select:disabled { color: #9ca3af; cursor: not-allowed; }
+    .toolbar button:hover:not(:disabled) { background: #f3f4f6; }
+    .toolbar button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .toolbar .spacer { flex: 1; }
+    .toolbar .badge {
+      font-size: 11px;
+      color: #059669;
+      background: #d1fae5;
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+    /* 主体两列 */
+    .main {
+      display: grid;
+      grid-template-columns: minmax(360px, 60%) 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+    @media (max-width: 900px) {
+      .main { grid-template-columns: 1fr; }
+    }
+    .col { display: flex; flex-direction: column; gap: 12px; }
+    .panel-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: #374151;
+      margin: 0 0 8px;
+    }
+    /* 预设 prompt */
+    .prompts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .prompt-btn {
+      font-size: 12px;
+      padding: 6px 10px;
+      background: #eff6ff;
+      color: #1e40af;
+      border: 1px solid #bfdbfe;
+      border-radius: 14px;
+      cursor: pointer;
+    }
+    .prompt-btn:hover { background: #dbeafe; }
+    .prompt-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    /* 事件日志 */
+    pre.log {
+      background: #0f172a;
+      color: #f1f5f9;
+      padding: 12px;
+      border-radius: 6px;
+      max-height: 360px;
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.5;
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    pre.log .ev-ready { color: #34d399; }
+    pre.log .ev-message { color: #93c5fd; }
+    pre.log .ev-error { color: #fca5a5; }
+    pre.log .ev-close { color: #fcd34d; }
+    pre.log .ev-agent { color: #c4b5fd; }
+    .meta { font-size: 12px; color: #6b7280; }
+    /* 浮动按钮(widget 关闭后显示在右下角) */
+    .fab {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: #2563eb;
+      color: white;
+      border: none;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+      cursor: pointer;
+      font-size: 24px;
+      z-index: 9999;
+      display: none; /* 默认隐藏,widget 关闭后显示 */
+    }
+    .fab:hover { background: #1d4ed8; }
+  </style>
+</head>
+<body>
+  <h1>精准停车 Widget 调试页</h1>
+  <p class="hint">
+    后端 <code>11335</code> · Ollama <code>11434</code> · 外部应用 <code>lc_pub_dev_demo_only_replace_in_prod</code> (=精准停车Widget,允许 agent=3)。
+    浏览器开 <code>http://localhost:11337</code> 即可。
+  </p>
+
+  <div class="toolbar">
+    <label>Agent:</label>
+    <select id="agent-select" disabled><option>加载中…</option></select>
+    <label>Team:</label>
+    <select id="team-select" disabled><option>加载中…</option></select>
+    <label>主题:</label>
+    <select id="theme-select">
+      <option value="auto">auto</option>
+      <option value="light">light</option>
+      <option value="dark">dark</option>
+    </select>
+    <button id="clear-log-btn">清空日志</button>
+    <span class="spacer"></span>
+    <span id="ready-badge" class="badge" style="display:none">lc-ready ✓</span>
+  </div>
+
+  <div class="main">
+    <div class="col">
+      <p class="panel-title">Widget</p>
+      <script src="http://localhost:11335/static/widget/lumen-chat.js"></script>
+      <lumen-chat
+        id="chat"
+        server="http://localhost:11335"
+        app-key="lc_pub_dev_demo_only_replace_in_prod"
+        agent-id="3"
+        theme="auto"
+        title="精准停车助手"
+        welcome-message="👋 你好,我是精准停车助手,有什么可以帮你的?"
+        enable-agent-switch
+        enable-conversations>
+      </lumen-chat>
+    </div>
+    <div class="col">
+      <p class="panel-title">预设 prompt(点击即发)</p>
+      <div class="prompts" id="prompts">
+        <button class="prompt-btn" data-q="你能做什么?">你能做什么?</button>
+        <button class="prompt-btn" data-q="停车精度能达到多少?">停车精度能达到多少?</button>
+        <button class="prompt-btn" data-q="支持的车型有哪些?">支持的车型有哪些?</button>
+        <button class="prompt-btn" data-q="怎么开始一次停车?">怎么开始一次停车?</button>
+        <button class="prompt-btn" data-q="下雨天能识别车位线吗?">下雨天能识别车位线吗?</button>
+        <button class="prompt-btn" data-q="夜间停车效果如何?">夜间停车效果如何?</button>
+        <button class="prompt-btn" data-q="如果识别失败怎么办?">如果识别失败怎么办?</button>
+        <button class="prompt-btn" data-q="需要哪些硬件设备?">需要哪些硬件设备?</button>
+      </div>
+      <p class="panel-title" style="margin-top:8px">事件日志</p>
+      <pre class="log" id="log">(等待 lc-ready 事件…)</pre>
+      <p class="meta">
+        事件类型:<code>lc-ready</code> / <code>lc-message</code> / <code>lc-error</code> / <code>lc-close</code> / <code>lc-agent-change</code>
+      </p>
+    </div>
+  </div>
+
+  <!-- 浮动按钮:widget 关闭后出现,点击重新展开 -->
+  <button class="fab" id="fab" title="打开聊天">💬</button>
+  </div>
+
+  <script>
+    const log = document.getElementById("log");
+    const chat = document.getElementById("chat");
+    const agentSelect = document.getElementById("agent-select");
+    const teamSelect = document.getElementById("team-select");
+    const themeSelect = document.getElementById("theme-select");
+    const readyBadge = document.getElementById("ready-badge");
+    const clearLogBtn = document.getElementById("clear-log-btn");
+
+    const EV_CLASS = {
+      "lc-ready": "ev-ready",
+      "lc-message": "ev-message",
+      "lc-error": "ev-error",
+      "lc-close": "ev-close",
+      "lc-agent-change": "ev-agent",
+    };
+
+    function appendLog(ev, detail) {
+      const ts = new Date().toISOString().slice(11, 23); // HH:MM:SS.mmm
+      const cls = EV_CLASS[ev] || "";
+      const line = document.createElement("span");
+      line.className = cls;
+      line.textContent = `[${ts}] ${ev} ${JSON.stringify(detail ?? {})}`;
+      log.appendChild(line);
+      log.appendChild(document.createTextNode("\n"));
+      log.scrollTop = 0; // 新的在上面
+    }
+
+    // 监听 widget 事件
+    for (const ev of Object.keys(EV_CLASS)) {
+      chat.addEventListener(ev, (e) => appendLog(ev, e.detail));
+    }
+
+    // lc-ready: 填 Agent/Team Select
+    chat.addEventListener("lc-ready", (e) => {
+      const { allowed_agents = [], allowed_teams = [] } = e.detail || {};
+
+      agentSelect.innerHTML = '<option value="">— 选择 Agent —</option>';
+      allowed_agents.forEach((a) => {
+        const opt = document.createElement("option");
+        opt.value = String(a.id);
+        opt.textContent = `${a.name} (#${a.id})`;
+        opt.dataset.type = "agent";
+        agentSelect.appendChild(opt);
+      });
+      agentSelect.disabled = allowed_agents.length === 0;
+      if (allowed_agents.length === 0) {
+        agentSelect.innerHTML = '<option>(无)</option>';
+      }
+
+      teamSelect.innerHTML = '<option value="">— 选择 Team —</option>';
+      allowed_teams.forEach((t) => {
+        const opt = document.createElement("option");
+        opt.value = String(t.id);
+        opt.textContent = `${t.name} (#${t.id})`;
+        opt.dataset.type = "team";
+        teamSelect.appendChild(opt);
+      });
+      teamSelect.disabled = allowed_teams.length === 0;
+      if (allowed_teams.length === 0) {
+        teamSelect.innerHTML = '<option>(无)</option>';
+      }
+
+      readyBadge.style.display = "inline-block";
+      readyBadge.textContent = `lc-ready · ${allowed_agents.length} agents · ${allowed_teams.length} teams`;
+    });
+
+    // Agent/Team 切换
+    agentSelect.addEventListener("change", () => {
+      const opt = agentSelect.options[agentSelect.selectedIndex];
+      if (!opt || !opt.value) return;
+      chat.switchAgent(Number(opt.value), "agent");
+    });
+    teamSelect.addEventListener("change", () => {
+      const opt = teamSelect.options[teamSelect.selectedIndex];
+      if (!opt || !opt.value) return;
+      chat.switchAgent(Number(opt.value), "team");
+    });
+
+    // 主题切换
+    themeSelect.addEventListener("change", () => {
+      chat.setAttribute("theme", themeSelect.value);
+    });
+
+    // 预设 prompt
+    document.querySelectorAll(".prompt-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const q = btn.dataset.q;
+        if (!q) return;
+        chat.send(q);
+      });
+    });
+
+    // 清空日志
+    clearLogBtn.addEventListener("click", () => {
+      log.textContent = "(日志已清空)";
+    });
+
+    // —— 浮动按钮(widget × 关闭后,在右下角显示一个 💬 按钮重新展开) ——
+    const fab = document.getElementById("fab");
+    // widget 内部 × 按钮已把自身 display:none 并派发 lc-close。
+    // 我们只需在 lc-close 后显示浮动按钮;点浮动按钮恢复显示。
+    chat.addEventListener("lc-close", () => {
+      fab.style.display = "block";
+    });
+    fab.addEventListener("click", () => {
+      chat.style.display = ""; // 恢复 widget 显示(state 全部保留)
+      fab.style.display = "none";
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,84 @@
+# Web Framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+python-multipart==0.0.9
+
+# Database
+sqlalchemy==2.0.35
+pymysql==1.1.1
+alembic==1.13.3
+
+# LangChain & AI
+# M24 (2026-06-13): upgraded to LangChain 1.0.2 + LangGraph 1.0.2
+# (was 0.3.7 + 0.2.45, ~18 months behind mainline). LangChain 1.0
+# unifies the agent entry point (create_agent) and promotes
+# LangGraph to the official runtime foundation. Provider packages
+# (langchain-ollama) are now separate from the main distribution.
+langchain==1.0.2
+langchain-core==1.0.1
+langgraph==1.0.2
+langchain-openai==1.0.1
+# langchain-ollama replaces the deprecated langchain.chat_models.ChatOllama
+# (deprecated in 0.3.1, removed in 1.0). Also covers OllamaEmbeddings.
+langchain-ollama==1.0.0
+# langchain-community is no longer version-pinned at 1.0; the 0.3.x
+# line we were on stays compatible because 1.0's agent runtime moved
+# to langgraph. We keep it for vector store / retriever / tool
+# integrations that haven't yet moved to dedicated packages.
+langchain-community>=0.3.27,<1.0
+
+# Document Processing
+docling==2.24.0
+# M29.2 (2026-06-15): docx parser fallback chain when Docling drops numPr paragraphs.
+# Used by parsers/__init__.py:_parse_with_docx_fallback Level 2.
+python-docx==1.2.0
+
+# Vector Database
+pymilvus==2.4.8
+elasticsearch>=8.0.0,<9.0.0
+
+# Reranking
+jina>=0.9.0
+
+# BM25 + Chinese tokenization for hybrid retrieval
+rank-bm25==0.2.2
+jieba==0.42.1
+
+# Async Task Queue
+celery>=5.3.0
+redis>=5.0.0
+
+# Auth
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+Authlib==1.3.1
+
+# Utilities
+pydantic>=2.10.1,<3.0.0  # bumped 2026-06-16: mcp 1.2.0 requires >=2.10.1 (was 2.9.2, host Anaconda Python already had 2.10+ so no runtime impact)
+pydantic-settings>=2.6.1,<3.0.0  # bumped 2026-06-16: mcp 1.2.0 requires >=2.6.1 (was 2.5.2, host Anaconda Python already had 2.6+ so no runtime impact)
+python-dotenv==1.0.1
+httpx==0.27.2
+beautifulsoup4==4.12.3
+apscheduler==3.10.4
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.24.0
+
+# Web Search (chat feature toggles)
+ddgs>=9.0.0  # web search provider; replaces deprecated duckduckgo-search>=6.0.0
+
+# MCP protocol server SDK
+# Pinned to 1.2.0 (lowest with [cli] extra). Newer 1.x (1.27.0) pulls in
+# starlette 1.x / typer 0.20+ / pydantic 2.10+ which break fastapi 0.115.0
+# (needs starlette<0.39) and docling 2.24.0 (needs typer<0.13).
+mcp[cli]==1.2.0
+
+# P2: CodeNode sandbox
+RestrictedPython>=6.0
+
+# M30a: SSE streaming for /api/v1/workflows/{id}/stream
+sse-starlette==1.8.2
+
+# M33: Text2SQL 智能问数 — SQL 静态校验(只允许 SELECT/WITH,黑名单 DDL/DML)
+sqlparse==0.5.5

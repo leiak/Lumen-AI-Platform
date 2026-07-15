@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Local env
+.env
+.env.local
+.env.docker
+
+# Uploads and data
+data/uploads/*
+!data/uploads/.gitkeep
+data/faiss/*.index
+data/faiss/*.meta
+data/faiss/*.pkl
+
+# Logs
+*.log
+logs/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
