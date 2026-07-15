@@ -90,12 +90,29 @@ if (body.code === 200) {
 
 **基线**(M35, 2026-07-14):跑 `pytest -q` 验证。后端 **新增 ~97 个 M35 测试**(`tests/unit/test_tts_*.py` / `test_subtitle_*.py` / `test_playbook_*.py` / `test_m35_seed_default_models.py`),前端 **新增 13 个 M35 测试**(`frontend/__tests__/m35/{playbooks,tts,image-generation-playbook-integration}.test.tsx`)。dev DB 有 ~15 个 pre-existing fail(都是 test_mcp_local_server / test_skill_market_list_ordering / test_chat_stream_logs_call 等 dev DB pollution 引起),不是代码 bug。CI 上 pre-existing fail 数跟 dev DB 状态相关,跑前自己看一遍。
 
-## 9. 沟通风格
+## 9. 沟通风格 & 注释语言
 
-- **回复语言**:中文(代码、命令、文件内容保持英文;解释/状态/澄清用中文)。
+**回复语言**:中文(代码、命令、文件内容保持英文;解释/状态/澄清用中文)。
 - 状态更新、澄清、决策、解释 → 中文。
 - 不要为了简洁而省略错误信息 — 完整 dump 出来。
 - commit message: 中文。
+
+**代码注释语言策略**(2026-07-15 立):三档语言分层。
+
+| 层级 | 语言 | 例外 |
+|------|------|------|
+| **标识符**(变量名 / 类名 / 函数名 / 路由路径 / 文件名 / 表名 / schema 字段名) | **英文,硬性要求** | — |
+| **docstring / 文件顶部说明** | 英文 1 行摘要(给 IDE hover / Sphinx / autodoc)+ 中文详细说明 | 公开 SDK / OpenAPI 字段可全英 |
+| **行内注释**(`#` / `//` / `/* */`) | **中文为主**,侧重解释"为什么";命令行 flag / 第三方 API / 引用外部 spec 等机械说明保留英文 | — |
+
+**API 响应中面向用户的 `message` 字段用双语**(例: `"已保存 / Saved"`);log 日志关键路径可中文。
+
+**反面例子**(禁止):
+- 标识符用中文 — `def 计算总价():` / `let 用户列表 = ...`(破坏 pylance/tsc/grep/补全/codesearch)
+- commit message / PR 描述 / 文档标题 英文 — 必须中文
+- log 全部英文 — 关键路径要有中文便于排查(例:`log.error("视频合成失败 file=%s reason=%s", path, e)`)
+
+**回归**:旧文件**不回翻**(成本大、引入大量 diff 噪音);**M37 起**新增或大改的文件默认按本策略写,新加代码评审 / AI 生成时遵守。
 
 ## 10. Git 提交
 
