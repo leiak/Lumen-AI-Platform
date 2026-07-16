@@ -27,16 +27,25 @@ either local filesystem paths OR stringified id refs (``"42"`` →
 :func:`_resolve_asset_to_path` does the conversion at create time so
 ``_run_composition`` reads pre-resolved paths back from the row's
 ``params`` JSON.
+
+``source_images`` accepts the same shape (literal paths, pure-digit
+``GeneratedImage.id``, or proxy URLs ``/api/v1/image-generation/{id}/image``
+and ``/api/v1/stock-assets/{id}/image``). :func:`_resolve_image_paths`
+normalizes the list at create time so FFmpeg always reads pre-resolved
+local paths — the proxy URLs are Bearer-protected and would 401 if
+ffmpeg tried to fetch them in-process.
 """
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from datetime import datetime
 from typing import Any, List, Optional, Tuple
 
 from fastapi import BackgroundTasks
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from lumen_core.storage import save_bytes
@@ -89,6 +98,9 @@ class VideoComposeService:
         if not payload.source_images:
             return None, "empty_sources"
         try:
+            resolved_images = _resolve_image_paths(
+                db, tenant_id=tenant_id, paths=list(payload.source_images),
+            )
             resolved_audio = _resolve_asset_to_path(
                 db, tenant_id=tenant_id, kind="audio",
                 value=payload.audio_path,
@@ -101,7 +113,7 @@ class VideoComposeService:
             return None, e.tag
 
         params_snapshot: dict[str, Any] = {
-            "source_images": list(payload.source_images),
+            "source_images": list(resolved_images),
             "audio_path": resolved_audio,
             "subtitle_path": resolved_subtitle,
             "resolution": payload.resolution,
@@ -118,7 +130,7 @@ class VideoComposeService:
             playbook_id=payload.playbook_id,
             source_audio_id=payload.source_audio_id,
             source_subtitle_id=payload.source_subtitle_id,
-            source_images=list(payload.source_images),
+            source_images=list(resolved_images),
             resolution=payload.resolution,
             fps=payload.fps,
             params=params_snapshot,
@@ -157,6 +169,9 @@ class VideoComposeService:
         if not payload.source_images:
             return None, "empty_sources"
         try:
+            resolved_images = _resolve_image_paths(
+                db, tenant_id=tenant_id, paths=list(payload.source_images),
+            )
             resolved_audio = _resolve_asset_to_path(
                 db, tenant_id=tenant_id, kind="audio",
                 value=payload.audio_path,
@@ -169,7 +184,7 @@ class VideoComposeService:
             return None, e.tag
 
         params_snapshot: dict[str, Any] = {
-            "source_images": list(payload.source_images),
+            "source_images": list(resolved_images),
             "audio_path": resolved_audio,
             "subtitle_path": resolved_subtitle,
             "resolution": payload.resolution,
@@ -186,7 +201,7 @@ class VideoComposeService:
             playbook_id=payload.playbook_id,
             source_audio_id=payload.source_audio_id,
             source_subtitle_id=payload.source_subtitle_id,
-            source_images=list(payload.source_images),
+            source_images=list(resolved_images),
             resolution=payload.resolution,
             fps=payload.fps,
             params=params_snapshot,
@@ -352,6 +367,127 @@ def _resolve_asset_to_path(
         tmp_path.write_text(row.content, encoding="utf-8")
         return str(tmp_path)
     raise ValueError(f"unknown asset kind: {kind!r}")
+
+
+# 匹配 ``/api/v1/image-generation/{id}/image`` URL 形态(M22)。
+_IMAGE_GEN_URL_RE = re.compile(r"/image-generation/(\d+)/image")
+# 匹配 ``/api/v1/stock-assets/{id}/image`` URL 形态(M36.2.1)。
+_STOCK_URL_RE = re.compile(r"/stock-assets/(\d+)/image")
+
+
+def _resolve_image_gen_to_path(
+    db: Session, *, tenant_id: int, image_id: int,
+) -> Optional[str]:
+    """``image-generation`` / 纯数字 id 形态图像 → 磁盘绝对路径或 None。
+
+    找不到对应行返回 ``None``(由 caller 决定是否抛 ``AssetNotFound``)。
+    """
+    from lumen_core.config import settings
+    from lumen_models.image_generation import GeneratedImage
+    from pathlib import PurePosixPath
+
+    row = (
+        db.query(GeneratedImage)
+        .filter(
+            GeneratedImage.id == image_id,
+            GeneratedImage.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not row or not row.file_path:
+        return None
+    abs_path = settings.STORAGE_DIR / PurePosixPath(row.file_path)
+    return str(abs_path)
+
+
+def _resolve_stock_image_to_path(
+    db: Session, *, tenant_id: int, image_id: int,
+) -> Optional[str]:
+    """``stock-assets`` URL 形态图像 → 磁盘绝对路径或 None。
+
+    Stock 跟 image-generation 的可见性规则不同:``tenant_id=NULL`` 是
+    全局 builtin,所有租户都能看到;非 NULL 仅该租户可见。
+    """
+    from lumen_core.config import settings
+    from lumen_models.stock_asset import StockAsset
+    from pathlib import PurePosixPath
+
+    row = (
+        db.query(StockAsset)
+        .filter(
+            StockAsset.id == image_id,
+            or_(
+                StockAsset.tenant_id.is_(None),
+                StockAsset.tenant_id == tenant_id,
+            ),
+        )
+        .first()
+    )
+    if not row or not row.file_path:
+        return None
+    abs_path = settings.STORAGE_DIR / PurePosixPath(row.file_path)
+    return str(abs_path)
+
+
+def _resolve_image_to_local_path(
+    db: Session, tenant_id: int, value: str,
+) -> Optional[str]:
+    """把图像 entry 翻译成本地文件系统路径或返回 ``None``。
+
+    支持:
+    - ``/api/v1/image-generation/{id}/image`` → GeneratedImage DB lookup
+    - ``/api/v1/stock-assets/{id}/image`` → StockAsset DB lookup
+      (global builtin OR 当前租户)
+    - ``"{id}"`` 纯数字字串 → GeneratedImage DB lookup(legacy 兼容;
+      dashboard 直接粘贴 GeneratedImage id 也能用)
+    - 其他 → 原样返回(当作本地路径;workflow node 预解析过的也走这条)
+
+    找不到对应行时返回 ``None``,由 caller 决定是否抛
+    :class:`AssetNotFound`("image_not_found")。
+    """
+    s = (value or "").strip()
+    if not s:
+        return None
+
+    stock_match = _STOCK_URL_RE.search(s)
+    if stock_match:
+        return _resolve_stock_image_to_path(
+            db, tenant_id=tenant_id, image_id=int(stock_match.group(1)),
+        )
+
+    gen_match = _IMAGE_GEN_URL_RE.search(s)
+    if gen_match:
+        return _resolve_image_gen_to_path(
+            db, tenant_id=tenant_id, image_id=int(gen_match.group(1)),
+        )
+
+    if s.isdigit():
+        return _resolve_image_gen_to_path(
+            db, tenant_id=tenant_id, image_id=int(s),
+        )
+
+    # 字面路径 — 原样返回(caller 会验存在性)。
+    return s
+
+
+def _resolve_image_paths(
+    db: Session, tenant_id: int, paths: List[str],
+) -> List[str]:
+    """把整张 source_images 列表解析成本地路径。
+
+    空字符串跳过(跟 workflow node 的 `VariableTemplateParser.format`
+    把空模板替换成空串的场景对齐)。任何 URL 解析不到对应行时抛
+    :class:`AssetNotFound`("image_not_found")。
+    """
+    out: List[str] = []
+    for raw in paths:
+        if not raw or not str(raw).strip():
+            continue
+        local = _resolve_image_to_local_path(db, tenant_id, str(raw))
+        if local is None:
+            raise AssetNotFound("image_not_found")
+        out.append(local)
+    return out
 
 
 # ======================================================================

@@ -67,6 +67,7 @@ def create(
 
     Error tags mapped to HTTP status codes:
     - ``"empty_sources"`` → 422
+    - ``"image_not_found"`` → 404(M36.2.1 — image URL/id 找不到对应行)
     - ``"audio_not_found"`` → 404
     - ``"subtitle_not_found"`` → 404
     """
@@ -79,6 +80,12 @@ def create(
     )
     if err == "empty_sources":
         raise HTTPException(422, "source_images must contain at least one path")
+    if err == "image_not_found":
+        raise HTTPException(
+            404,
+            "image url/id did not resolve to a row in this tenant "
+            "(image-generation / stock-assets / 纯数字 id 都支持)",
+        )
     if err == "audio_not_found":
         raise HTTPException(404, "audio id did not resolve to a row in this tenant")
     if err == "subtitle_not_found":

@@ -32,8 +32,6 @@ Spec: docs-internal/superpowers/specs/m36-multimodal-foundation.md §4
 """
 from __future__ import annotations
 
-import re
-from pathlib import PurePosixPath
 from typing import List, Optional
 
 from pydantic import ConfigDict, Field
@@ -44,9 +42,11 @@ from lumen_core.workflow.template_parser import VariableTemplateParser
 from lumen_core.workflow.types import SegmentType
 from lumen_schemas.video import VideoComposeCreate
 
-
-# 匹配 ``/api/v1/image-generation/{id}/image`` 这种 URL 形态。
-_IMAGE_URL_RE = re.compile(r"/image-generation/(\d+)/image")
+# 解析 ``source_images`` 里每条 entry(URL / digit / 字面路径)→ 磁盘绝对
+# 路径,集中放在 service 层(同时支持 image-generation + M36.2.1 stock)。
+from lumen_services.video_compose_service import (
+    _resolve_image_to_local_path,
+)
 
 
 class VideoComposeNodeData(BaseNodeData):
@@ -212,48 +212,6 @@ class VideoComposeNode(BaseNode):
 # ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
-
-
-def _resolve_image_to_local_path(
-    db, tenant_id: int, value: str,
-) -> Optional[str]:
-    """把图像 entry 翻译成本地文件系统路径或 ``None``。
-
-    支持:
-    - ``/api/v1/image-generation/{id}/image`` → DB lookup file_path
-    - ``"{id}"`` 纯数字字串 → DB lookup file_path
-    - 其他 → 原样返回(当作本地路径)
-    """
-    s = (value or "").strip()
-    if not s:
-        return None
-
-    image_id: Optional[int] = None
-    m = _IMAGE_URL_RE.search(s)
-    if m:
-        image_id = int(m.group(1))
-    elif s.isdigit():
-        image_id = int(s)
-
-    if image_id is not None:
-        from lumen_models.image_generation import GeneratedImage
-        from lumen_core.config import settings
-
-        row = (
-            db.query(GeneratedImage)
-            .filter(
-                GeneratedImage.id == image_id,
-                GeneratedImage.tenant_id == tenant_id,
-            )
-            .first()
-        )
-        if not row or not row.file_path:
-            return None
-        abs_path = settings.STORAGE_DIR / PurePosixPath(row.file_path)
-        return str(abs_path)
-
-    # 字面路径 — 原样返回(caller 会验存在性)。
-    return s
 
 
 def _resolve_user_id(db, tenant_id: int) -> int:

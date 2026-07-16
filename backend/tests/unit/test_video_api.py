@@ -128,6 +128,23 @@ def test_post_videos_empty_sources_returns_422(client, tmp_user):
     assert "at least one" in r.json()["detail"].lower()
 
 
+def test_post_videos_image_url_not_found_returns_404(client, tmp_user):
+    """POST /videos/ with an unresolvable image URL → 404 'image_not_found' (M36.2.1)."""
+    headers = _auth(tmp_user)
+    r = client.post(
+        "/api/v1/videos/",
+        json={
+            "source_images": [
+                "/api/v1/image-generation/9999999/image",
+                "/api/v1/stock-assets/9999999/image",
+            ],
+        },
+        headers=headers,
+    )
+    assert r.status_code == 404
+    assert "image" in r.json()["detail"].lower()
+
+
 def test_get_video_detail_returns_404_for_missing(client, tmp_user):
     """Tenant isolation: bogus id → 404, not 200."""
     headers = _auth(tmp_user)
