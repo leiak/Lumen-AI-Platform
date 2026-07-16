@@ -81,3 +81,8 @@ router.include_router(playbooks.router)
 #   /api/v1/videos/*  (compose / list / detail / download / cancel / delete)
 from . import videos
 router.include_router(videos.router)
+
+# M36.2.1: 股票素材库(全局 builtin + per-tenant 上传,只读)
+#   /api/v1/stock-assets/*  (list / detail / image proxy with Bearer auth)
+from . import stock_assets
+router.include_router(stock_assets.router)

@@ -1236,6 +1236,19 @@ def ensure_playbooks_table() -> None:
     Base.metadata.create_all(bind=engine, tables=[Playbook.__table__])
 
 
+def ensure_stock_assets_table() -> None:
+    """M36.2.1: create ``stock_assets`` table if it doesn't exist.
+
+    Mirrors the M22/M35 ``ensure_*`` pattern — ``Base.metadata.create_all``
+    is idempotent. The composite index ``ix_stock_assets_category_created``
+    is declared in ``StockAsset.__table_args__`` and is created
+    automatically, keeping the gallery list query O(log n) on
+    ``(category, created_at DESC)``.
+    """
+    from lumen_models.stock_asset import StockAsset  # noqa
+    Base.metadata.create_all(bind=engine, tables=[StockAsset.__table__])
+
+
 def ensure_generated_videos_table() -> None:
     """M36: create ``generated_videos`` table if it doesn't exist.
 

@@ -26,12 +26,14 @@ import {
   Tag,
   Space,
 } from "antd";
-import { PlusOutlined, DeleteOutlined, AppstoreAddOutlined, AudioOutlined, FileTextOutlined } from "@ant-design/icons";
+import { PlusOutlined, DeleteOutlined, AppstoreAddOutlined, AudioOutlined, FileTextOutlined, PictureOutlined } from "@ant-design/icons";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { createVideoCompose } from "@/services/video";
 import { imageGenerationApi } from "@/services/image-generation";
+import { buildStockImageUrl } from "@/services/stock";
 import PlaybookSelect from "@/components/PlaybookSelect";
 import { ImagePickerModal } from "./ImagePickerModal";
+import { StockPickerModal } from "./StockPickerModal";
 import { AudioPickerModal } from "./AudioPickerModal";
 import { SubtitlePickerModal } from "./SubtitlePickerModal";
 
@@ -108,6 +110,12 @@ export function ComposeModal({ open, onClose }: ComposeModalProps) {
   const [audioPickerOpen, setAudioPickerOpen] = useState(false);
   const [subtitlePickerOpen, setSubtitlePickerOpen] = useState(false);
 
+  // M36.2.1: stock picker modal 状态。区别于 image picker,stock 走
+  // ``/api/v1/stock-assets/{id}/image`` 路径,前端用 ``fetch + blob``
+  // 模式预览(后端 Bearer 鉴权,见 MEMORY 2026-06-20)。
+  const [stockPickerOpen, setStockPickerOpen] = useState(false);
+  const [stockEditingIndex, setStockEditingIndex] = useState<number | null>(null);
+
   // 解析当前 source_images 里所有 image id(URL 形态)给 picker 初始高亮。
   const currentImageIds = sourceImages
     .map((s: string) => parseImageId(s))
@@ -149,6 +157,34 @@ export function ComposeModal({ open, onClose }: ComposeModalProps) {
     }
     setPickerEditingIndex(null);
   };
+
+  // Stock picker 选完后,把 id 转成 ``/api/v1/stock-assets/{id}/image``
+  // 代理 URL 写回 source_images。和 image picker 区分独立状态,避免
+  // 双方"编辑模式/追加模式"互相污染。
+  const handleStockPickerConfirm = (ids: number[]) => {
+    setStockPickerOpen(false);
+    const urls = ids.map(buildStockImageUrl);
+    const current = form.getFieldValue("source_images") ?? [];
+    if (stockEditingIndex !== null) {
+      const next = [...current];
+      next[stockEditingIndex] = urls[0] ?? "";
+      form.setFieldValue("source_images", next);
+    } else {
+      form.setFieldValue("source_images", [...current, ...urls]);
+    }
+    setStockEditingIndex(null);
+  };
+
+  // 同上,识别 stock 库 URL 形态(append 模式需要给 stock picker 初始高亮)。
+  function parseStockId(src: string): number | undefined {
+    const m = src.match(/\/api\/v1\/stock-assets\/(\d+)\/image/);
+    return m ? Number(m[1]) : undefined;
+  }
+
+  // 给 stock picker 的初始高亮 id 集合。
+  const currentStockIds = sourceImages
+    .map((s: string) => parseStockId(s))
+    .filter((x: number | undefined): x is number => x !== undefined);
 
   return (
     <>
@@ -245,6 +281,15 @@ export function ComposeModal({ open, onClose }: ComposeModalProps) {
                       }}
                     >
                       从我的图片库选
+                    </Button>
+                    <Button
+                      icon={<PictureOutlined />}
+                      onClick={() => {
+                        setStockEditingIndex(null);
+                        setStockPickerOpen(true);
+                      }}
+                    >
+                      从素材库选
                     </Button>
                   </Space>
                 </>
@@ -359,6 +404,15 @@ export function ComposeModal({ open, onClose }: ComposeModalProps) {
           setPickerEditingIndex(null);
         }}
         onConfirm={handlePickerConfirm}
+      />
+      <StockPickerModal
+        open={stockPickerOpen}
+        initialSelected={currentStockIds}
+        onClose={() => {
+          setStockPickerOpen(false);
+          setStockEditingIndex(null);
+        }}
+        onConfirm={handleStockPickerConfirm}
       />
       <AudioPickerModal
         open={audioPickerOpen}

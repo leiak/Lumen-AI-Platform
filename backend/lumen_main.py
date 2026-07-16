@@ -31,6 +31,7 @@ from lumen_core.database import (
     ensure_subtitles_table,  # M35
     ensure_playbooks_table,  # M35
     ensure_generated_videos_table,  # M36
+    ensure_stock_assets_table,  # M36.2.1
     ensure_llm_call_logs_table,  # M26
     ensure_embedding_call_logs_table,  # M27
     ensure_soft_delete_columns,  # M27
@@ -88,6 +89,7 @@ from lumen_models.image_generation import GeneratedImage  # M22: image generatio
 from lumen_models.tts import GeneratedAudio  # M35: TTS
 from lumen_models.subtitle import Subtitle  # M35: subtitle
 from lumen_models.playbook import Playbook  # M35: playbook
+from lumen_models.stock_asset import StockAsset  # M36.2.1: stock footage library
 from lumen_models.wx_publisher import (  # M32: 公众号助手
     WxAccount,
     WxTemplate,
@@ -209,6 +211,7 @@ async def startup_event():
     ensure_subtitles_table()  # M35: subtitle
     ensure_playbooks_table()  # M35: playbook
     ensure_generated_videos_table()  # M36: generated_videos (composition)
+    ensure_stock_assets_table()  # M36.2.1: stock_assets (video素材库)
     ensure_llm_call_logs_table()  # M26: llm_call_logs
     ensure_embedding_call_logs_table()  # M27: embedding_call_logs
     ensure_soft_delete_columns()  # M27: archived_at on llm + embedding logs
