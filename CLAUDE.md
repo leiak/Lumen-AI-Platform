@@ -88,7 +88,9 @@ if (body.code === 200) {
 | 后端类型检查 (mypy) | `cd backend && mypy lumen_api/ lumen_services/ lumen_models/ lumen_core/` |
 | 前端类型检查 (tsc) | `cd frontend && npx tsc --noEmit && cd ../widget && npx tsc --noEmit` |
 
-**基线**(M37, 2026-08-06):M37 新增后端 **46 个测试**(评测集、指标、runner、report、compare、Celery、API 集成)，前端 **34 个测试**(dataset/run 页面与 eval dashboard)。M37 专项后端评测测试 **71 passed**，前端 eval 测试 **34 passed**；全量套件中的既有失败仍需按 dev DB 状态区分，不能归因于 M37。
+**基线**(M37, 2026-08-06):后端 pytest **1472 passed / 8 skipped / 1 xfailed / 0 failed**(287s,4min47s),前端 vitest **492 passed / 1 failed**(530s,8min50s,2 个 test file 受牵连)。M37 专项:后端 **74 passed**(dataset/runner/metrics/judge/report/celery/compare/dataset-service 8 套件),前端 **34 passed**(datasets / runs / new-run / results / dashboard 5 套件)。
+
+**已知 1 个 pre-existing 失败**(`frontend/__tests__/workflow/llm-node-skill-picker.test.tsx:132`):测试期望 placeholder = `"从本租户已装技能中选择"`,但 `frontend/components/workflow/nodes/llm/Panel.tsx:164` 实际是 `"从已装技能中选择(最多5个)"` — 自 init commit 起就没匹配过,与 M37 评测无关。**忽略即可**,别在 M37 / 1.0 ship 时花时间修。
 
 ## 9. 沟通风格 & 注释语言
 
