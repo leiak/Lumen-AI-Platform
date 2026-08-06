@@ -52,6 +52,14 @@ from lumen_models.knowledge import KnowledgeBase  # noqa: E402
 logger = logging.getLogger("run_rag_eval")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
+# Windows 控制台默认 GBK codepage,输出里的 emoji / 中文会让 print() 抛
+# UnicodeEncodeError 直接打断 CLI(踩过:第一行「✅ EvalRun 已创建」就崩,
+# run 卡在 pending)。强制 stdout/stderr 走 UTF-8 + errors="replace",
+# 编码问题最多显示成 "?" 而不是中断评测。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+
 
 def parse_args() -> argparse.Namespace:
     """argparse 解析 --dataset-id / --config-json / --no-celery / --user-id。"""

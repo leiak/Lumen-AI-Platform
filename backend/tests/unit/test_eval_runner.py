@@ -478,3 +478,127 @@ def test_idempotent_skip_for_terminal_status(
         EvalRunResult.run_id == run.id
     ).count()
     assert n_results == 0
+
+
+# ---------------------------------------------------------------------------
+# 9. answer 生成 + judge(M37.2 补完 —— 此前 runner 一直落 answer=None)
+# ---------------------------------------------------------------------------
+
+
+class _FakeJudge:
+    """Mock JudgeClient —— call() 固定返 score=2。"""
+
+    def __init__(self, *args, **kwargs):
+        self.metric = kwargs.get("metric")
+
+    async def call(self, prompt, response_format):
+        return response_format(score=2, reasoning=f"mock {self.metric}")
+
+
+def test_answer_and_judge_metrics_written(db_session, dataset_with_items):
+    """judge_metrics 非空 → 生成 answer + 两个 judge 分数 + keyword_hit_rate 落库。"""
+    ds, items = dataset_with_items
+    # 给第一条 item 加关键词,验 keyword_hit_rate 走规则计算而非恒 0
+    items[0].answer_keywords = ["退货"]
+    db_session.commit()
+
+    run = _make_run(db_session, ds, config={
+        "name": "unit-judge",
+        "top_k": 5,
+        "rerank": False,
+        "search_weights": {},
+        "embedding_model_config_id": None,
+        "judge_model_config_id": 1,
+        "judge_metrics": ["faithfulness", "answer_relevancy"],
+    })
+
+    async def _fake_generate(db, **kwargs):
+        return "退货流程见 context #1"
+
+    with _patched_pipeline(),             patch("lumen_services.eval.runner.generate_answer", _fake_generate),             patch("lumen_services.eval.runner.JudgeClient", _FakeJudge):
+        asyncio.run(run_eval(db_session, run.id))
+
+    db_session.refresh(run)
+    assert run.status == "completed"
+
+    results = (
+        db_session.query(EvalRunResult)
+        .filter(EvalRunResult.run_id == run.id)
+        .order_by(EvalRunResult.item_id)
+        .all()
+    )
+    assert len(results) == 3
+    for r in results:
+        assert r.answer == "退货流程见 context #1"
+        assert r.answer_metrics["faithfulness"] == 2
+        assert r.answer_metrics["answer_relevancy"] == 2
+        assert len(r.llm_judge_calls) == 2
+    # 有关键词的那条命中 1/1;其余没关键词 → 0.0
+    assert results[0].answer_metrics["keyword_hit_rate"] == 1.0
+    assert results[1].answer_metrics["keyword_hit_rate"] == 0.0
+
+
+def test_empty_judge_metrics_skips_llm_entirely(db_session, dataset_with_items):
+    """judge_metrics=[] → 不生成 answer、不调 judge,answer_metrics 留 None。
+
+    纯检索调参场景(只想看 hit@K / MRR)不该付 LLM 成本。
+    """
+    ds, _ = dataset_with_items
+    run = _make_run(db_session, ds)  # 默认 config 的 judge_metrics 是 []
+
+    called = {"generate": 0}
+
+    async def _tracking_generate(db, **kwargs):
+        called["generate"] += 1
+        return "should not happen"
+
+    with _patched_pipeline(),             patch("lumen_services.eval.runner.generate_answer", _tracking_generate):
+        asyncio.run(run_eval(db_session, run.id))
+
+    assert called["generate"] == 0
+    results = db_session.query(EvalRunResult).filter(
+        EvalRunResult.run_id == run.id
+    ).all()
+    assert len(results) == 3
+    for r in results:
+        assert r.answer is None
+        assert r.answer_metrics is None
+
+
+def test_answer_generation_failure_keeps_run_alive(db_session, dataset_with_items):
+    """answer 生成返 None(模型挂)→ judge 跳过,但 run 照常 completed。"""
+    ds, _ = dataset_with_items
+    run = _make_run(db_session, ds, config={
+        "name": "unit-judge-fail",
+        "top_k": 5,
+        "rerank": False,
+        "search_weights": {},
+        "embedding_model_config_id": None,
+        "judge_model_config_id": 1,
+        "judge_metrics": ["faithfulness"],
+    })
+
+    async def _failed_generate(db, **kwargs):
+        return None
+
+    judge_called = {"n": 0}
+
+    class _CountingJudge(_FakeJudge):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            judge_called["n"] += 1
+
+    with _patched_pipeline(),             patch("lumen_services.eval.runner.generate_answer", _failed_generate),             patch("lumen_services.eval.runner.JudgeClient", _CountingJudge):
+        asyncio.run(run_eval(db_session, run.id))
+
+    db_session.refresh(run)
+    assert run.status == "completed"
+    assert judge_called["n"] == 0  # 没答案不浪费 judge 调用
+    results = db_session.query(EvalRunResult).filter(
+        EvalRunResult.run_id == run.id
+    ).all()
+    for r in results:
+        assert r.answer is None
+        # 规则指标仍落库,让报告能区分「没跑」和「跑了但没命中」
+        assert r.answer_metrics == {"keyword_hit_rate": 0.0}
+        assert r.llm_judge_calls is None

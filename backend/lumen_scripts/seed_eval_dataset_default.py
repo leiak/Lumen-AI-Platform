@@ -77,6 +77,12 @@ from lumen_models.knowledge import Document, KnowledgeBase  # noqa: E402
 # 这些 query 是与领域无关的「RAG 行为测试」query —— 用来验证 retrieval /
 # answer 指标在 dev DB 上的「端到端是否跑通」,不依赖具体业务知识。
 #
+# 每条带 expected_answer(参考答案)+ answer_keywords(关键词命中率用):
+#   - expected_answer 供人工 review / 未来 answer-similarity 指标用
+#   - answer_keywords 直接喂 metrics.keyword_hit_rate(substring 匹配),
+#     所以只挑「答对了几乎必然出现」的词,避免假阴性
+#   - out_of_scope 类的关键词是**拒答信号**词 —— 命中率越高说明拒答越干净
+#
 # 类说明(跟 lumen_schemas.eval_dataset.EvalDatasetCategory 字面对应):
 #   factual         —— 期望单文档直接给答案
 #   reasoning       —— 期望多段解释,语义相似度
@@ -85,44 +91,166 @@ from lumen_models.knowledge import Document, KnowledgeBase  # noqa: E402
 #   out_of_scope    —— KB 不覆盖,期望拒答 / refusal 信号
 QUERIES_BY_CATEGORY = {
     "factual": [
-        "简要介绍这个知识库的主题",
-        "文档的主要分类有哪些",
-        "文档的创建时间在哪个区间",
-        "这个知识库用什么 embedding 模型",
-        "系统的核心功能是什么",
-        "知识库支持哪些文档格式",
+        {
+            "query": "简要介绍这个知识库的主题",
+            "expected_answer": "该知识库围绕一个主题域收录文档,内容覆盖其核心概念与使用说明。",
+            "answer_keywords": ["知识库"],
+        },
+        {
+            "query": "文档的主要分类有哪些",
+            "expected_answer": "文档按主题/用途划分为若干类别,每篇文档归属一个分类。",
+            "answer_keywords": ["分类"],
+        },
+        {
+            "query": "文档的创建时间在哪个区间",
+            "expected_answer": "文档创建时间集中在知识库建立之后的一段时间区间内。",
+            "answer_keywords": ["时间"],
+        },
+        {
+            "query": "这个知识库用什么 embedding 模型",
+            "expected_answer": "知识库在创建时锁定了一个 embedding 模型配置,所有分块都用它向量化。",
+            "answer_keywords": ["embedding", "模型"],
+        },
+        {
+            "query": "系统的核心功能是什么",
+            "expected_answer": "核心功能是把文档解析分块、向量化入库,并在提问时检索相关片段生成答案。",
+            "answer_keywords": ["检索"],
+        },
+        {
+            "query": "知识库支持哪些文档格式",
+            "expected_answer": "支持常见的文本类格式,例如 PDF、Word(docx)、Markdown、纯文本等。",
+            "answer_keywords": ["格式"],
+        },
     ],
     "reasoning": [
-        "为什么文档需要分块处理",
-        "请解释 chunk_size 和 overlap 的取舍",
-        "为什么要做检索增强生成(RAG)",
-        "为什么 embedding 模型影响检索质量",
-        "解释 BM25 和向量检索的互补关系",
-        "为什么需要 rerank 步骤",
+        {
+            "query": "为什么文档需要分块处理",
+            "expected_answer": "因为模型上下文长度有限,且整篇文档语义过杂;分块能让检索定位到真正相关的片段。",
+            "answer_keywords": ["分块", "上下文"],
+        },
+        {
+            "query": "请解释 chunk_size 和 overlap 的取舍",
+            "expected_answer": "chunk_size 越大上下文越完整但检索越不精准;overlap 用来避免句子被切断丢失语义,代价是存储和计算冗余。",
+            "answer_keywords": ["chunk_size"],
+        },
+        {
+            "query": "为什么要做检索增强生成(RAG)",
+            "expected_answer": "让模型基于检索到的真实文档作答,减少幻觉,并且无需重新训练就能接入最新的私有知识。",
+            "answer_keywords": ["检索"],
+        },
+        {
+            "query": "为什么 embedding 模型影响检索质量",
+            "expected_answer": "embedding 决定了文本在向量空间的位置,语义表达能力不足会让相关文档的相似度算不准,直接拉低召回。",
+            "answer_keywords": ["embedding"],
+        },
+        {
+            "query": "解释 BM25 和向量检索的互补关系",
+            "expected_answer": "BM25 擅长关键词精确匹配,向量检索擅长语义近似;混合检索能同时覆盖专有名词命中和同义表达。",
+            "answer_keywords": ["BM25"],
+        },
+        {
+            "query": "为什么需要 rerank 步骤",
+            "expected_answer": "初筛召回的候选排序较粗,rerank 用更强的模型对少量候选精排,把最相关的片段顶到前面。",
+            "answer_keywords": ["rerank"],
+        },
     ],
     "multi_hop": [
-        "把文档主题和 embedding 模型选型联系起来总结",
-        "对比分块策略和检索召回率的因果链",
-        "解释 rerank 与上下文长度限制的关系",
-        "把模型配置和 prompt 模板的关系串联起来",
-        "综合说明检索、rerank、生成三步如何协同",
-        "把知识库治理、版本控制和回滚串成一条因果链",
+        {
+            "query": "把文档主题和 embedding 模型选型联系起来总结",
+            "expected_answer": "文档所属领域决定了词汇分布,选 embedding 模型时要匹配该领域和语种,否则向量表达失真影响检索。",
+            "answer_keywords": ["embedding"],
+        },
+        {
+            "query": "对比分块策略和检索召回率的因果链",
+            "expected_answer": "分块粒度决定每个向量承载的语义量,粒度过粗会稀释相关信号、过细会切断上下文,两者都会降低召回率。",
+            "answer_keywords": ["召回"],
+        },
+        {
+            "query": "解释 rerank 与上下文长度限制的关系",
+            "expected_answer": "上下文长度限制了能塞进 prompt 的片段数量,rerank 保证在有限名额里放进最相关的片段。",
+            "answer_keywords": ["rerank", "上下文"],
+        },
+        {
+            "query": "把模型配置和 prompt 模板的关系串联起来",
+            "expected_answer": "模型配置决定能力与上下文预算,prompt 模板要据此裁剪上下文条数和指令长度,两者需配套调整。",
+            "answer_keywords": ["prompt"],
+        },
+        {
+            "query": "综合说明检索、rerank、生成三步如何协同",
+            "expected_answer": "检索先粗筛出候选片段,rerank 对候选精排取前几条,生成阶段只依据这些片段作答。",
+            "answer_keywords": ["检索", "生成"],
+        },
+        {
+            "query": "把知识库治理、版本控制和回滚串成一条因果链",
+            "expected_answer": "治理规范决定文档何时更新,版本控制记录每次变更,出现质量回退时可回滚到上一个可用版本。",
+            "answer_keywords": ["版本"],
+        },
     ],
     "keyword_heavy": [
-        "列出 RAG 评估涉及的所有指标名称",
-        "列出支持的所有模型 provider 关键字",
-        "列出 chunking 的关键参数名",
-        "列出检索指标的关键计算公式名",
-        "列出系统中常见的英文错误码关键词",
-        "列出知识库的所有可见性过滤关键字",
+        {
+            "query": "列出 RAG 评估涉及的所有指标名称",
+            "expected_answer": "检索指标有 Hit@K、MRR、NDCG@K、Recall@K;答案指标有 faithfulness、answer_relevancy、keyword_hit_rate。",
+            "answer_keywords": ["MRR", "NDCG"],
+        },
+        {
+            "query": "列出支持的所有模型 provider 关键字",
+            "expected_answer": "常见 provider 关键字包括 ollama、openai 等。",
+            "answer_keywords": ["ollama"],
+        },
+        {
+            "query": "列出 chunking 的关键参数名",
+            "expected_answer": "关键参数是 chunk_size 和 chunk_overlap(以及分隔符 separators)。",
+            "answer_keywords": ["chunk_size", "overlap"],
+        },
+        {
+            "query": "列出检索指标的关键计算公式名",
+            "expected_answer": "Hit@K、MRR(平均倒数排名)、NDCG@K(归一化折损累计增益)、Recall@K。",
+            "answer_keywords": ["MRR"],
+        },
+        {
+            "query": "列出系统中常见的英文错误码关键词",
+            "expected_answer": "常见的有 not_found、unauthorized、forbidden、validation_error、internal_error。",
+            "answer_keywords": ["not_found"],
+        },
+        {
+            "query": "列出知识库的所有可见性过滤关键字",
+            "expected_answer": "按 tenant_id 做租户隔离,按 kb_id 做知识库隔离;tenant_id 为空表示全局可见。",
+            "answer_keywords": ["tenant_id", "kb_id"],
+        },
     ],
+    # out_of_scope 的 expected_answer 就是拒答本身 —— answer_keywords 挑
+    # 拒答信号词,keyword_hit_rate 高 = 模型老实拒答,低 = 开始瞎编。
     "out_of_scope": [
-        "今天北京天气怎么样",
-        "请推荐一家上海的本帮菜餐厅",
-        "计算 (1+2+3+...+100)",
-        "写一首七言绝句",
-        "翻译一句话成英文",
-        "用 Python 写个快速排序",
+        {
+            "query": "今天北京天气怎么样",
+            "expected_answer": "根据知识库内容无法回答该问题。",
+            "answer_keywords": ["无法回答"],
+        },
+        {
+            "query": "请推荐一家上海的本帮菜餐厅",
+            "expected_answer": "根据知识库内容无法回答该问题。",
+            "answer_keywords": ["无法回答"],
+        },
+        {
+            "query": "计算 (1+2+3+...+100)",
+            "expected_answer": "根据知识库内容无法回答该问题。",
+            "answer_keywords": ["无法回答"],
+        },
+        {
+            "query": "写一首七言绝句",
+            "expected_answer": "根据知识库内容无法回答该问题。",
+            "answer_keywords": ["无法回答"],
+        },
+        {
+            "query": "翻译一句话成英文",
+            "expected_answer": "根据知识库内容无法回答该问题。",
+            "answer_keywords": ["无法回答"],
+        },
+        {
+            "query": "用 Python 写个快速排序",
+            "expected_answer": "根据知识库内容无法回答该问题。",
+            "answer_keywords": ["无法回答"],
+        },
     ],
 }
 
@@ -210,10 +338,20 @@ def upsert_item(
     query: str,
     category: str,
     expected_doc_ids: List[int],
+    expected_answer: Optional[str],
+    answer_keywords: Optional[List[str]],
     difficulty: str,
     notes: str,
-) -> None:
-    """按 (dataset_id, query) 去重;新 query 才 INSERT。"""
+) -> str:
+    """按 (dataset_id, query) 去重;新 query INSERT,老 query 补答案字段。
+
+    Returns:
+        ``"inserted"`` / ``"updated"`` / ``"skipped"`` —— 供 main() 统计。
+
+    为什么老行也要动:M37.1 首版 seed 写进去的 30 条 ``expected_answer``
+    和 ``answer_keywords`` 全是 NULL,导致 M37.2 的 keyword_hit_rate 恒 0。
+    这里只在字段为空时补,已经人工编辑过的 item 不覆盖。
+    """
     existing = (
         db.query(EvalDatasetItem)
         .filter(EvalDatasetItem.dataset_id == dataset_id)
@@ -221,19 +359,27 @@ def upsert_item(
         .first()
     )
     if existing:
-        return
+        changed = False
+        if existing.expected_answer is None and expected_answer:
+            existing.expected_answer = expected_answer  # type: ignore[assignment]
+            changed = True
+        if not existing.answer_keywords and answer_keywords:
+            existing.answer_keywords = answer_keywords  # type: ignore[assignment]
+            changed = True
+        return "updated" if changed else "skipped"
     db.add(
         EvalDatasetItem(
             dataset_id=dataset_id,
             query=query,
             expected_doc_ids=expected_doc_ids,
-            expected_answer=None,
-            answer_keywords=None,
+            expected_answer=expected_answer,
+            answer_keywords=answer_keywords,
             category=category,
             difficulty=difficulty,
             notes=notes,
         )
     )
+    return "inserted"
 
 
 def main() -> None:
@@ -277,11 +423,12 @@ def main() -> None:
         }
 
         total_items = 0
+        stats = {"inserted": 0, "updated": 0, "skipped": 0}
         # 轮询 doc_ids 给每条 item 分 expected_doc_ids —— 每条 2 个 doc,最后
         # 一类(out_of_scope)空 list,期望 RAG 拒答
         idx = 0
-        for category, queries in QUERIES_BY_CATEGORY.items():
-            for q in queries:
+        for category, entries in QUERIES_BY_CATEGORY.items():
+            for entry in entries:
                 if category == "out_of_scope":
                     # out_of_scope 期望 KB 不命中 → 空 doc ids,answer-quality
                     # 应检 refusal
@@ -292,15 +439,18 @@ def main() -> None:
                     b = doc_ids[(idx + 1) % len(doc_ids)]
                     assign_docs = [a, b]
                     idx += 2
-                upsert_item(
+                outcome = upsert_item(
                     db,
                     dataset_id=ds.id,
-                    query=q,
+                    query=entry["query"],  # type: ignore[arg-type]
                     category=category,
                     expected_doc_ids=assign_docs,
+                    expected_answer=entry.get("expected_answer"),  # type: ignore[arg-type]
+                    answer_keywords=entry.get("answer_keywords"),  # type: ignore[arg-type]
                     difficulty=difficulty_map[category],
                     notes=f"M37.1 demo seed — category={category}",
                 )
+                stats[outcome] += 1
                 total_items += 1
 
         db.commit()
@@ -312,7 +462,9 @@ def main() -> None:
             .scalar()
         )
         print(
-            f"OK — committed {total_items} new items; dataset #{ds.id} now "
+            f"OK — {stats['inserted']} inserted / {stats['updated']} updated "
+            f"(补 expected_answer + answer_keywords) / {stats['skipped']} "
+            f"unchanged,共处理 {total_items} 条;dataset #{ds.id} now "
             f"has {item_count} items total. Verify with:\n"
             f"  curl -H 'Authorization: Bearer <token>' "
             f"http://localhost:11335/api/v1/eval/datasets/{ds.id}"

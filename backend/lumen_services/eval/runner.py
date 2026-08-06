@@ -12,7 +12,8 @@
    - set EmbeddingCallContext(call_type="eval_retrieval", extra=eval_run_id)
    - pipeline.search(query, k=top_k, rerank=rerank, search_weights=...)
    - 算检索指标(hit_at_5/10, mrr, ndcg_at_10, recall_at_10)
-   - (可选)调 LLM 生成 answer + judge 算答案指标(T11 JudgeClient)
+   - (judge_metrics 非空时)调 LLM 生成 answer + judge 算答案指标
+     (T11 JudgeClient + answer.generate_answer)
    - INSERT eval_run_results + commit(per-item commit,崩了能续跑)
    - 每 10% 更新 eval_runs.completed_items(前端轮询)
 5. 全部完成 → 调 ``report.generate()`` → 写 metrics_json + report_markdown
@@ -64,7 +65,9 @@ from lumen_services.eval.judge import (
 from lumen_services.eval.metrics import (
     faithfulness_prompt,
     answer_relevancy_prompt,
+    keyword_hit_rate,
 )
+from lumen_services.eval.answer import generate_answer
 from lumen_services.retrieval.pipeline import get_retrieval_pipeline
 
 logger = logging.getLogger(__name__)
@@ -178,6 +181,7 @@ async def _execute(db: Session, run: EvalRun) -> None:
     rerank = bool(config.get("rerank", True))
     search_weights = config.get("search_weights") or {}
     judge_metrics: List[str] = config.get("judge_metrics", []) or []
+    judge_model_config_id = config.get("judge_model_config_id")
     trace_id = run.trace_id or str(uuid.uuid4())
     if run.trace_id != trace_id:
         run.trace_id = trace_id  # type: ignore[assignment]
@@ -198,6 +202,7 @@ async def _execute(db: Session, run: EvalRun) -> None:
                 rerank=rerank,
                 search_weights=search_weights,
                 judge_metrics=judge_metrics,
+                judge_model_config_id=judge_model_config_id,
                 trace_id=str(trace_id),  # type: ignore[arg-type]
             )
             run.completed_items += 1  # type: ignore[assignment]
@@ -241,6 +246,7 @@ async def _process_one_item(
     rerank: bool,
     search_weights: Dict[str, float],
     judge_metrics: List[str],
+    judge_model_config_id: Optional[int],
     trace_id: str,
 ) -> None:
     """处理单条 item:检索 + 指标 + (可选)answer + judge + 落库。
@@ -266,12 +272,16 @@ async def _process_one_item(
         "recall_at_10": recall_at_k(retrieved_doc_ids, expected_doc_ids, 10),
     }
 
-    # 3. (可选)answer 生成 + judge —— 暂未实现 answer 拼装(留 T14/T15),
-    #    落到 eval_run_results.answer=None + answer_metrics=None,
-    #    仅靠检索指标给生产 KB 调参做参考。
-    answer: Optional[str] = None
-    answer_metrics: Optional[Dict[str, Any]] = None
-    llm_judge_calls: Optional[List[Dict[str, Any]]] = None
+    # 3. answer 生成 + judge —— judge_metrics 空或没配 judge 模型时整段跳过,
+    #    落库 answer=None + answer_metrics=None,只留检索指标。
+    answer, answer_metrics, llm_judge_calls = await _score_answer(
+        db=db,
+        run=run,
+        item=item,
+        contexts=contexts,
+        judge_metrics=judge_metrics,
+        judge_model_config_id=judge_model_config_id,
+    )
 
     # 4. 截断 contexts(≤ 200 字/个,plan §4.2 限)
     truncated_contexts = _truncate_contexts(contexts, max_chars=200)
@@ -294,8 +304,96 @@ async def _process_one_item(
 
 
 # ---------------------------------------------------------------------------
+# answer 生成 + judge
+# ---------------------------------------------------------------------------
+
+
+async def _score_answer(
+    *,
+    db: Session,
+    run: EvalRun,
+    item: EvalDatasetItem,
+    contexts: List[str],
+    judge_metrics: List[str],
+    judge_model_config_id: Optional[int],
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[List[Dict[str, Any]]]]:
+    """生成答案 + 算答案指标,返回 (answer, answer_metrics, llm_judge_calls)。
+
+    ``judge_metrics`` 空 或 ``judge_model_config_id`` 缺失 → 三元组全 None,
+    调用方落库时等价于「本次只跑检索指标」(纯检索调参不必付 LLM 成本)。
+    答案生成失败(模型挂 / 配置删了)→ answer=None,judge 也跳过,但
+    keyword_hit_rate 仍按空答案算 0.0 落库,让报告能区分「没跑」和
+    「跑了但没命中」。
+    """
+    if judge_model_config_id is None or not judge_metrics:
+        return None, None, None
+
+    answer = await generate_answer(
+        db,
+        query=str(item.query),
+        contexts=contexts,
+        model_config_id=int(judge_model_config_id),
+        eval_run_id=int(run.id),  # type: ignore[arg-type]
+        item_id=int(item.id),  # type: ignore[arg-type]
+        user_id=run.created_by,  # type: ignore[arg-type]
+    )
+
+    metrics: Dict[str, Any] = {
+        "keyword_hit_rate": keyword_hit_rate(
+            answer or "", list(item.answer_keywords or [])
+        ),
+    }
+    judge_calls: List[Dict[str, Any]] = []
+
+    if answer is None:
+        # 没答案就没什么可 judge 的,省掉 2 次 LLM 调用
+        return None, metrics, None
+
+    if "faithfulness" in judge_metrics:
+        client: JudgeClient[FaithfulnessScore] = JudgeClient(
+            db,
+            model_config_id=int(judge_model_config_id),
+            eval_run_id=int(run.id),  # type: ignore[arg-type]
+            metric="faithfulness",
+            user_id=run.created_by,  # type: ignore[arg-type]
+        )
+        score = await client.call(
+            faithfulness_prompt(answer, contexts, query=str(item.query)),
+            FaithfulnessScore,
+        )
+        metrics["faithfulness"] = score.score
+        judge_calls.append({
+            "metric": "faithfulness",
+            "score": score.score,
+            "reasoning": score.reasoning,
+        })
+
+    if "answer_relevancy" in judge_metrics:
+        rel_client: JudgeClient[AnswerRelevancyScore] = JudgeClient(
+            db,
+            model_config_id=int(judge_model_config_id),
+            eval_run_id=int(run.id),  # type: ignore[arg-type]
+            metric="answer_relevancy",
+            user_id=run.created_by,  # type: ignore[arg-type]
+        )
+        rel_score = await rel_client.call(
+            answer_relevancy_prompt(answer, str(item.query), contexts=contexts),
+            AnswerRelevancyScore,
+        )
+        metrics["answer_relevancy"] = rel_score.score
+        judge_calls.append({
+            "metric": "answer_relevancy",
+            "score": rel_score.score,
+            "reasoning": rel_score.reasoning,
+        })
+
+    return answer, metrics, judge_calls or None
+
+
+# ---------------------------------------------------------------------------
 # 检索 —— 跟 agent_rag._retrieve_kb_chunks 同款,改 call_type=eval_retrieval
 # ---------------------------------------------------------------------------
+
 
 
 def _do_retrieval(
