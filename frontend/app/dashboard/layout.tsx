@@ -102,6 +102,14 @@ const menuItems = [
     name: "智能问数",
     icon: <DatabaseOutlined />,
   },
+  // M37.1 RAG 评测 — placed between 智能问数 and 记忆管理 (数据 / 业务
+  // 评测聚集,运营 + 算法都用得到)。未来 M37.3 看板做完后,这一项会
+  // 加 children 列出「数据集 / 运行 / 报告」三个子页。
+  {
+    path: "/dashboard/eval/datasets",
+    name: "RAG 评测",
+    icon: <FileTextOutlined />,
+  },
   {
     path: "/dashboard/memory",
     name: "记忆管理",

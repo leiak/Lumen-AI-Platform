@@ -21,6 +21,14 @@ class LLMCallLog(BaseModel):
     call_id = Column(String(36), unique=True, nullable=False, index=True)
     parent_call_id = Column(String(36), nullable=True, index=True)
     trace_id = Column(String(36), nullable=False, index=True)
+    # call_type values:
+    #   chat              - 普通 chat / widget chat stream
+    #   agent_team        - AgentTeam manager_decision / member reply
+    #   workflow.llm      - Workflow LLM 节点
+    #   workflow.classifier - Workflow Question Classifier 节点
+    #   workflow.extractor - Workflow Parameter Extractor 节点
+    #   image_generation  - M22 图像生成 prompt
+    #   eval_judge        - M37.2 RAG 评测 judge(extra 里有 eval_run_id / eval_metric)
     call_type = Column(String(64), nullable=False)
     call_index = Column(Integer, default=0, nullable=False)
 

@@ -1,7 +1,7 @@
 """M30d — node-types metadata API tests.
 
 Verifies the /api/v1/workflow/node-types endpoint returns a list of
-metadata blocks covering all 19 registered node types, each with
+metadata blocks covering all 22 registered node types, each with
 the expected shape (type/label/category/inputs/outputs).
 """
 import pytest
@@ -13,9 +13,9 @@ from lumen_core.workflow.node_types_metadata import (
 )
 
 
-def test_all_node_types_metadata_returns_19_unique_types():
+def test_all_node_types_metadata_returns_22_unique_types():
     items = all_node_types_metadata()
-    assert len(items) == 19, f"expected 19, got {len(items)}: {[i.type for i in items]}"
+    assert len(items) == 22, f"expected 22, got {len(items)}: {[i.type for i in items]}"
     types = [i.type for i in items]
     # No duplicates.
     assert len(set(types)) == len(types)
@@ -63,7 +63,7 @@ def test_metadata_endpoints_via_testclient():
     body = res.json()
     assert body["code"] == 200
     items = body["data"]
-    assert len(items) >= 19
+    assert len(items) >= 22
     # Pick a few expected entries.
     types = {i["type"] for i in items}
     assert "input" in types

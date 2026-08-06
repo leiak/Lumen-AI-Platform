@@ -44,6 +44,18 @@ from lumen_services.model_loader import LoggingChatModel
 
 
 def _make_ctx(call_type: str = "chat", **overrides) -> LLMCallContext:
+    # 拿一个真实存在的 conversation_id 防止 FK 约束失败(dev DB 上硬编码 id=42 容易过期)。
+    # 如果 conversation 表是空的,降级用 None,LLMCallLoggingService 应该也能正常落库(列 NULL)。
+    from lumen_core.database import SessionLocal
+    from lumen_models.chat import Conversation
+    conv_id = None
+    db = SessionLocal()
+    try:
+        first_conv = db.query(Conversation).order_by(Conversation.id.asc()).first()
+        if first_conv is not None:
+            conv_id = first_conv.id
+    finally:
+        db.close()
     base = dict(
         call_id=str(uuid.uuid4()),
         trace_id=str(uuid.uuid4()),
@@ -53,7 +65,7 @@ def _make_ctx(call_type: str = "chat", **overrides) -> LLMCallContext:
         tenant_id=1,
         user_id=1,
         username="tester",
-        conversation_id=42,
+        conversation_id=conv_id,
         client_app="dashboard",
     )
     base.update(overrides)

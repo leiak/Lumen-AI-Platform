@@ -4,11 +4,13 @@ from lumen_core.workflow.node_mapping import (
 )
 
 
-def test_all_nineteen_business_types_registered():
+def test_all_business_types_registered():
+    # 22 个类型(基础 12 + P1/P2 共 7 + M35/M36 加 3: tts / playbook_inject / video_compose)
     expected = {"input", "agent", "code", "llm", "condition", "output",
                 "parallel", "fan_out", "fan_in", "http", "start", "end", "tool",
                 "knowledge_retrieval", "template_transform", "parameter_extractor",
-                "question_classifier", "variable_assigner", "variable_aggregator"}
+                "question_classifier", "variable_assigner", "variable_aggregator",
+                "tts", "playbook_inject", "video_compose"}
     assert set(NODE_TYPE_CLASSES_MAPPING.keys()) == expected
 
 

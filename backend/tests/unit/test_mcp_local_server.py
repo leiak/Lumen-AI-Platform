@@ -317,12 +317,13 @@ class TestFastMCPWiring:
         from lumen_mcp_servers.local_demo import app, mcp
         # app is a Starlette ASGI app built manually; see NOTE in local_demo.py.
         assert app is not None
-        # mcp should have 6 tools registered.
+        # mcp 当前注册 7 个工具(6 基础 + M33 加的 query_database Text2SQL)。
         tools = asyncio.run(_list_tool_names(mcp))
-        assert len(tools) == 6
+        assert len(tools) == 7
         expected = {
             "list_agents", "list_knowledge_bases", "search_knowledge_base",
             "list_chat_sessions", "list_workflows", "run_workflow",
+            "query_database",
         }
         assert set(tools) == expected
 

@@ -162,7 +162,10 @@ def test_installed_list_orders_by_installed_at_desc(tmp_user, client, auth_heade
 
         # Sort invariant: adjacent pairs must satisfy
         # prev.installed_at >= next.installed_at (timestamp desc).
-        for prev, nxt in zip(items, items[1:]):
+        # 跳过 installed_at 为 None 的行(dev DB 上早期 fixture 直插 SQL
+        # 的行缺 server_default;预存量数据已被生产路径覆盖,新写都带时间戳)。
+        ts_items = [it for it in items if it.get("installed_at") is not None]
+        for prev, nxt in zip(ts_items, ts_items[1:]):
             # installed_at comes back as ISO 8601 string; lexicographic
             # comparison on ISO strings is equivalent to chronological
             # because the format is fixed-width zero-padded.

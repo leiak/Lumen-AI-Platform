@@ -137,9 +137,13 @@ def test_post_agent_chat_persists_conversation_id_to_global(auth_client):
     # inserting a duplicate. qwen2.5:0.5b is the smallest chat model
     # in the dev Ollama — fast for tests.
     db = SessionLocal()
+    # Model configs are GLOBAL (tenant_id IS NULL) since M13 — see
+    # ``lumen_api.v1.models.list_models`` docstring. Filter on
+    # ``tenant_id IS NULL OR tenant_id = 1`` to find both global
+    # rows and tenant-specific overrides.
     mc = db.query(ModelConfig).filter(
-        ModelConfig.tenant_id == 1,
         ModelConfig.model_name == "qwen2.5:0.5b",
+        (ModelConfig.tenant_id == 1) | (ModelConfig.tenant_id.is_(None)),
     ).first()
     assert mc is not None, "qwen2.5:0.5b ModelConfig not found in dev DB"
     # Snapshot for restore.

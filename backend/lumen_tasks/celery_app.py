@@ -14,7 +14,7 @@ celery_app = Celery(
     "lumen_platform",
     broker=f"redis://{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_DB}",
     backend=f"redis://{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_DB}",
-    include=["lumen_tasks.document_tasks", "lumen_tasks.ppt_task"],
+    include=["lumen_tasks.document_tasks", "lumen_tasks.ppt_task", "lumen_tasks.eval_tasks"],
 )
 
 # Celery configuration

@@ -58,6 +58,10 @@ from lumen_core.database import (
     # Skill 表租户隔离 - tenant_id 列 + 索引 + 回填
     ensure_skills_tenant_id,
     ensure_skill_type_column,
+    # M37.1: RAG 评测集管理 - eval_datasets + eval_dataset_items
+    ensure_eval_datasets_table,
+    # M37.2: 评测运行器 - eval_runs + eval_run_results
+    ensure_eval_runs_table,
 )
 from lumen_core.notification_migration import ensure_notifications_table
 from lumen_api.v1 import router as v1_router
@@ -90,6 +94,8 @@ from lumen_models.tts import GeneratedAudio  # M35: TTS
 from lumen_models.subtitle import Subtitle  # M35: subtitle
 from lumen_models.playbook import Playbook  # M35: playbook
 from lumen_models.stock_asset import StockAsset  # M36.2.1: stock footage library
+from lumen_models.eval_dataset import EvalDataset, EvalDatasetItem  # M37.1: RAG 评测集
+from lumen_models.eval_run import EvalRun, EvalRunResult  # M37.2: 评测运行器
 from lumen_models.wx_publisher import (  # M32: 公众号助手
     WxAccount,
     WxTemplate,
@@ -243,6 +249,10 @@ async def startup_event():
     # Skill 表租户隔离：tenant_id 列 + 回填已安装自定义技能
     ensure_skills_tenant_id()
     ensure_skill_type_column()
+    # M37.1: eval_datasets + eval_dataset_items(RAG 评测集管理)
+    ensure_eval_datasets_table()
+    # M37.2: eval_runs + eval_run_results(评测运行器 + 单条 item 结果)
+    ensure_eval_runs_table()
     # Seed a demo ExternalApp for local dev (idempotent). Runs after
     # ensure_external_apps_tables() so the parent table is guaranteed
     # to exist, and before scheduler reload so the DB is fresh.

@@ -90,10 +90,18 @@ def test_search_global_memory_returns_conversation_id(db, tenant):
     assert rows[0]["conversation_id"] == 7
 
 
-def test_get_global_memory_orders_chronologically(db, tenant):
-    """Sanity: get_global_memory returns oldest→newest; both rows carry conv_id."""
+def test_get_global_memory_orders_oldest_first(db, tenant):
+    """Sanity: get_global_memory returns oldest→newest (ASC).
+    Note: ``MemoryService.get_global_memory`` sorts by ``created_at DESC``
+    then applies ``reversed()`` in Python, so the final order is ASC.
+    Both rows must carry ``conv_id``. Uses ``time.sleep`` between inserts
+    so the two ``created_at`` values differ at second precision (server
+    default is second-resolution).
+    """
+    import time
     svc = MemoryService()
     svc.add_global_memory(db, tenant_id=tenant.id, role="user", content="first", conversation_id=1)
+    time.sleep(1.1)  # 跨秒,确保 created_at 不同
     svc.add_global_memory(db, tenant_id=tenant.id, role="user", content="second", conversation_id=2)
     rows = svc.get_global_memory(db, tenant_id=tenant.id)
     assert [r["content"] for r in rows] == ["first", "second"]

@@ -100,15 +100,20 @@ def track_draft_ids():
 
 
 @pytest.fixture
+def track_material_ids():
+    return []
+
+
+@pytest.fixture
 def cleanup_rows(
     track_user_ids, track_tenant_ids, track_account_ids,
-    track_template_ids, track_draft_ids,
+    track_template_ids, track_draft_ids, track_material_ids,
 ):
     yield
     cleanup_tracked(
         user_ids=track_user_ids, tenant_ids=track_tenant_ids,
         account_ids=track_account_ids, template_ids=track_template_ids,
-        draft_ids=track_draft_ids,
+        draft_ids=track_draft_ids, material_ids=track_material_ids,
     )
 
 

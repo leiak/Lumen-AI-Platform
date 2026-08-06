@@ -1023,6 +1023,12 @@ def ensure_marketplace_type_column() -> None:
     ``ensure_conversations_deleted_at`` and
     ``ensure_model_configs_purpose_flags``.
 
+    If ``type`` already exists but was added by an older migration
+    that didn't enforce NOT NULL DEFAULT (e.g. M16 pre-finalization
+    on a long-running dev DB), we ALTER it to the canonical shape.
+    Backfilling NULL rows with 'prompt' must precede the NOT NULL
+    tightening, otherwise the ALTER fails on existing data.
+
     On any failure (e.g. MySQL MDL held by a stale uvicorn worker —
     see MEMORY.md "taskkill /F" entry), log and return so app
     startup continues; the next restart will retry the migration.
@@ -1036,6 +1042,31 @@ def ensure_marketplace_type_column() -> None:
                     "ALTER TABLE skill_marketplace "
                     "ADD COLUMN type VARCHAR(20) NOT NULL DEFAULT 'prompt'"
                 ))
+            else:
+                # If existing column lacks NOT NULL or DEFAULT 'prompt',
+                # tighten it. Backfill NULLs first to satisfy NOT NULL.
+                col_row = conn.execute(text(
+                    "SELECT IS_NULLABLE, COLUMN_DEFAULT "
+                    "FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA = DATABASE() "
+                    "  AND TABLE_NAME = 'skill_marketplace' "
+                    "  AND COLUMN_NAME = 'type'"
+                )).first()
+                needs_tighten = (
+                    col_row is not None
+                    and (col_row.IS_NULLABLE == "YES"
+                         or col_row.COLUMN_DEFAULT is None
+                         or "prompt" not in str(col_row.COLUMN_DEFAULT))
+                )
+                if needs_tighten:
+                    conn.execute(text(
+                        "UPDATE skill_marketplace "
+                        "SET type = 'prompt' WHERE type IS NULL"
+                    ))
+                    conn.execute(text(
+                        "ALTER TABLE skill_marketplace "
+                        "MODIFY COLUMN type VARCHAR(20) NOT NULL DEFAULT 'prompt'"
+                    ))
             if not _column_exists("skill_marketplace", "type_config"):
                 conn.execute(text(
                     "ALTER TABLE skill_marketplace "
@@ -1509,6 +1540,24 @@ def ensure_faq_entries_table() -> None:
     Spec: docs/superpowers/specs/2026-06-17-faq-entry.md
     """
     if _table_exists("faq_entries"):
+        # Table already exists (probably auto-created by ORM
+        # create_all() on a dev DB that pre-dated this ensure
+        # helper). Make sure the canonical index names exist —
+        # SQLAlchemy's auto-named FK indexes use
+        # ``ix_faq_entries_knowledge_base_id`` instead of the
+        # shorter ``ix_faq_entries_kb`` we want for hot-path KB
+        # filter queries, and we may be missing the composite
+        # ``(knowledge_base_id, category)`` index entirely.
+        with engine.begin() as conn:
+            for idx_name, cols in (
+                ("ix_faq_entries_kb", "(knowledge_base_id)"),
+                ("ix_faq_entries_category", "(category)"),
+                ("ix_faq_entries_kb_category", "(knowledge_base_id, category)"),
+            ):
+                if not _index_exists("faq_entries", idx_name):
+                    conn.execute(text(
+                        f"CREATE INDEX {idx_name} ON faq_entries {cols}"
+                    ))
         return
 
     with engine.begin() as conn:
@@ -1789,3 +1838,103 @@ def ensure_skill_type_column() -> None:
                 "ALTER TABLE skills ADD COLUMN type VARCHAR(20) NOT NULL DEFAULT 'prompt'"
             ))
             conn.commit()
+
+
+def ensure_eval_datasets_table() -> None:
+    """M37.1: create the eval_datasets + eval_dataset_items tables for the
+    RAG evaluation suite.
+
+    Mirrors the M22/M35/M36.2.1 ensure_* pattern — Base.metadata.create_all
+    is idempotent, so re-running on every uvicorn boot is a clean no-op.
+
+    Why ``Base.metadata.create_all(bind=engine)`` (no ``tables=[...]``):
+
+    ``EvalDataset`` carries FKs to ``knowledge_bases`` / ``tenants`` /
+    ``users``, and ``EvalDatasetItem`` FKs to ``eval_datasets``. When
+    ``tables=[...]`` is passed, SQLAlchemy's FK resolver only sees the
+    explicitly-listed tables and raises
+    ``NoReferencedTableError: Foreign key ... could not find table
+    'knowledge_bases'`` even if the referenced model is already
+    registered on ``Base.metadata``. The existing ``create_tables()``
+    helper (line 18) already runs ``create_all(bind=engine)`` with no
+    ``tables`` arg as the canonical "make sure every declared model
+    exists" entry point; calling the same here keeps the behaviour
+    consistent (idempotent: ``CREATE TABLE IF NOT EXISTS`` for each
+    declared table — no-op for the ~50 existing tables, real DDL for
+    the two new M37 tables). It does require the caller to have
+    imported all ORM modules before calling — ``lumen_main.py``
+    imports them at lines 67-110.
+
+    Schema notes:
+
+    - ``eval_datasets`` is the parent table; ``eval_dataset_items`` is
+      the child (one dataset → N items). FK CASCADE so deleting a
+      dataset sweeps its items, and deleting a KB sweeps its datasets
+      (golden queries become meaningless without the underlying KB).
+    - ``expected_doc_ids`` (JSON list of int) lets the user express
+      partial relevance: "doc 42 must be in top-3, doc 17 must be in
+      top-10". The runner materialises this into a binary relevance
+      set for Hit@K / MRR / NDCG.
+    - ``answer_keywords`` is for the cheap ``keyword_hit_rate`` answer
+      metric; LLM judge (faithfulness / answer_relevancy) kicks in only
+      when ``expected_answer`` is set.
+    - The composite indexes ``ix_eval_datasets_kb_active`` and
+      ``ix_eval_dataset_items_ds_category`` are declared on the model
+      ``__table_args__`` and created automatically by create_all —
+      they back the list-by-KB and slice-by-category dashboard queries.
+
+    Spec: docs-internal/superpowers/specs/m37-rag-evaluation.md §4.1
+    """
+    from lumen_models.eval_dataset import EvalDataset, EvalDatasetItem  # noqa
+    Base.metadata.create_all(bind=engine)
+
+
+def ensure_eval_runs_table() -> None:
+    """M37.2: create the eval_runs + eval_run_results tables for the
+    RAG evaluation runner.
+
+    Mirrors the M22/M35/M36.2.1/M37.1 ensure_* pattern — Base.metadata.create_all
+    is idempotent. Same FK resolution caveat as ``ensure_eval_datasets_table``:
+    we call ``create_all(bind=engine)`` (no ``tables=[...]``) so all referenced
+    tables (eval_datasets, users, eval_dataset_items) get included in the FK
+    resolver's view, regardless of whether they're explicitly listed.
+
+    Schema notes (per spec §4.2):
+
+    - ``eval_runs`` holds one row per evaluation run; ``eval_run_results``
+      holds one row per item that the runner touches (including failed
+      ones — we keep the row + ``error_message`` so the dashboard can
+      surface partial completion).
+    - FK ``run_id → eval_runs.id ON DELETE CASCADE`` so deleting a run
+      sweeps its results; ``item_id → eval_dataset_items.id ON DELETE
+      CASCADE`` so deleting an item (rare; usually via dataset CASCADE)
+      doesn't leave orphan result rows pointing at dead item ids.
+    - ``created_by → users.id ON DELETE SET NULL`` — we keep the run even
+      if its creator is removed (audit / dashboard view "who ran what"
+      tolerates the NULL).
+    - ``status`` is ``String(20)`` not MySQL ENUM (project-wide
+      convention since video/text2sql/wx_publisher) — adding a new state
+      is a no-ALTER change, only the docstring on the ORM lists the
+      valid values.
+    - ``config_json`` / ``metrics_json`` / ``llm_judge_calls`` are
+      ``Column(JSON)``; the API layer validates the shape via Pydantic
+      schemas (EvalRunConfig / RetrievalMetrics / AnswerMetrics).
+    - ``trace_id`` (VARCHAR(36)) joins to ``llm_call_logs.trace_id`` /
+      ``embedding_call_logs.trace_id`` so the M37.3 dashboard can jump
+      from a run row to its full LLM/embedding trace.
+
+    Spec: docs-internal/superpowers/specs/m37-rag-evaluation.md §4.2
+    Plan: docs-internal/superpowers/plans/m37-plan.md CP3 T8
+    """
+    # 预加载所有被 FK 引用的父表 —— EvalRun.dataset_id → eval_datasets,
+    # EvalRun.created_by → users, EvalRunResult.run_id → eval_runs,
+    # EvalRunResult.item_id → eval_dataset_items。裸 import EvalRun /
+    # EvalRunResult 时 Base.metadata 看不到父表, SQLAlchemy FK sort 阶段
+    # 会 NoReferencedTableError。
+    # 同 ensure_eval_datasets_table 的套路 (line 1826-1839)。
+    from lumen_models.user import User  # noqa: F401
+    from lumen_models.tenant import Tenant  # noqa: F401
+    from lumen_models.knowledge import KnowledgeBase  # noqa: F401
+    from lumen_models.eval_dataset import EvalDataset, EvalDatasetItem  # noqa: F401
+    from lumen_models.eval_run import EvalRun, EvalRunResult  # noqa: F401
+    Base.metadata.create_all(bind=engine)

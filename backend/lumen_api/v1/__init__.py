@@ -86,3 +86,13 @@ router.include_router(videos.router)
 #   /api/v1/stock-assets/*  (list / detail / image proxy with Bearer auth)
 from . import stock_assets
 router.include_router(stock_assets.router)
+
+# M37.1: RAG 评测集管理
+#   /api/v1/eval/datasets/*  (CRUD + items + bulk-import with partial_errors)
+from . import eval_datasets
+router.include_router(eval_datasets.router)
+
+# M37.2: RAG 评测 run 管理
+#   /api/v1/eval/runs/*  (run lifecycle + 详情 + cancel + compare)
+from . import eval_runs
+router.include_router(eval_runs.router)

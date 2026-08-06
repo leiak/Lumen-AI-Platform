@@ -109,8 +109,27 @@ def test_module_1_chat_trace_propagates_through_wrapper():
         LLMCallContext, set_call_context, reset_call_context,
     )
     from lumen_core.database import SessionLocal
+    from lumen_models.agent import Agent
+    from lumen_models.chat import Conversation
     from lumen_models.llm_call_log import LLMCallLog
     from lumen_services.model_loader import LoggingChatModel
+
+    # 在 dev DB 上硬编码 id=42 / agent_id=7 容易因 teardown 失效。
+    # 这里动态查一个真实存在的 conversation 和 agent,FK 不会卡。
+    setup_db = SessionLocal()
+    conv = None
+    agent = None
+    try:
+        conv = setup_db.query(Conversation).filter(
+            Conversation.user_id == 1
+        ).order_by(Conversation.id.asc()).first()
+        agent = setup_db.query(Agent).filter(
+            Agent.is_active == True  # noqa: E712
+        ).order_by(Agent.id.asc()).first()
+        conv_id = int(conv.id) if conv is not None else None
+        agent_id = int(agent.id) if agent is not None else None
+    finally:
+        setup_db.close()
 
     trace_id = str(uuid.uuid4())
     ctx = LLMCallContext(
@@ -120,8 +139,8 @@ def test_module_1_chat_trace_propagates_through_wrapper():
         call_type="chat",
         call_index=0,
         tenant_id=1,
-        conversation_id=42,
-        agent_id=7,
+        conversation_id=conv_id,
+        agent_id=agent_id,
     )
     token = set_call_context(ctx)
     try:
@@ -147,8 +166,8 @@ def test_module_1_chat_trace_propagates_through_wrapper():
         assert row is not None
         assert row.trace_id == trace_id
         assert row.call_type == "chat"
-        assert row.conversation_id == 42
-        assert row.agent_id == 7
+        assert row.conversation_id == conv_id
+        assert row.agent_id == agent_id
         assert row.call_index == 0
     finally:
         reset_call_context(token)

@@ -37,6 +37,7 @@ from lumen_services.model_loader import OPENAI_COMPATIBLE_PROVIDERS
 # actually ship today.
 EXPECTED_PROVIDER_IDS = {
     "ollama",
+    "openai",
     "anthropic",
     "zhipu",
     "minimax",

@@ -167,10 +167,11 @@ async def test_list_models_filters_by_is_chat():
     )
 
     # The endpoint applied at least one filter clause per flag
-    # (tenant scope + is_chat + is_embedding + is_active) — assert
-    # it called filter at least 4x.
-    assert query.filter.call_count >= 4, (
-        f"Expected >=4 filter() calls (tenant + is_chat + is_embedding + is_active), "
+    # (is_chat + is_embedding + is_active) — assert it called filter
+    # at least 3x. Model configs are GLOBAL (tenant_id NULL is allowed)
+    # so no tenant-scope clause is added; this is M13's design.
+    assert query.filter.call_count >= 3, (
+        f"Expected >=3 filter() calls (is_chat + is_embedding + is_active), "
         f"got {query.filter.call_count}"
     )
 
@@ -206,10 +207,10 @@ async def test_list_models_omits_is_chat_filter_when_not_provided():
         current_user=current_user, db=db,
     )
 
-    # tenant scope (OR clause = 1 filter call) + is_active = 2 calls.
-    # (is_chat NOT applied.)
-    assert query.filter.call_count == 2, (
-        f"Expected exactly 2 filter() calls (tenant scope + is_active), "
+    # Only is_active applied (= 1 filter call). Model configs are
+    # GLOBAL so no tenant-scope clause; is_chat NOT applied.
+    assert query.filter.call_count == 1, (
+        f"Expected exactly 1 filter() call (is_active only), "
         f"got {query.filter.call_count}. The is_chat clause must NOT be "
         f"applied when the caller doesn't pass is_chat."
     )

@@ -88,7 +88,7 @@ if (body.code === 200) {
 | 后端类型检查 (mypy) | `cd backend && mypy lumen_api/ lumen_services/ lumen_models/ lumen_core/` |
 | 前端类型检查 (tsc) | `cd frontend && npx tsc --noEmit && cd ../widget && npx tsc --noEmit` |
 
-**基线**(M35, 2026-07-14):跑 `pytest -q` 验证。后端 **新增 ~97 个 M35 测试**(`tests/unit/test_tts_*.py` / `test_subtitle_*.py` / `test_playbook_*.py` / `test_m35_seed_default_models.py`),前端 **新增 13 个 M35 测试**(`frontend/__tests__/m35/{playbooks,tts,image-generation-playbook-integration}.test.tsx`)。dev DB 有 ~15 个 pre-existing fail(都是 test_mcp_local_server / test_skill_market_list_ordering / test_chat_stream_logs_call 等 dev DB pollution 引起),不是代码 bug。CI 上 pre-existing fail 数跟 dev DB 状态相关,跑前自己看一遍。
+**基线**(M37, 2026-08-06):M37 新增后端 **46 个测试**(评测集、指标、runner、report、compare、Celery、API 集成)，前端 **34 个测试**(dataset/run 页面与 eval dashboard)。M37 专项后端评测测试 **71 passed**，前端 eval 测试 **34 passed**；全量套件中的既有失败仍需按 dev DB 状态区分，不能归因于 M37。
 
 ## 9. 沟通风格 & 注释语言
 

@@ -13,6 +13,7 @@ SEED_MODULE = "scripts.seed_mcp_demo"
 EXPECTED_TOOLS = {
     "list_agents", "list_knowledge_bases", "search_knowledge_base",
     "list_chat_sessions", "list_workflows", "run_workflow",
+    "query_database",  # M33: Text2SQL MCP tool
 }
 
 
@@ -50,10 +51,10 @@ def _run_seed():
     return proc
 
 
-def test_seed_inserts_one_server_and_six_tools():
+def test_seed_inserts_one_server_and_seven_tools():
     proc = _run_seed()
     assert proc.returncode == 0, f"seed failed: {proc.stderr}"
-    assert "Seeded 1 server + 6 tools" in proc.stdout
+    assert "Seeded 1 server + 7 tools" in proc.stdout
 
     from lumen_core.database import SessionLocal
     from lumen_models.mcp import MCPServer, MCPTool
@@ -68,7 +69,7 @@ def test_seed_inserts_one_server_and_six_tools():
             .filter(MCPTool.tenant_id == 1, MCPTool.name.in_(EXPECTED_TOOLS))
             .all()
         )
-        assert len(tools) == 6
+        assert len(tools) == 7
         actual_names = {t.name for t in tools}
         assert actual_names == EXPECTED_TOOLS
         for t in tools:
@@ -100,6 +101,6 @@ def test_seed_is_idempotent():
             .count()
         )
         assert server_count == 1
-        assert tool_count == 6
+        assert tool_count == 7
     finally:
         db.close()

@@ -74,9 +74,10 @@ def test_parallel_records_per_branch_duration():
     #
     # M30 cleanup (2026-06-17): the original `>= 100` / `>= 50` was
     # too strict — under load asyncio.sleep can be slightly off
-    # relative to wall time, and on a busy CI runner duration_ms
-    # occasionally landed at 99.9ms instead of 100.0ms. We compare
-    # against the configured delay (with a 1ms grace for clock
-    # granularity) which is far more robust.
-    assert results["slow"]["duration_ms"] >= results["slow"]["delay_seconds"] * 1000 - 1
-    assert results["fast"]["duration_ms"] >= results["fast"]["delay_seconds"] * 1000 - 1
+    # relative to wall time. M37 (2026-08-06) further relaxed the
+    # tolerance to 15ms grace — on Windows dev runner the fast
+    # branch (50ms) occasionally reports 46ms because asyncio.sleep
+    # can resolve a few ms early when the system is busy. The contract
+    # is "duration is in the right ballpark", not exact.
+    assert results["slow"]["duration_ms"] >= results["slow"]["delay_seconds"] * 1000 - 15
+    assert results["fast"]["duration_ms"] >= results["fast"]["delay_seconds"] * 1000 - 15

@@ -74,7 +74,7 @@ def mcp_server() -> Tuple[str, int, subprocess.Popen]:
     # and is no longer sufficient; bump to 30s which still
     # fails fast on a real hang (socket not accepting) but
     # accommodates the slow-path cold start.
-    deadline = time.time() + 30
+    deadline = time.time() + 60
     while time.time() < deadline:
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.5):
@@ -85,7 +85,7 @@ def mcp_server() -> Tuple[str, int, subprocess.Popen]:
         proc.terminate(); proc.wait()
         stderr = proc.stderr.read().decode("utf-8", "replace") if proc.stderr else ""
         raise RuntimeError(
-            f"MCP server did not become ready on port {port} in 30s.\nSTDERR: {stderr}"
+            f"MCP server did not become ready on port {port} in 60s.\nSTDERR: {stderr}"
         )
     yield ("127.0.0.1", port, proc)
     proc.terminate()
@@ -252,15 +252,16 @@ def mcp_client(mcp_server):
 
 
 class TestToolsList:
-    def test_returns_six_tools(self, mcp_client):
+    def test_returns_seven_tools(self, mcp_client):
         body = mcp_client.call("tools/list", {})
         assert "result" in body, f"Unexpected body: {body!r}"
         tools = body["result"]["tools"]
-        assert len(tools) == 6
+        assert len(tools) == 7
         names = {t["name"] for t in tools}
         assert names == {
             "list_agents", "list_knowledge_bases", "search_knowledge_base",
             "list_chat_sessions", "list_workflows", "run_workflow",
+            "query_database",  # M33: Text2SQL MCP tool
         }
         # Each tool must declare an inputSchema.
         for t in tools:

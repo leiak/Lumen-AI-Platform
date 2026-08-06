@@ -28,6 +28,7 @@ class EmbeddingCallLog(BaseModel):
     #   dim_probe         - factory cold-start probe (text == "dim-probe")
     #   workflow_kb       - workflow knowledge_retrieval node
     #   system.kb_ingest  - background reindex (no current_user)
+    #   eval_retrieval    - M37.2 RAG 评测每次 item 的检索(extra 里有 eval_run_id)
     call_type = Column(String(64), nullable=False)
     call_index = Column(Integer, default=0, nullable=False)
 
