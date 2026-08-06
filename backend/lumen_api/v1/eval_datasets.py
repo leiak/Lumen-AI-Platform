@@ -1,6 +1,6 @@
 """M37.1: Eval dataset HTTP endpoints — /api/v1/eval/datasets/*.
 
-8 endpoints covering dataset CRUD + item CRUD + bulk-import:
+9 endpoints covering dataset CRUD + item CRUD + bulk-import:
 
   GET    /                              list datasets (tenant-scoped, with item_count)
   POST   /                              create dataset (tenant auto-derived)
@@ -8,6 +8,7 @@
   PUT    /{dataset_id}                  partial update (name / description / source / is_active)
   DELETE /{dataset_id}                  cascade delete items too
   POST   /{dataset_id}/items            add single item
+  PATCH  /{dataset_id}/items/{item_id}  partial update single item (M37.1 follow-up)
   POST   /{dataset_id}/items/bulk-import  bulk import with partial_errors
   DELETE /{dataset_id}/items/{item_id}  delete single item
 
@@ -34,6 +35,7 @@ from lumen_schemas.eval_dataset import (
     EvalDatasetItemBulkImportResponse,
     EvalDatasetItemCreate,
     EvalDatasetItemRead,
+    EvalDatasetItemUpdate,
     EvalDatasetListItem,
     EvalDatasetRead,
     EvalDatasetUpdate,
@@ -261,6 +263,37 @@ def add_item(
         )
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    return SingleResponse(data=_to_item_read(row))
+
+
+@router.patch(
+    "/{dataset_id}/items/{item_id}",
+    response_model=SingleResponse[EvalDatasetItemRead],
+)
+def update_item(
+    dataset_id: int,
+    item_id: int,
+    payload: EvalDatasetItemUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """编辑单条 item —— PATCH 语义,只覆盖非 None 字段。
+
+    dataset 不可见 / item 不存在 / item 不属于该 dataset → 404
+    (跟 delete_item 一样不暴露「存在但越权」与「不存在」的差别)。
+    """
+    row = service.update_item(
+        db,
+        dataset_id=dataset_id,
+        item_id=item_id,
+        tenant_id=int(current_user.tenant_id),  # type: ignore[arg-type]
+        payload=payload,
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Item {item_id} not found in dataset {dataset_id}",
+        )
     return SingleResponse(data=_to_item_read(row))
 
 

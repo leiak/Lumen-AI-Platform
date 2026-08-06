@@ -1,11 +1,10 @@
 "use client";
 
 // frontend/app/dashboard/eval/datasets/page.tsx
-// M37.1 — /dashboard/eval/datasets list page.
+// M37.1 / M37.2 follow-up — /dashboard/eval/datasets list page.
 //
-// 列表 + 新建 dataset 按钮 + 删除按钮 + 「跑评测集」占位按钮。
-// 「批量导入 items」按钮:在行级 Tooltip 内跳到 detail 页 items tab(M37.1
-// 暂未在 detail 页加 tab,先跳到 /detail/{id} 即可)。
+// 列表 + 新建 dataset 按钮 + 删除按钮 + 行级「跑这个评测集」按钮
+// (点击后弹 RunConfigForm,提交后跳 /dashboard/eval/runs/{id} 看实时进度)。
 //
 // 列表列:
 //   - name(链接到 detail 页)
@@ -15,7 +14,7 @@
 //   - is_active Tag(启用 / 停用)
 //   - item_count
 //   - created_at
-//   - 操作:跑评测 / 删除 / 「批量导入 items」
+//   - 操作:跑这个评测集 / 管理 items / 删除
 
 import { useState } from "react";
 import {
@@ -42,14 +41,20 @@ import {
   listDatasets,
   createDataset,
   deleteDataset,
-  type EvalDatasetListResult,
+  getDataset,
 } from "@/services/eval_dataset";
+import { startRun } from "@/services/eval_run";
+import { knowledgeApi } from "@/services/knowledge";
+import type { EvalDatasetListResult } from "@/services/eval_dataset";
 import type {
   EvalDatasetCreate,
+  EvalDatasetDetail,
   EvalDatasetListItem,
   EvalDatasetSource,
 } from "@/types/eval_dataset";
+import type { EvalRunConfig, EvalRunCreate } from "@/types/eval_run";
 import DatasetForm from "@/components/eval/DatasetForm";
+import RunConfigForm from "@/components/eval/RunConfigForm";
 
 const SOURCE_LABELS: Record<EvalDatasetSource, string> = {
   manual: "手动",
@@ -68,6 +73,40 @@ export default function EvalDatasetsPage() {
   const { message } = App.useApp();
 
   const [createOpen, setCreateOpen] = useState(false);
+  // 启动评测 modal 状态:跑哪个 dataset(row 级点击设这里)
+  const [runTarget, setRunTarget] = useState<EvalDatasetListItem | null>(null);
+
+  // 拉目标 dataset 的 kb_id(列表只返 summary)
+  const { data: runTargetDetail } = useQuery<EvalDatasetDetail | null>({
+    queryKey: ["eval-dataset-detail", runTarget?.id],
+    queryFn: () => (runTarget ? getDataset(runTarget.id) : Promise.resolve(null)),
+    enabled: Boolean(runTarget),
+  });
+
+  // 拿 KB 的 embedding model config id —— RunConfigForm 锁定默认值
+  const { data: runTargetKb } = useQuery<{ embedding_model_config_id: number } | null>({
+    queryKey: ["knowledge-base-by-id", runTargetDetail?.kb_id],
+    queryFn: async () => {
+      if (!runTargetDetail?.kb_id) return null;
+      const res = await knowledgeApi.get(runTargetDetail.kb_id);
+      const kb = res.data.data;
+      if (!kb) return null;
+      return kb as unknown as { embedding_model_config_id: number };
+    },
+    enabled: Boolean(runTargetDetail?.kb_id),
+  });
+
+  const startMut = useMutation({
+    mutationFn: (payload: EvalRunCreate) => startRun(payload),
+    onSuccess: (run) => {
+      message.success(`已启动 Run #${run.id},跳转详情看实时进度`);
+      setRunTarget(null);
+      qc.invalidateQueries({ queryKey: ["eval-runs"] });
+      // 跳详情页看进度 / 报告
+      router.push(`/dashboard/eval/runs/${run.id}`);
+    },
+    onError: (e: Error) => message.error(`启动失败:${e.message}`),
+  });
 
   const { data, isLoading, refetch } = useQuery<EvalDatasetListResult>({
     queryKey: ["eval-datasets"],
@@ -172,12 +211,19 @@ export default function EvalDatasetsPage() {
       fixed: "right",
       render: (_, row) => (
         <Space size="small" wrap>
-          <Tooltip title="评测运行器开发中(M37.2 完工后启用)">
+          <Tooltip
+            title={
+              (row.item_count ?? 0) > 0
+                ? "用当前配置启动一个 run"
+                : "dataset 还没有 items,先去详情页加"
+            }
+          >
             <Button
               type="link"
               size="small"
               icon={<ThunderboltOutlined />}
-              disabled
+              disabled={(row.item_count ?? 0) === 0}
+              onClick={() => setRunTarget(row)}
             >
               跑这个评测集
             </Button>
@@ -256,6 +302,25 @@ export default function EvalDatasetsPage() {
           await createMut.mutateAsync(payload);
         }}
         submitting={createMut.isPending}
+      />
+
+      {/* 启动评测 modal —— 跟 /dashboard/eval 上的 picker 共享同一个 RunConfigForm,
+          这里预填了 dataset_id,所以不需要 dataset 选择器。 */}
+      <RunConfigForm
+        open={Boolean(runTarget)}
+        onCancel={() => setRunTarget(null)}
+        onSubmit={async (config: EvalRunConfig) => {
+          if (!runTarget) return;
+          await startMut.mutateAsync({
+            dataset_id: runTarget.id,
+            config,
+          });
+        }}
+        // 拉不到 KB → 兜底 1(nomic-embed-text);但 99% 情况拉得到
+        defaultEmbeddingModelConfigId={
+          runTargetKb?.embedding_model_config_id ?? 1
+        }
+        submitting={startMut.isPending}
       />
     </div>
   );

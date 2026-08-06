@@ -16,6 +16,7 @@ import { TestWrapper } from "./test-utils";
 const mockGetDataset = vi.fn();
 const mockListItems = vi.fn();
 const mockAddItem = vi.fn();
+const mockUpdateItem = vi.fn();
 const mockDeleteItem = vi.fn();
 const mockDeleteDataset = vi.fn();
 
@@ -23,6 +24,7 @@ vi.mock("@/services/eval_dataset", () => ({
   getDataset: (...args: any[]) => mockGetDataset(...args),
   listItems: (...args: any[]) => mockListItems(...args),
   addItem: (...args: any[]) => mockAddItem(...args),
+  updateItem: (...args: any[]) => mockUpdateItem(...args),
   deleteItem: (...args: any[]) => mockDeleteItem(...args),
   deleteDataset: (...args: any[]) => mockDeleteDataset(...args),
 }));
@@ -41,6 +43,7 @@ beforeEach(() => {
   mockGetDataset.mockReset();
   mockListItems.mockReset();
   mockAddItem.mockReset();
+  mockUpdateItem.mockReset();
   mockDeleteItem.mockReset();
   mockDeleteDataset.mockReset();
   mockPush.mockReset();
@@ -62,6 +65,7 @@ beforeEach(() => {
   });
   mockListItems.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 });
   mockAddItem.mockResolvedValue({ id: 100, dataset_id: 42, query: "x" });
+  mockUpdateItem.mockResolvedValue({ id: 1, dataset_id: 42, query: "edited" });
 });
 
 describe("EvalDatasetDetailPage", () => {
@@ -193,5 +197,55 @@ describe("EvalDatasetDetailPage", () => {
     expect(await screen.findByText(/批量导入 items — dataset #42/)).toBeInTheDocument();
     // 拖拽上传区
     expect(screen.getByText(/点击或拖拽 \.json 文件到此区域/)).toBeInTheDocument();
+  });
+
+  it("M37.1 follow-up: clicking edit on item opens modal in edit mode, submit calls updateItem", async () => {
+    // 准备一条 item,渲染时 ItemTable 会渲染该行 + 编辑按钮
+    mockListItems.mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          dataset_id: 42,
+          query: "如何申请退货?",
+          expected_doc_ids: [12],
+          expected_answer: "7 天内联系客服",
+          answer_keywords: ["客服", "7 天"],
+          category: "factual",
+          difficulty: "easy",
+          notes: "原 notes",
+          created_at: "2026-08-01T00:00:00Z",
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 200,
+    });
+    render(
+      <TestWrapper>
+        <EvalDatasetDetailPage />
+      </TestWrapper>
+    );
+    await waitFor(() => expect(mockListItems).toHaveBeenCalled());
+    // 表格行级「编辑」按钮 —— antd Button 带 icon, name 含 编辑
+    const editBtn = await screen.findByRole("button", { name: /编辑/ });
+    fireEvent.click(editBtn);
+
+    // ItemFormModal 走编辑模式:title 切「编辑 item」,query 字段预填
+    expect(await screen.findByText("编辑 item")).toBeInTheDocument();
+    const queryInput = (await screen.findByPlaceholderText(
+      /如何申请退货/,
+    )) as HTMLInputElement;
+    expect(queryInput.value).toBe("如何申请退货?");
+
+    // 改 query 后提交 → 调 updateItem(不是 addItem)
+    fireEvent.change(queryInput, { target: { value: "如何申请退货?[改]" } });
+    fireEvent.click(screen.getByRole("button", { name: /保存/ }));
+    await waitFor(() => expect(mockUpdateItem).toHaveBeenCalled());
+    expect(mockUpdateItem).toHaveBeenCalledWith(
+      42,
+      1,
+      expect.objectContaining({ query: "如何申请退货?[改]" }),
+    );
+    expect(mockAddItem).not.toHaveBeenCalled();
   });
 });

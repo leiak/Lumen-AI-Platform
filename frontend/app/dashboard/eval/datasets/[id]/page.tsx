@@ -1,11 +1,15 @@
 "use client";
 
 // frontend/app/dashboard/eval/datasets/[id]/page.tsx
-// M37.1 — 详情页:dataset info card + items table + 加 item / 批量导入 / 删单条。
+// M37.1 / M37.1 follow-up — 详情页:dataset info card + items table +
+// 加 item / 批量导入 / 删单条 / 编辑单条(M37.1 follow-up 接 PATCH 后端)。
 //
 // 顶部 card:dataset 元数据(name / KB / source / builtin 标 / 创建者 / 时间)
 // 中部:ItemTable,每行可编辑 / 删除
 // 工具栏:返回列表 + 加 item + 批量导入 + 删除 dataset
+//
+// 编辑 item 走 ItemFormModal 的 initial 模式(add / update 复用同一 modal,
+// 通过 editingItem state 区分)。
 //
 // 注意:detail 没有更新 dataset 字段的入口(plan 没要求;若需要再加一个
 // DatasetFormModal 复用 DatasetForm 加 edit mode 即可)。
@@ -34,11 +38,13 @@ import {
   deleteDataset,
   listItems,
   addItem,
+  updateItem,
   deleteItem,
 } from "@/services/eval_dataset";
 import type {
   EvalDatasetItem,
   EvalDatasetItemCreate,
+  EvalDatasetItemUpdate,
   EvalDatasetDetail,
   EvalDatasetItemListResult,
   EvalDatasetSource,
@@ -63,6 +69,8 @@ export default function EvalDatasetDetailPage() {
   const { message } = App.useApp();
 
   const [itemFormOpen, setItemFormOpen] = useState(false);
+  // 正在编辑哪条 item —— 同一 modal 切 create / update 模式
+  const [editingItem, setEditingItem] = useState<EvalDatasetItem | null>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
 
   const {
@@ -106,6 +114,23 @@ export default function EvalDatasetDetailPage() {
       qc.invalidateQueries({ queryKey: ["eval-datasets"] });
     },
     onError: (e: Error) => message.error(`新增失败:${e.message}`),
+  });
+
+  // PATCH 单条 item —— 编辑模式共用 ItemFormModal,通过 editingItem 区分
+  const updateItemMut = useMutation({
+    mutationFn: (args: {
+      itemId: number;
+      payload: EvalDatasetItemUpdate;
+    }) => updateItem(datasetId, args.itemId, args.payload),
+    onSuccess: (it) => {
+      message.success(`已更新 item #${it.id}`);
+      setItemFormOpen(false);
+      setEditingItem(null);
+      qc.invalidateQueries({
+        queryKey: ["eval-datasets", datasetId, "items"],
+      });
+    },
+    onError: (e: Error) => message.error(`更新失败:${e.message}`),
   });
 
   const deleteItemMut = useMutation({
@@ -233,10 +258,8 @@ export default function EvalDatasetDetailPage() {
           items={itemsData?.items ?? []}
           loading={itemsLoading}
           onEdit={(it: EvalDatasetItem) => {
-            // M37.1 后端没有 update item endpoint,先提示。
-            message.info(
-              "M37.1 暂未开放编辑单条 item;如需修改请先删除再加。",
-            );
+            setEditingItem(it);
+            setItemFormOpen(true);
           }}
           onDelete={async (it) => {
             await deleteItemMut.mutateAsync(it.id);
@@ -246,11 +269,24 @@ export default function EvalDatasetDetailPage() {
 
       <ItemFormModal
         open={itemFormOpen}
-        onCancel={() => setItemFormOpen(false)}
-        onSubmit={async (payload) => {
-          await addItemMut.mutateAsync(payload);
+        onCancel={() => {
+          setItemFormOpen(false);
+          setEditingItem(null);
         }}
-        submitting={addItemMut.isPending}
+        initial={editingItem ?? undefined}
+        submitting={editingItem ? updateItemMut.isPending : addItemMut.isPending}
+        onSubmit={async (payload: EvalDatasetItemCreate | EvalDatasetItemUpdate) => {
+          if (editingItem) {
+            // 编辑模式:PATCH 部分字段(后端用 exclude_none=True)
+            await updateItemMut.mutateAsync({
+              itemId: editingItem.id,
+              payload: payload as EvalDatasetItemUpdate,
+            });
+          } else {
+            // 新增模式:POST 全字段
+            await addItemMut.mutateAsync(payload as EvalDatasetItemCreate);
+          }
+        }}
       />
 
       <BulkImportModal

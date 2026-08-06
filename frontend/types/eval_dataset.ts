@@ -80,6 +80,19 @@ export interface EvalDatasetItemCreate {
   notes?: string;
 }
 
+/** PATCH /api/v1/eval/datasets/{id}/items/{item_id} body(M37.1 follow-up)。
+ *  全字段 Optional —— PATCH 语义,只传要改的字段。
+ *  ``query`` 在 Create 是必填,在 Update 允许空(表示不改)。 */
+export interface EvalDatasetItemUpdate {
+  query?: string;
+  expected_doc_ids?: number[];
+  expected_answer?: string | null;
+  answer_keywords?: string[] | null;
+  category?: EvalDatasetCategory;
+  difficulty?: EvalDatasetDifficulty;
+  notes?: string | null;
+}
+
 // ---------- bulk import ----------
 
 /** 单行 bulk import row —— category/difficulty Literal 严格校验

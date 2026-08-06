@@ -22,6 +22,7 @@ import type {
   EvalDatasetDifficulty,
   EvalDatasetItem,
   EvalDatasetItemCreate,
+  EvalDatasetItemUpdate,
 } from "@/types/eval_dataset";
 
 const { TextArea } = Input;
@@ -29,8 +30,12 @@ const { TextArea } = Input;
 interface ItemFormModalProps {
   open: boolean;
   onCancel: () => void;
-  onSubmit: (payload: EvalDatasetItemCreate) => Promise<void> | void;
-  // 编辑模式(暂未启用,留接口)
+  /** Create / Update 两种 payload 都能接 —— 后端 addItem 要 Create(PUT 全字段),
+   *  updateItem 要 Update(PATCH 部分字段)。具体用哪个由父组件决定。 */
+  onSubmit:
+    | ((payload: EvalDatasetItemCreate) => Promise<void> | void)
+    | ((payload: EvalDatasetItemUpdate) => Promise<void> | void);
+  /** 传入则走编辑模式 — 表单字段预填 + title 切「编辑 item」。 */
   initial?: EvalDatasetItem;
   submitting?: boolean;
 }

@@ -17,6 +17,7 @@ import type {
   EvalDatasetItemCreate,
   EvalDatasetItemListParams,
   EvalDatasetItemListResult,
+  EvalDatasetItemUpdate,
   EvalDatasetListItem,
   EvalDatasetListParams,
   EvalDatasetListResult,
@@ -97,6 +98,17 @@ export async function addItem(
   payload: EvalDatasetItemCreate,
 ): Promise<EvalDatasetItem> {
   const res = await api.post(`${BASE}/${datasetId}/items`, payload);
+  return res.data.data as EvalDatasetItem;
+}
+
+/** PATCH /api/v1/eval/datasets/{id}/items/{item_id} —— 编辑单条 item。
+ *  PATCH 语义,只覆盖 payload 里指定的字段(后端用 exclude_none=True)。 */
+export async function updateItem(
+  datasetId: number,
+  itemId: number,
+  payload: EvalDatasetItemUpdate,
+): Promise<EvalDatasetItem> {
+  const res = await api.patch(`${BASE}/${datasetId}/items/${itemId}`, payload);
   return res.data.data as EvalDatasetItem;
 }
 

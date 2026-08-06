@@ -114,6 +114,23 @@ class EvalDatasetItemCreate(EvalDatasetItemBase):
     pass  # 全 Optional 沿用 Base
 
 
+class EvalDatasetItemUpdate(BaseModel):
+    """Body for ``PATCH /api/v1/eval/datasets/{id}/items/{item_id}``(编辑单条 item)。
+
+    全字段 Optional —— PATCH 语义,只传要改的字段。``query`` 因为是
+    EvalDatasetItemBase 的必填项,在 update 里要允许 None 表示"不改",
+    所以这里显式重写为 ``Optional[str]`` 避开必填校验。
+    """
+
+    query: Optional[str] = Field(default=None, min_length=1)
+    expected_doc_ids: Optional[List[int]] = None
+    expected_answer: Optional[str] = None
+    answer_keywords: Optional[List[str]] = None
+    category: Optional[EvalDatasetCategory] = None
+    difficulty: Optional[EvalDatasetDifficulty] = None
+    notes: Optional[str] = None
+
+
 class EvalDatasetItemBulkImportRow(EvalDatasetItemBase):
     """单行 bulk import row — category/difficulty Literal 严格校验。
 

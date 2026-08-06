@@ -28,6 +28,7 @@ from lumen_schemas.eval_dataset import (
     EvalDatasetItemBulkImportResponse,
     EvalDatasetItemBulkImportRow,
     EvalDatasetItemCreate,
+    EvalDatasetItemUpdate,
     EvalDatasetUpdate,
 )
 
@@ -302,6 +303,39 @@ class EvalDatasetService:
         db.delete(row)
         db.commit()
         return True
+
+    def update_item(
+        self,
+        db: Session,
+        *,
+        dataset_id: int,
+        item_id: int,
+        tenant_id: Optional[int],
+        payload: EvalDatasetItemUpdate,
+    ) -> Optional[EvalDatasetItem]:
+        """单条 item PATCH。dataset 必须对当前租户可见,item 必须属于该 dataset。
+
+        只覆盖 payload 里非 None 的字段(用 ``setattr`` + ``model_dump(exclude_none=True)``),
+        保留其它字段不变。返回更新后的 row;dataset 不可见 / item 不存在 → None。
+        """
+        if self.get_dataset(db, dataset_id=dataset_id, tenant_id=tenant_id) is None:
+            return None
+        row = (
+            db.query(EvalDatasetItem)
+            .filter(
+                EvalDatasetItem.id == item_id,
+                EvalDatasetItem.dataset_id == dataset_id,
+            )
+            .first()
+        )
+        if row is None:
+            return None
+        # 只 apply 非 None 字段;空 PATCH(empty body)合法但不写库
+        for field, value in payload.model_dump(exclude_none=True).items():
+            setattr(row, field, value)
+        db.commit()
+        db.refresh(row)
+        return row
 
 
 def _format_validation_error(e: ValidationError) -> str:
