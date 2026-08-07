@@ -65,6 +65,17 @@ class VideoComposeNodeData(BaseNodeData):
         None,
         description="字幕 SRT 路径 或 subtitles.id(数字字串)。None → 无字幕烧录",
     )
+    # M36.2.2: 背景音乐,跟 audio_path / subtitle_path 同模式(本地路径
+    # 或 stock_musics.id)。None → 不加 BGM,workflow 节点跟 dashboard
+    # 走完全相同的 _resolve_asset_to_path 路径。
+    background_music_path: Optional[str] = Field(
+        None,
+        description="背景音乐路径 或 stock_musics.id(整数)。None → 不加 BGM",
+    )
+    background_music_volume: float = Field(
+        default=0.3, ge=0.0, le=1.0,
+        description="BGM 音量相对主轨的比例 (0.0 - 1.0)",
+    )
     # 构图参数
     resolution: str = Field(default="1280x720")
     fps: int = Field(default=24, ge=1, le=60)
@@ -166,12 +177,18 @@ class VideoComposeNode(BaseNode):
             VariableTemplateParser(d.subtitle_path).format(self.pool).strip()
             if d.subtitle_path else None
         )
+        bgm_path = (
+            VariableTemplateParser(d.background_music_path).format(self.pool).strip()
+            if d.background_music_path else None
+        )
         # 模板替换后空字符串 → None(避免把空字串传进 service,导致后续
         # _resolve_asset_to_path 走到 isdigit 分支报错)
         if audio_path == "":
             audio_path = None
         if subtitle_path == "":
             subtitle_path = None
+        if bgm_path == "":
+            bgm_path = None
 
         # 3. 同步调用 VideoComposeService.create_sync_for_workflow。
         from lumen_services.video_compose_service import VideoComposeService
@@ -181,6 +198,8 @@ class VideoComposeNode(BaseNode):
             source_images=resolved_images,
             audio_path=audio_path,
             subtitle_path=subtitle_path,
+            background_music_path=bgm_path,
+            background_music_volume=d.background_music_volume,
             resolution=d.resolution,
             fps=d.fps,
             audio_fade_in=d.audio_fade_in,

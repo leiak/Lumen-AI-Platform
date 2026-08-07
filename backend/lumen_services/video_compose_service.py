@@ -94,6 +94,8 @@ class VideoComposeService:
         - ``"audio_not_found"``: ``audio_path`` looked like an id and
           didn't resolve to a row in this tenant.
         - ``"subtitle_not_found"``: same for subtitle.
+        - ``"music_not_found"`` (M36.2.2): ``background_music_path``
+          looked like a stock_musics id and didn't resolve.
         """
         if not payload.source_images:
             return None, "empty_sources"
@@ -109,6 +111,10 @@ class VideoComposeService:
                 db, tenant_id=tenant_id, kind="subtitle",
                 value=payload.subtitle_path,
             )
+            resolved_music = _resolve_asset_to_path(
+                db, tenant_id=tenant_id, kind="music",
+                value=payload.background_music_path,
+            )
         except AssetNotFound as e:
             return None, e.tag
 
@@ -116,6 +122,8 @@ class VideoComposeService:
             "source_images": list(resolved_images),
             "audio_path": resolved_audio,
             "subtitle_path": resolved_subtitle,
+            "background_music_path": resolved_music,
+            "background_music_volume": payload.background_music_volume,
             "resolution": payload.resolution,
             "fps": payload.fps,
             "audio_fade_in": payload.audio_fade_in,
@@ -180,6 +188,10 @@ class VideoComposeService:
                 db, tenant_id=tenant_id, kind="subtitle",
                 value=payload.subtitle_path,
             )
+            resolved_music = _resolve_asset_to_path(
+                db, tenant_id=tenant_id, kind="music",
+                value=payload.background_music_path,
+            )
         except AssetNotFound as e:
             return None, e.tag
 
@@ -187,6 +199,8 @@ class VideoComposeService:
             "source_images": list(resolved_images),
             "audio_path": resolved_audio,
             "subtitle_path": resolved_subtitle,
+            "background_music_path": resolved_music,
+            "background_music_volume": payload.background_music_volume,
             "resolution": payload.resolution,
             "fps": payload.fps,
             "audio_fade_in": payload.audio_fade_in,
@@ -366,6 +380,28 @@ def _resolve_asset_to_path(
         tmp_path = tmp_dir / f"subtitle_{row.id}_{uuid.uuid4().hex[:8]}.{ext}"
         tmp_path.write_text(row.content, encoding="utf-8")
         return str(tmp_path)
+    if kind == "music":
+        # M36.2.2: 背景音乐 lookup。``tenant_id IS NULL`` 是全局 builtin,
+        # 所有租户可见(跟 stock_asset / stock_image 共享同一规则)。
+        from lumen_core.config import settings
+        from lumen_models.stock_music import StockMusic
+        from pathlib import PurePosixPath
+
+        row = (
+            db.query(StockMusic)
+            .filter(
+                StockMusic.id == pk,
+                or_(
+                    StockMusic.tenant_id.is_(None),
+                    StockMusic.tenant_id == tenant_id,
+                ),
+            )
+            .first()
+        )
+        if not row or not row.file_path:
+            raise AssetNotFound("music_not_found")
+        abs_path = settings.STORAGE_DIR / PurePosixPath(row.file_path)
+        return str(abs_path)
     raise ValueError(f"unknown asset kind: {kind!r}")
 
 
@@ -541,6 +577,10 @@ def compose_inline(db: Session, video_id: int) -> None:
     image_paths: List[str] = list(params.get("source_images") or [])
     audio_path: Optional[str] = params.get("audio_path")
     subtitle_path: Optional[str] = params.get("subtitle_path")
+    # M36.2.2: 背景音乐已由 create / create_sync_for_workflow 在 DB
+    # lookup 后预解析成本地绝对路径,这里直接透传。
+    bgm_path: Optional[str] = params.get("background_music_path")
+    bgm_volume: float = float(params.get("background_music_volume") or 0.3)
     resolution: str = params.get("resolution") or "1280x720"
     fps: int = int(params.get("fps") or 24)
     audio_fade_in: float = float(params.get("audio_fade_in") or 0.0)
@@ -558,6 +598,8 @@ def compose_inline(db: Session, video_id: int) -> None:
             image_paths=image_paths,
             audio_path=audio_path,
             subtitle_path=subtitle_path,
+            bgm_path=bgm_path,
+            bgm_volume=bgm_volume,
             resolution=resolution,
             fps=fps,
             audio_fade_in=audio_fade_in,

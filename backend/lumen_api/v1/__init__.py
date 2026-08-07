@@ -87,6 +87,11 @@ router.include_router(videos.router)
 from . import stock_assets
 router.include_router(stock_assets.router)
 
+# M36.2.2: 视频背景音乐库(全局 builtin + per-tenant 上传预留,只读)
+#   /api/v1/stock-musics/*  (list / detail / audio file proxy with Bearer auth)
+from . import stock_musics
+router.include_router(stock_musics.router)
+
 # M37.1: RAG 评测集管理
 #   /api/v1/eval/datasets/*  (CRUD + items + bulk-import with partial_errors)
 from . import eval_datasets

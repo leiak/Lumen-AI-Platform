@@ -58,6 +58,24 @@ class VideoComposeCreate(BaseModel):
             "subtitle burn step."
         ),
     )
+    # M36.2.2: 背景音乐(BGM)。None → 没有 BGM,主轨保持纯语音。可
+    # 填本地路径或 stock_musics.id(纯数字字串)。FFmpeg 用 amix 把
+    # BGM 以 bgm_volume 音量混到主轨,BGM 自动循环到主轨长度。
+    background_music_path: Optional[str] = Field(
+        None,
+        description=(
+            "本地音频路径 或 stock_musics.id (整数)。None → 不加 BGM。"
+        ),
+    )
+    background_music_volume: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "BGM 相对主轨的音量 (0.0 - 1.0)。默认 0.3,UI 暂不暴露,"
+            "schema 留位以后可加滑块。"
+        ),
+    )
     # Convenience FK refs the workflow node fills in. Kept separate from
     # the path strings so the row can show provenance after composition.
     source_audio_id: Optional[int] = Field(
@@ -107,6 +125,8 @@ class VideoComposeRead(BaseModel):
     source_audio_id: Optional[int]
     source_subtitle_id: Optional[int]
     source_images: Optional[List[str]]
+    # M36.2.2: 回显用,返回 DB row 时把背景音乐路径一起带上。
+    background_music_path: Optional[str] = None
     resolution: str
     fps: int
     file_path: str

@@ -193,8 +193,10 @@ def audio_mux(
     fps: int = 24,
     audio_fade_in: float = 0.0,
     audio_fade_out: float = 0.0,
+    bgm_path: Optional[str] = None,
+    bgm_volume: float = 0.3,
 ) -> str:
-    """Combine 1+ still images with an audio track into a single mp4.
+    """Combine 1+ still images with an audio track (+ optional BGM) into a single mp4.
 
     Args:
         image_paths: One or more image paths. If exactly 1, the image
@@ -209,6 +211,15 @@ def audio_mux(
         fps: Output frame rate, default 24.
         audio_fade_in: Seconds of linear fade-in at the start (0 disables).
         audio_fade_out: Seconds of linear fade-out at the end (0 disables).
+        bgm_path: M36.2.2 — optional background-music track. ``None``
+            (default) keeps the legacy single-track behavior with zero
+            regression. When set, the BGM is added as a 2nd input with
+            ``-stream_loop -1`` (infinite loop) and mixed into the main
+            audio at ``bgm_volume`` (0.0–1.0). The BGM does NOT fade —
+            only the main track does — to avoid two-track fade
+            complexity.
+        bgm_volume: Relative volume of BGM in the mix (0.0–1.0). Default
+            0.3. Per M36.2.2 spec; UI 暂不暴露 slider,schema 留位。
 
     Returns:
         ``output_path`` on success.
@@ -226,6 +237,8 @@ def audio_mux(
             raise FileNotFoundError(f"image not found: {p}")
     if not Path(audio_path).exists():
         raise FileNotFoundError(f"audio not found: {audio_path}")
+    if bgm_path is not None and not Path(bgm_path).exists():
+        raise FileNotFoundError(f"bgm not found: {bgm_path}")
     if Path(output_path).exists():
         Path(output_path).unlink()  # ffmpeg -y is set, but be explicit
 
@@ -241,11 +254,19 @@ def audio_mux(
         args += ["-loop", "1", "-t", f"{per_dur:.3f}", "-i", img]
     args += ["-i", audio_path]
     audio_idx = len(image_paths)
+    # M36.2.2: BGM 作为第 2 个 audio input,无限循环让短 BGM(30s)
+    # 自动填满主轨(几分钟)。
+    if bgm_path is not None:
+        args += ["-stream_loop", "-1", "-i", bgm_path]
+        bgm_idx = audio_idx + 1
+    else:
+        bgm_idx = None  # type: ignore[assignment]
 
     # Build the filter graph:
     # - for each image input: scale + pad to `resolution`, force SAR=1
     # - if >1 image: concat them
-    # - audio: fade-in/out applied (when non-zero)
+    # - audio: fade-in/out applied (when non-zero) on main track
+    # - M36.2.2: if BGM present, amix main + BGM (BGM does NOT fade)
     # NOTE: the `pad` filter only accepts W:H positional args (not the
     # WxH shorthand `scale` accepts), so we split `resolution` ourselves.
     try:
@@ -272,8 +293,19 @@ def audio_mux(
     if audio_fade_out > 0:
         fade_start = max(0.0, audio_dur_sec - audio_fade_out)
         afilters.append(f"afade=out:st={fade_start:.3f}:d={audio_fade_out}")
-    afilter = ",".join(afilters) if afilters else "anull"
-    filters.append(f"[{audio_idx}:a]{afilter}[aout]")
+    main_filter = ",".join(afilters) if afilters else "anull"
+    if bgm_idx is not None:
+        # Main + BGM amix。``amix=inputs=2:duration=first`` 表示混合以
+        # 主轨长度为准,BGM 自动被裁短;``aloop`` 已经在外层 input 加了,
+        # 这里不再重复。
+        bgm_vol_str = f"{bgm_volume:.3f}"
+        filters.append(
+            f"[{audio_idx}:a]{main_filter}[amain];"
+            f"[{bgm_idx}:a]volume={bgm_vol_str}[abgm];"
+            f"[amain][abgm]amix=inputs=2:duration=first[aout]"
+        )
+    else:
+        filters.append(f"[{audio_idx}:a]{main_filter}[aout]")
 
     args += [
         "-filter_complex", ";".join(filters),
@@ -470,6 +502,8 @@ def build_video_from_assets(
     image_paths: Sequence[str],
     audio_path: Optional[str] = None,
     subtitle_path: Optional[str] = None,
+    bgm_path: Optional[str] = None,
+    bgm_volume: float = 0.3,
     resolution: str = "1280x720",
     fps: int = 24,
     audio_fade_in: float = 0.0,
@@ -477,7 +511,7 @@ def build_video_from_assets(
     subtitle_font: Optional[str] = None,
     per_image_seconds: Optional[float] = None,
 ) -> Tuple[bytes, int, int]:
-    """One-shot composer: image(s) [+ audio] [+ subtitle] → mp4 bytes.
+    """One-shot composer: image(s) [+ audio] [+ subtitle] [+ BGM] → mp4 bytes.
 
     Writes intermediate files to ``settings.STORAGE_DIR/_tmp/<uuid>/``,
     reads back the final mp4, and returns ``(bytes, file_size,
@@ -491,6 +525,10 @@ def build_video_from_assets(
             audio stream (otherwise browsers complain).
         subtitle_path: Optional SRT file path. When given, hardcoded
             into the video via ``subtitle_burn``.
+        bgm_path: M36.2.2 — optional background-music track; see
+            ``audio_mux``. ``None`` keeps the single-track legacy
+            behavior.
+        bgm_volume: BGM relative volume in the amix; default 0.3.
         resolution / fps / audio fades / subtitle_font: propagated to
             underlying ops. See ``audio_mux`` and ``subtitle_burn``.
         per_image_seconds: see ``audio_mux``.
@@ -530,6 +568,8 @@ def build_video_from_assets(
             fps=fps,
             audio_fade_in=audio_fade_in,
             audio_fade_out=audio_fade_out,
+            bgm_path=bgm_path,
+            bgm_volume=bgm_volume,
         )
 
         if subtitle_path:

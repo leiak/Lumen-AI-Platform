@@ -26,7 +26,7 @@ import {
   Tag,
   Space,
 } from "antd";
-import { PlusOutlined, DeleteOutlined, AppstoreAddOutlined, AudioOutlined, FileTextOutlined, PictureOutlined } from "@ant-design/icons";
+import { PlusOutlined, DeleteOutlined, AppstoreAddOutlined, AudioOutlined, FileTextOutlined, PictureOutlined, CustomerServiceOutlined } from "@ant-design/icons";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { createVideoCompose } from "@/services/video";
 import { imageGenerationApi } from "@/services/image-generation";
@@ -36,6 +36,7 @@ import { ImagePickerModal } from "./ImagePickerModal";
 import { StockPickerModal } from "./StockPickerModal";
 import { AudioPickerModal } from "./AudioPickerModal";
 import { SubtitlePickerModal } from "./SubtitlePickerModal";
+import { MusicPickerModal } from "./MusicPickerModal";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:11335/api/v1";
@@ -115,6 +116,10 @@ export function ComposeModal({ open, onClose }: ComposeModalProps) {
   // 模式预览(后端 Bearer 鉴权,见 MEMORY 2026-06-20)。
   const [stockPickerOpen, setStockPickerOpen] = useState(false);
   const [stockEditingIndex, setStockEditingIndex] = useState<number | null>(null);
+
+  // M36.2.2: BGM picker modal 状态。跟 stock picker 同模式(fetch+blob),
+  // 但 BGM 选完只填一个 input(没有列表追加语义)。
+  const [musicPickerOpen, setMusicPickerOpen] = useState(false);
 
   // 解析当前 source_images 里所有 image id(URL 形态)给 picker 初始高亮。
   const currentImageIds = sourceImages
@@ -297,12 +302,20 @@ export function ComposeModal({ open, onClose }: ComposeModalProps) {
             </Form.List>
           </Form.Item>
 
-          <Form.Item name="audio_path" label="音频 (可选)">
+          {/* 注意 Form.Item + name + Space.Compact 子组件的坑:AntD 的
+              Form.Item 用 cloneElement 把 value/onChange 注入**直接子**,
+              Space.Compact 不是 input,导致 picker 调 setFieldValue 后
+              input 显示不更新(form state 有值但 UI 是空的)。
+              修法:Form.Item noStyle 包裹 Input,让 Input 直接接收
+              value/onChange;外层用 Space.Compact 做视觉布局。 */}
+          <Form.Item label="音频 (可选)">
             <Space.Compact style={{ width: "100%" }}>
-              <Input
-                placeholder="本地路径 或 generated_audios.id (整数)"
-                style={{ width: "calc(100% - 160px)" }}
-              />
+              <Form.Item name="audio_path" noStyle>
+                <Input
+                  placeholder="本地路径 或 generated_audios.id (整数)"
+                  style={{ width: "calc(100% - 160px)" }}
+                />
+              </Form.Item>
               <Button
                 icon={<AudioOutlined />}
                 onClick={() => setAudioPickerOpen(true)}
@@ -313,22 +326,43 @@ export function ComposeModal({ open, onClose }: ComposeModalProps) {
             </Space.Compact>
           </Form.Item>
           <Form.Item
-            name="subtitle_path"
             label="字幕 (可选)"
             // 没 subtitle 时不展示错误红框(M36.1 阶段 1.1 仍允许留空)。
-            rules={[]}
           >
             <Space.Compact style={{ width: "100%" }}>
-              <Input
-                placeholder="本地 .srt/.vtt 路径 或 subtitles.id (整数)"
-                style={{ width: "calc(100% - 160px)" }}
-              />
+              <Form.Item name="subtitle_path" noStyle rules={[]}>
+                <Input
+                  placeholder="本地 .srt/.vtt 路径 或 subtitles.id (整数)"
+                  style={{ width: "calc(100% - 160px)" }}
+                />
+              </Form.Item>
               <Button
                 icon={<FileTextOutlined />}
                 onClick={() => setSubtitlePickerOpen(true)}
                 style={{ width: 160 }}
               >
                 从我的字幕库选
+              </Button>
+            </Space.Compact>
+          </Form.Item>
+
+          {/* M36.2.2: 背景音乐。跟 audio / subtitle 同模式:Input + 「从
+              背景音乐库选」按钮。空值表示不加 BGM。schema 默认音量 0.3
+              写在后端,UI 暂不暴露滑块。 */}
+          <Form.Item label="背景音乐 (可选)">
+            <Space.Compact style={{ width: "100%" }}>
+              <Form.Item name="background_music_path" noStyle rules={[]}>
+                <Input
+                  placeholder="本地音频路径 或 stock_musics.id (整数)"
+                  style={{ width: "calc(100% - 180px)" }}
+                />
+              </Form.Item>
+              <Button
+                icon={<CustomerServiceOutlined />}
+                onClick={() => setMusicPickerOpen(true)}
+                style={{ width: 180 }}
+              >
+                从背景音乐库选
               </Button>
             </Space.Compact>
           </Form.Item>
@@ -428,6 +462,15 @@ export function ComposeModal({ open, onClose }: ComposeModalProps) {
         onConfirm={(id) => {
           form.setFieldValue("subtitle_path", String(id));
           setSubtitlePickerOpen(false);
+        }}
+      />
+      <MusicPickerModal
+        open={musicPickerOpen}
+        initialSelected={null}
+        onClose={() => setMusicPickerOpen(false)}
+        onConfirm={(id) => {
+          form.setFieldValue("background_music_path", String(id));
+          setMusicPickerOpen(false);
         }}
       />
     </>

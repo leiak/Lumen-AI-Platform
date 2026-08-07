@@ -1280,6 +1280,18 @@ def ensure_stock_assets_table() -> None:
     Base.metadata.create_all(bind=engine, tables=[StockAsset.__table__])
 
 
+def ensure_stock_musics_table() -> None:
+    """M36.2.2: create ``stock_musics`` table if it doesn't exist.
+
+    Mirrors ``ensure_stock_assets_table`` (M36.2.1) — the model declares
+    ``ix_stock_musics_category_created`` in ``StockMusic.__table_args__``
+    so ``create_all`` picks it up automatically, keeping the gallery
+    list query O(log n) on ``(category, created_at DESC)``.
+    """
+    from lumen_models.stock_music import StockMusic  # noqa
+    Base.metadata.create_all(bind=engine, tables=[StockMusic.__table__])
+
+
 def ensure_generated_videos_table() -> None:
     """M36: create ``generated_videos`` table if it doesn't exist.
 
