@@ -90,6 +90,14 @@ export interface WxAccountVerifyResponse {
   verified_at: string;
 }
 
+/** Admin hard-delete summary. Returned by `POST /accounts/{id}/purge`. */
+export interface WxAccountPurgeResponse {
+  account_id: number;
+  deleted_publish_records: number;
+  drafts_set_null: number;
+  deleted_account: boolean;
+}
+
 // === Template ===============================================================
 
 export interface WxTemplateCreate {

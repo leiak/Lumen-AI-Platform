@@ -105,15 +105,22 @@ def track_material_ids():
 
 
 @pytest.fixture
+def track_record_ids():
+    return []
+
+
+@pytest.fixture
 def cleanup_rows(
     track_user_ids, track_tenant_ids, track_account_ids,
     track_template_ids, track_draft_ids, track_material_ids,
+    track_record_ids,
 ):
     yield
     cleanup_tracked(
         user_ids=track_user_ids, tenant_ids=track_tenant_ids,
         account_ids=track_account_ids, template_ids=track_template_ids,
         draft_ids=track_draft_ids, material_ids=track_material_ids,
+        record_ids=track_record_ids,
     )
 
 
@@ -840,3 +847,173 @@ def test_get_material_endpoint_401_unauthenticated(client):
     """GET material 无 token 返 401"""
     r = client.get("/api/v1/wx-publisher/materials/1")
     assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Admin-only hard delete — POST /wx-publisher/accounts/{id}/purge
+# ---------------------------------------------------------------------------
+# 设计意图(spec §3.6 反向路径): 软删保留审计链; 硬删 (purge) 是显式
+# 破坏审计链的 admin 操作 — 删除 wx_publish_records 子行 + 自动 SET NULL
+# wx_drafts.account_id + DELETE wx_accounts 主行。
+# 三个 case:
+# 1. admin purge 成功 — summary 正确 + DB 行确实减少
+# 2. 非 admin purge — 403
+# 3. 跨租户 admin — 也允许(admin 跨租户可见)
+# ---------------------------------------------------------------------------
+
+def test_purge_account_admin_success(
+    client, db_session, cleanup_rows,
+    track_account_ids, track_draft_ids, track_record_ids,
+    track_user_ids, track_tenant_ids,
+):
+    """admin purge: account 行 + publish_records 行被删,drafts.account_id 被 SET NULL。"""
+    from lumen_models.wx_publisher import WxAccount, WxDraft, WxPublishRecord
+    from _wx_publisher_helpers import fresh_session
+
+    tenant = make_tenant(db_session, suffix="pga")
+    track_tenant_ids.append(tenant.id)
+    admin = _make_user_for_request(
+        db_session, tenant_id=tenant.id, is_superuser=True,
+    )
+    track_user_ids.append(admin.id)
+    owner = _make_user_for_request(db_session, tenant_id=tenant.id)
+    track_user_ids.append(owner.id)
+    account = make_account(db_session, tenant_id=tenant.id, user_id=owner.id)
+    track_account_ids.append(account.id)
+    # 一个草稿 + 两条发布记录 — 用 service 造真实 publish 记录
+    from lumen_schemas.wx_publisher import WxPublishRequest
+    from lumen_services.wx_publisher.publish_service import WxPublishService
+    svc = WxPublishService(db_session, owner)
+    draft = make_draft(
+        db_session, tenant_id=tenant.id, user_id=owner.id,
+        account_id=account.id,
+    )
+    track_draft_ids.append(draft.id)
+    rec1 = svc.publish_sync(
+        WxPublishRequest(draft_id=draft.id, account_id=account.id),
+    )
+    rec2 = svc.publish_sync(
+        WxPublishRequest(draft_id=draft.id, account_id=account.id),
+    )
+    track_record_ids.extend([rec1.id, rec2.id])
+
+    # 验证前置状态:1 account + 2 records + 1 draft(绑着 account)
+    pre_db = fresh_session()
+    try:
+        assert pre_db.query(WxAccount).filter(
+            WxAccount.id == account.id
+        ).count() == 1
+        assert pre_db.query(WxPublishRecord).filter(
+            WxPublishRecord.account_id == account.id
+        ).count() == 2
+        assert pre_db.query(WxDraft).filter(
+            WxDraft.account_id == account.id
+        ).count() == 1
+    finally:
+        pre_db.close()
+
+    # admin purge
+    teardown = _override_with(admin)
+    try:
+        r = client.post(
+            f"/api/v1/wx-publisher/accounts/{account.id}/purge"
+        )
+    finally:
+        teardown()
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["code"] == 200
+    summary = body["data"]
+    assert summary["account_id"] == account.id
+    assert summary["deleted_publish_records"] == 2
+    assert summary["drafts_set_null"] == 1
+    assert summary["deleted_account"] is True
+
+    # 验证 DB 后置状态(新 session 避免 REPEATABLE READ 缓存)
+    post_db = fresh_session()
+    try:
+        assert post_db.query(WxAccount).filter(
+            WxAccount.id == account.id
+        ).count() == 0
+        assert post_db.query(WxPublishRecord).filter(
+            WxPublishRecord.account_id == account.id
+        ).count() == 0
+        # draft 还在,account_id 被自动置 NULL(FK ON DELETE SET NULL)
+        post_draft = post_db.query(WxDraft).filter(
+            WxDraft.id == draft.id
+        ).first()
+        assert post_draft is not None
+        assert post_draft.account_id is None
+    finally:
+        post_db.close()
+
+
+def test_purge_account_non_admin_403(
+    client, db_session, cleanup_rows,
+    track_account_ids, track_user_ids, track_tenant_ids,
+):
+    """非 admin 调 purge 返 403(require_admin 拦截)。"""
+    tenant = make_tenant(db_session, suffix="pgb")
+    track_tenant_ids.append(tenant.id)
+    owner = _make_user_for_request(db_session, tenant_id=tenant.id)
+    track_user_ids.append(owner.id)
+    account = make_account(db_session, tenant_id=tenant.id, user_id=owner.id)
+    track_account_ids.append(account.id)
+
+    teardown = _override_with(owner)
+    try:
+        r = client.post(
+            f"/api/v1/wx-publisher/accounts/{account.id}/purge"
+        )
+    finally:
+        teardown()
+
+    assert r.status_code == 403
+
+
+def test_purge_account_admin_cross_tenant(
+    client, db_session, cleanup_rows,
+    track_account_ids, track_user_ids, track_tenant_ids,
+):
+    """admin 跨租户 purge:不绑定 admin_user.tenant_id,任意租户的 account 都能清。"""
+    from lumen_models.wx_publisher import WxAccount
+    from _wx_publisher_helpers import fresh_session
+
+    # Tenant A — owns the account
+    t_a = make_tenant(db_session, suffix="pgc")
+    track_tenant_ids.append(t_a.id)
+    u_a = _make_user_for_request(db_session, tenant_id=t_a.id)
+    track_user_ids.append(u_a.id)
+    account = make_account(db_session, tenant_id=t_a.id, user_id=u_a.id)
+    track_account_ids.append(account.id)
+
+    # Tenant B — admin lives here
+    t_b = make_tenant(db_session, suffix="pgd")
+    track_tenant_ids.append(t_b.id)
+    admin_b = _make_user_for_request(
+        db_session, tenant_id=t_b.id, is_superuser=True,
+    )
+    track_user_ids.append(admin_b.id)
+
+    teardown = _override_with(admin_b)
+    try:
+        r = client.post(
+            f"/api/v1/wx-publisher/accounts/{account.id}/purge"
+        )
+    finally:
+        teardown()
+
+    assert r.status_code == 200
+    summary = r.json()["data"]
+    assert summary["account_id"] == account.id
+    assert summary["deleted_account"] is True
+
+    # 验证 tenant A 的 account 确实被删
+    post_db = fresh_session()
+    try:
+        assert post_db.query(WxAccount).filter(
+            WxAccount.id == account.id
+        ).count() == 0
+    finally:
+        post_db.close()

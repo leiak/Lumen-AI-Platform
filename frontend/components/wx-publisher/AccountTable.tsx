@@ -2,11 +2,17 @@
 // M32 — 公众号助手 — 公众号账号表格.
 //
 // Spec §5.6 — Table: 账号名 / AppID / 类型 Tag / Mock/Real Tag /
-// 上次校验 / 状态 / 操作. 操作: [编辑] [校验 AppID] [切换 Mock/Real] [删除].
+// 上次校验 / 状态 / 操作. 操作: [编辑] [校验 AppID] [切换 Mock/Real] [停用].
+// Admin 额外看到 [永久删除] (warning, double-confirm, 二级危险操作)。
 "use client";
 
 import { Table, Tag, Button, Space, Switch, Popconfirm, Tooltip } from "antd";
-import { EditOutlined, CheckCircleOutlined, DeleteOutlined } from "@ant-design/icons";
+import {
+  EditOutlined,
+  CheckCircleOutlined,
+  StopOutlined,
+  DeleteOutlined,
+} from "@ant-design/icons";
 import type { WxAccountResponse } from "@/types/wx-publisher";
 
 const ACCOUNT_TYPE_LABELS: Record<string, string> = {
@@ -24,8 +30,12 @@ const ACCOUNT_TYPE_COLORS: Record<string, string> = {
 interface AccountTableProps {
   items: WxAccountResponse[];
   loading?: boolean;
+  /** 是否展示「永久删除」(admin only) */
+  isAdmin?: boolean;
   onEdit?: (account: WxAccountResponse) => void;
   onDelete?: (id: number) => void;
+  /** Admin-only hard delete. 见 backend ``POST /accounts/{id}/purge`` */
+  onPurge?: (id: number) => void;
   onVerify?: (id: number) => void;
   onToggleMock?: (id: number, isMock: boolean) => void;
 }
@@ -33,8 +43,10 @@ interface AccountTableProps {
 export function AccountTable({
   items,
   loading,
+  isAdmin,
   onEdit,
   onDelete,
+  onPurge,
   onVerify,
   onToggleMock,
 }: AccountTableProps) {
@@ -128,16 +140,45 @@ export function AccountTable({
               {onDelete && (
                 <Popconfirm
                   title="确认停用该账号?"
+                  description="停用后账号从默认列表隐藏,但发布历史仍保留。"
                   okText="停用"
                   cancelText="取消"
+                  okButtonProps={{ danger: true }}
                   onConfirm={() => onDelete(row.id)}
                 >
-                  <Button
-                    type="link"
-                    size="small"
-                    danger
-                    icon={<DeleteOutlined />}
-                  />
+                  <Tooltip title="停用">
+                    <Button
+                      type="link"
+                      size="small"
+                      icon={<StopOutlined />}
+                    />
+                  </Tooltip>
+                </Popconfirm>
+              )}
+              {isAdmin && onPurge && (
+                <Popconfirm
+                  title="永久删除该账号?"
+                  description={
+                    <>
+                      <div>该账号以及所有关联的发布历史将被彻底删除,无法恢复。</div>
+                      <div style={{ marginTop: 4, color: "#999" }}>
+                        关联草稿的 account_id 字段会被自动置空。
+                      </div>
+                    </>
+                  }
+                  okText="永久删除"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => onPurge(row.id)}
+                >
+                  <Tooltip title="永久删除(破坏发布历史,仅管理员可见)">
+                    <Button
+                      type="link"
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                    />
+                  </Tooltip>
                 </Popconfirm>
               )}
             </Space>

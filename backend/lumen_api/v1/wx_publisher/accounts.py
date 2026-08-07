@@ -25,7 +25,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from lumen_api.v1.auth import get_current_user
+from lumen_api.v1.auth import get_current_user, require_admin
 from lumen_core.database import get_db
 from lumen_models.user import User
 from lumen_models.wx_publisher import WxAccount
@@ -33,6 +33,7 @@ from lumen_schemas.common import PaginatedResponse, SingleResponse
 from lumen_schemas.wx_publisher import (
     WxAccountCreate,
     WxAccountDetail,
+    WxAccountPurgeResponse,
     WxAccountResponse,
     WxAccountUpdate,
     WxAccountVerifyRequest,
@@ -225,3 +226,34 @@ def verify_account(
         db, current_user=current_user, account_id=account_id,
     )
     return SingleResponse(data=WxAccountVerifyResponse(**result))
+
+
+@router.post(
+    "/{account_id}/purge",
+    response_model=SingleResponse[WxAccountPurgeResponse],
+)
+def purge_account(
+    account_id: int,
+    admin_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Admin-only hard delete — bypasses the spec §3.6 audit-trail guard.
+
+    Differences from ``DELETE /accounts/{id}`` (soft delete):
+
+    - ``DELETE`` flips ``is_active=False`` and keeps the row. This is
+      the default behavior; ``wx_publish_records`` keep their FK target.
+    - This endpoint cascades through and **destroys** the audit trail:
+      every ``wx_publish_records`` row pointing at the account is
+      deleted, ``wx_drafts.account_id`` is auto-nulled via FK SET NULL,
+      and the ``wx_accounts`` row itself is hard-deleted.
+
+    Use only when the operator has explicitly decided to break the
+    audit chain (e.g. cleaning up a long-disabled mock account that
+    never had any real publishes). Non-admin callers get 403 via
+    ``require_admin``.
+    """
+    result = service.purge_account(
+        db, admin_user=admin_user, account_id=account_id,
+    )
+    return SingleResponse(data=WxAccountPurgeResponse(**result))

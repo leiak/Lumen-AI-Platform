@@ -332,6 +332,34 @@ def decrypt_wx_secret(encrypted: str) -> str:
 **当前**:草稿不放外链,只内部用户可访问。
 **不做**:外部预览链接(微信公众号有自己的"预览"机制)。
 
+### 6.5 账号软删 vs 硬删(admin override)
+
+`DELETE /wx-publisher/accounts/{id}` 默认走**软删**(`is_active=False`,行保留),原因是 `wx_publish_records.account_id` FK 是 `ON DELETE RESTRICT` — 软删能保留发布历史用于审计。
+
+如果管理员需要**真正删除**账号(包括发布历史),用 admin 专属 endpoint:
+
+| 端点 | 鉴权 | 行为 |
+|------|------|------|
+| `DELETE /wx-publisher/accounts/{id}` | tenant 用户 | 软删:`is_active=False`,行保留,审计链完整 |
+| `POST /wx-publisher/accounts/{id}/purge` | `require_admin`(superuser) | 硬删:`wx_publish_records` 子行被**直接 DELETE**(审计破坏),`wx_drafts.account_id` 由 FK ON DELETE SET NULL 自动置空,`wx_accounts` 行被硬删 |
+
+`POST /purge` 返回 `WxAccountPurgeResponse` summary:
+
+```json
+{
+  "account_id": 123,
+  "deleted_publish_records": 5,    // 被清掉的发布记录数
+  "drafts_set_null": 2,             // account_id 被自动置空的草稿数
+  "deleted_account": true            // 账号行确实被删
+}
+```
+
+**何时使用**:
+- 长期停用的 mock 账号,从未真实发布,清理掉。
+- 合规/隐私要求彻底删除某账号 + 全部历史(普通用户无权,需 superuser)。
+
+**前端入口**:`/dashboard/wx-publisher/accounts` 表格行尾 — 仅 `is_superuser` 用户可见「永久删除」按钮(StopOutlined + Popconfirm 二次确认 + danger okButton)。
+
 ---
 
 ## 7. 与其他模块的关系

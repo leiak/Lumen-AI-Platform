@@ -117,6 +117,28 @@ class WxAccountVerifyResponse(BaseModel):
     verified_at: datetime
 
 
+class WxAccountPurgeResponse(BaseModel):
+    """Return shape for ``POST /wx-publisher/accounts/{id}/purge`` (admin only).
+
+    Lists row counts that the purge operation swept so the operator
+    (and the audit log) sees what was destroyed. Note: the spec §3.6
+    design choice is that accounts are soft-deleted (``is_active=False``)
+    to preserve ``wx_publish_records`` audit history. This endpoint
+    is the **explicit override** for operators who have decided to
+    break that audit trail — it cascades through:
+
+    - ``wx_publish_records`` (FK ON DELETE RESTRICT) — rows are
+      **deleted** (not nulled), destroying the audit record
+    - ``wx_drafts`` (FK ON DELETE SET NULL) — ``account_id`` is
+      auto-nulled by MySQL on parent delete
+    - ``wx_accounts`` — the account row is hard-deleted
+    """
+    account_id: int
+    deleted_publish_records: int
+    drafts_set_null: int
+    deleted_account: bool
+
+
 # ---------------------------------------------------------------------------
 # Draft schemas (CP2, T9-T10)
 # ---------------------------------------------------------------------------

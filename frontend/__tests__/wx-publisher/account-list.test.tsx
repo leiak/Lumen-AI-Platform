@@ -36,6 +36,17 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/dashboard/wx-publisher/accounts",
 }));
 
+// accounts/page.tsx 通过 useQuery 拉 /auth/me 决定是否展示「永久删除」按钮。
+// 默认非 superuser,符合现有 3 个测试的预期。purge 路径只在 admin + 显式触发
+// 时才走到;这里 mock 留 placeholder 即可。
+vi.mock("@/services/auth", () => ({
+  authApi: {
+    getMe: vi.fn().mockResolvedValue({
+      data: { code: 200, data: { is_superuser: false } },
+    }),
+  },
+}));
+
 const sampleAccounts = [
   { id: 1, name: "科技早班车", app_id: "wxabcd1234567890abcd", app_secret_masked: "ab****cd", account_type: "subscription", is_mock: true, is_active: true, last_verified_at: null, created_at: "2026-06-17T08:00:00Z" },
 ];

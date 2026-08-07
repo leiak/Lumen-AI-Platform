@@ -19,6 +19,7 @@ import {
 import { PlusOutlined } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { accountApi } from "@/services/wx-publisher";
+import { authApi } from "@/services/auth";
 import { AccountTable } from "@/components/wx-publisher/AccountTable";
 import { AppSecretRevealModal } from "@/components/wx-publisher/AppSecretRevealModal";
 import type {
@@ -46,6 +47,17 @@ export default function AccountsPage() {
     queryKey: ["wx-publisher", "accounts"],
     queryFn: () => accountApi.list({ page: 1, page_size: 100 }),
   });
+
+  // 当前用户 — 决定是否展示「永久删除」按钮 (admin-only hard delete)
+  const { data: meData } = useQuery({
+    queryKey: ["auth", "me"],
+    queryFn: async () => {
+      const res = await authApi.getMe();
+      return res.data?.data;
+    },
+    staleTime: 5 * 60 * 1000,
+  });
+  const isAdmin = Boolean(meData?.is_superuser);
 
   const handleCreate = async () => {
     const values = await form.validateFields();
@@ -139,6 +151,19 @@ export default function AccountsPage() {
     }
   };
 
+  const handlePurge = async (id: number) => {
+    try {
+      const summary = await accountApi.purge(id);
+      toast.success(
+        `已永久删除账号 (清理 ${summary.deleted_publish_records} 条发布记录,` +
+          `${summary.drafts_set_null} 个草稿被解绑)`
+      );
+      qc.invalidateQueries({ queryKey: ["wx-publisher", "accounts"] });
+    } catch (err: any) {
+      toast.error(err?.message || "永久删除失败");
+    }
+  };
+
   const openEdit = (row: WxAccountResponse) => {
     setEditing(row);
     form.setFieldsValue({
@@ -169,8 +194,10 @@ export default function AccountsPage() {
         <AccountTable
           items={data?.items ?? []}
           loading={isLoading}
+          isAdmin={isAdmin}
           onEdit={openEdit}
           onDelete={handleDelete}
+          onPurge={handlePurge}
           onVerify={handleVerify}
           onToggleMock={handleToggleMock}
         />

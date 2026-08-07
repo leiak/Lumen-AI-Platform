@@ -24,6 +24,7 @@ import type {
   WxAccountUpdate,
   WxAccountDetail,
   WxAccountResponse,
+  WxAccountPurgeResponse,
   WxAccountVerifyResponse,
   WxTemplateCreate,
   WxTemplateUpdate,
@@ -145,6 +146,14 @@ export const accountApi = {
   verify: (id: number) =>
     unwrapSingle<WxAccountVerifyResponse>(
       api.post(`/wx-publisher/accounts/${id}/verify`, {})
+    ),
+
+  /** POST /wx-publisher/accounts/{id}/purge — admin-only hard delete.
+   * Wipes the account row + every wx_publish_records referencing it.
+   * wx_drafts.account_id is auto-nulled via FK SET NULL. */
+  purge: (id: number) =>
+    unwrapSingle<WxAccountPurgeResponse>(
+      api.post(`/wx-publisher/accounts/${id}/purge`, {})
     ),
 };
 

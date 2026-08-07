@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from lumen_core.config import settings
 from lumen_models.user import User
-from lumen_models.wx_publisher import WxAccount
+from lumen_models.wx_publisher import WxAccount, WxDraft, WxPublishRecord
 from lumen_schemas.wx_publisher import WxAccountCreate, WxAccountUpdate
 
 log = logging.getLogger(__name__)
@@ -235,10 +235,86 @@ class WxAccountService:
            user-visible "bound to which account" history.
         Soft-delete (is_active=False) is the right MVP behavior;
         V2 may add a hard-delete that first nils out the FKs.
+
+        For the explicit audit-breaking override see ``purge_account``.
         """
         row = self.get_account(db, current_user=current_user, account_id=account_id)
         row.is_active = False
         db.commit()
+
+    def purge_account(
+        self, db: Session, *, admin_user: User, account_id: int
+    ) -> dict:
+        """Admin-only hard delete — wipes the account row + audit history.
+
+        Differences from ``delete_account``:
+
+        - ``delete_account`` flips ``is_active=False`` and keeps the row
+          so future ``wx_publish_records`` entries keep their FK target
+          intact. This is the default behavior for tenants.
+        - ``purge_account`` is the explicit "I'm sure I want this gone
+          and I'm fine losing the audit trail" path. It:
+
+          1. Deletes every ``wx_publish_records`` row pointing at the
+             account — note this **destroys** the audit history (the
+             spec §3.6 RESTRICT guard is intentionally bypassed here).
+          2. Lets MySQL auto-null ``wx_drafts.account_id`` via the
+             ON DELETE SET NULL FK on the drafts table. We also count
+             the affected rows first so the response can surface it.
+          3. Hard-deletes the ``wx_accounts`` row itself.
+
+        Caller must verify ``admin_user.is_superuser`` *before* invoking
+        this method (the API layer does so via ``require_admin``). The
+        service itself does not double-check; it trusts the caller, same
+        as ``delete_account`` trusts the caller's tenant isolation.
+
+        Cross-tenant: admins can purge any tenant's account (admins are
+        not bound to ``admin_user.tenant_id``). The 404-vs-403 IDOR
+        guard from ``get_account`` is intentionally bypassed for this
+        admin path.
+        """
+        # Look up the account globally (no tenant filter — admin scope).
+        row = db.query(WxAccount).filter(WxAccount.id == account_id).first()
+        if not row:
+            raise HTTPException(404, "Account not found")
+
+        # Step 1: count drafts that will be auto-nulled. We snapshot
+        # before the parent DELETE so the SET NULL effect can be
+        # reported back. wx_drafts.account_id is ON DELETE SET NULL.
+        drafts_set_null = (
+            db.query(WxDraft)
+            .filter(WxDraft.account_id == account_id)
+            .count()
+        )
+
+        # Step 2: delete publish records. wx_publish_records.account_id
+        # is ON DELETE RESTRICT — so we have to delete the children
+        # BEFORE the parent. Order matters: RESTRICT rejects any DELETE
+        # on the parent while children still reference it.
+        deleted_publish_records = (
+            db.query(WxPublishRecord)
+            .filter(WxPublishRecord.account_id == account_id)
+            .delete(synchronize_session=False)
+        )
+
+        # Step 3: delete the parent account. wx_drafts SET NULL fires
+        # here automatically (handled by MySQL on the FK constraint).
+        db.delete(row)
+        db.commit()
+
+        log.warning(
+            "admin purge: account_id=%s tenant_id=%s admin_user_id=%s "
+            "deleted_publish_records=%s drafts_set_null=%s",
+            account_id, row.tenant_id, admin_user.id,
+            deleted_publish_records, drafts_set_null,
+        )
+
+        return {
+            "account_id": account_id,
+            "deleted_publish_records": deleted_publish_records,
+            "drafts_set_null": drafts_set_null,
+            "deleted_account": True,
+        }
 
     # --- access_token 中控缓存 (spec §7.6) ----------------------------------
 
