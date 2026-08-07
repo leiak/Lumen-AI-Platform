@@ -169,8 +169,17 @@ export default function MemoryPage() {
           <Card
             title="会话列表"
             extra={<Button icon={<ReloadOutlined />} size="small" onClick={fetchConversations} />}
-            style={{ height: "100%" }}
-            styles={{ body: { padding: 0, overflow: "auto" } }}
+            // M38: Card 改 flex 容器,body 用 flex:1 + minHeight:0 才能让 overflow:auto
+            // 真正触发滚动(默认 body 跟内容一起长,auto 形同虚设,146 条会话挤成一坨)
+            style={{ height: "100%", display: "flex", flexDirection: "column" }}
+            styles={{
+              body: {
+                padding: 0,
+                overflow: "auto",
+                flex: 1,
+                minHeight: 0,
+              },
+            }}
           >
             <List
               loading={loadingConversations}
