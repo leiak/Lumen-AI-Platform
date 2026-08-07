@@ -102,14 +102,31 @@ async function unwrapPaginated<T>(
       page_size: body.page_size ?? fallbackPageSize,
     };
   }
-  throw new Error(res.data?.message || "list failed");
+  throw new Error(extractErrorMessage(res.data, "list failed"));
 }
 
 // Helper — unwraps a SingleResponse envelope and returns T.
+//
+// 错误消息解析顺序:res.data.message(项目标准信封)→ res.data.detail(FastAPI
+// HTTPException 4xx/5xx 返的形状,可能是字符串也可能是 dict)→ 兜底 "request failed"。
+// 修 2026-08-07 dev 体验:发布已发布草稿返 409 时 detail 是结构化 dict
+// (含 status / published_at),这里把 dict.message 提出来,让 toast 直接
+// 显示「draft is in 'published' state, cannot republish」而不是「Request failed
+// with status code 409」。
+function extractErrorMessage(data: any, fallback: string): string {
+  const detail = data?.detail;
+  if (typeof detail === "string" && detail) return detail;
+  if (detail && typeof detail === "object" && typeof detail.message === "string") {
+    return detail.message;
+  }
+  if (typeof data?.message === "string" && data.message) return data.message;
+  return fallback;
+}
+
 async function unwrapSingle<T>(promise: Promise<{ data: any }>): Promise<T> {
   const res = await promise;
   if (res.data?.code === 200) return res.data.data as T;
-  throw new Error(res.data?.message || "request failed");
+  throw new Error(extractErrorMessage(res.data, "request failed"));
 }
 
 // === Accounts ===============================================================
@@ -127,9 +144,9 @@ export const accountApi = {
   get: (id: number) =>
     unwrapSingle<WxAccountDetail>(api.get(`/wx-publisher/accounts/${id}`)),
 
-  /** POST /wx-publisher/accounts — returns full row with masked secret. */
+  /** POST /wx-publisher/accounts/ — returns full row with masked secret. */
   create: (data: WxAccountCreate) =>
-    unwrapSingle<WxAccountResponse>(api.post("/wx-publisher/accounts", data)),
+    unwrapSingle<WxAccountResponse>(api.post("/wx-publisher/accounts/", data)),
 
   /** PUT /wx-publisher/accounts/{id} */
   update: (id: number, data: WxAccountUpdate) =>
@@ -174,7 +191,7 @@ export const templateApi = {
 
   /** POST /wx-publisher/templates */
   create: (data: WxTemplateCreate) =>
-    unwrapSingle<WxTemplateResponse>(api.post("/wx-publisher/templates", data)),
+    unwrapSingle<WxTemplateResponse>(api.post("/wx-publisher/templates/", data)),
 
   /** PUT /wx-publisher/templates/{id} */
   update: (id: number, data: WxTemplateUpdate) =>
@@ -217,7 +234,7 @@ export const draftApi = {
 
   /** POST /wx-publisher/drafts */
   create: (data: WxDraftCreate) =>
-    unwrapSingle<WxDraftResponse>(api.post("/wx-publisher/drafts", data)),
+    unwrapSingle<WxDraftResponse>(api.post("/wx-publisher/drafts/", data)),
 
   /** PUT /wx-publisher/drafts/{id} */
   update: (id: number, data: WxDraftUpdate) =>
@@ -317,7 +334,7 @@ export const materialApi = {
 
   /** POST /wx-publisher/materials — manual entry */
   create: (data: WxMaterialCreate) =>
-    unwrapSingle<WxMaterialResponse>(api.post("/wx-publisher/materials", data)),
+    unwrapSingle<WxMaterialResponse>(api.post("/wx-publisher/materials/", data)),
 
   /** POST /wx-publisher/materials/from-kb — import from KB via RetrievalPipeline */
   importFromKB: (data: WxMaterialImportFromKBRequest) =>
@@ -336,10 +353,10 @@ export const materialApi = {
 // === Publish ================================================================
 
 export const publishApi = {
-  /** POST /wx-publisher/publish — async; BackgroundTasks + WS notification */
+  /** POST /wx-publisher/publish/ — async; BackgroundTasks + WS notification */
   createPublish: (data: WxPublishRequest) =>
     unwrapSingle<WxPublishRecordListItem>(
-      api.post("/wx-publisher/publish", data)
+      api.post("/wx-publisher/publish/", data)
     ),
 
   /** GET /wx-publisher/publish/{record_id} */

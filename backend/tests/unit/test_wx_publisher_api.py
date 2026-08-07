@@ -19,6 +19,7 @@ T18 新增 4 个(AI / render endpoint 鉴权 + 状态锁 + 跨租户):
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -606,6 +607,53 @@ def test_publish_endpoint_404_cross_tenant(
         WxPublishRecord.id == rec_a.id
     ).delete(synchronize_session=False)
     db_session.commit()
+
+
+def test_publish_endpoint_409_when_draft_already_published(
+    client, db_session, cleanup_rows, track_draft_ids,
+    track_user_ids, track_tenant_ids, track_account_ids,
+):
+    """POST /wx-publisher/publish/ 在 draft.status='published' 时返 409,
+    detail 是结构化 dict 包含 status + published_at,前端拿来渲染 inline
+    提示(spec §3.3 — 已发或正在发的不能再发)。
+
+    修 2026-08-07 dev 体验:draft 85 已经成功发布后用户重复点「发布」按钮
+    时,前端拿到 detail.published_at 即可告知"已发布于 X"而不是泛泛的
+    "request failed"。
+    """
+    tenant = make_tenant(db_session)
+    track_tenant_ids.append(tenant.id)
+    user = _make_user_for_request(db_session, tenant_id=tenant.id)
+    track_user_ids.append(user.id)
+    account = make_account(db_session, tenant_id=tenant.id, user_id=user.id)
+    track_account_ids.append(account.id)
+    published_at = datetime.utcnow() - timedelta(hours=1)
+    draft = make_draft(
+        db_session, tenant_id=tenant.id, user_id=user.id,
+        account_id=account.id, status="published", published_at=published_at,
+    )
+    track_draft_ids.append(draft.id)
+
+    teardown = _override_with(user)
+    try:
+        r = client.post(
+            "/api/v1/wx-publisher/publish/",
+            json={"draft_id": draft.id, "account_id": account.id},
+        )
+    finally:
+        teardown()
+
+    assert r.status_code == 409
+    body = r.json()
+    # 结构化 detail:不是裸字符串
+    detail = body["detail"]
+    assert isinstance(detail, dict), f"detail should be dict, got {type(detail)}"
+    assert detail["status"] == "published"
+    assert "published_at" in detail
+    # published_at 应回填到 detail 里(ISO 8601 字符串)
+    assert detail["published_at"] is not None
+    # message 字段保留,人类可读
+    assert "already published" in detail["message"].lower() or "cannot republish" in detail["message"].lower()
 
 
 # ---------------------------------------------------------------------------

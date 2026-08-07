@@ -18,6 +18,7 @@ import {
   Modal,
   Select,
   Alert,
+  Tooltip,
 } from "antd";
 import {
   ArrowLeftOutlined,
@@ -199,6 +200,16 @@ export default function DraftEditPage() {
       toast.warning("请先在顶部选择公众号账号,或前往 [公众号账号] 新建");
       return;
     }
+    // 状态锁 — spec §3.3:publishing / published 不允许重复发布,
+    // 此时按钮已 disabled,但网络侧 race / 老页面 stale state 仍可能触达,
+    // 兜底再校验一次。
+    if (draft.status === "publishing" || draft.status === "published") {
+      const when = draft.published_at
+        ? new Date(draft.published_at).toLocaleString("zh-CN")
+        : "未知时间";
+      toast.warning(`该草稿已${draft.status === "published" ? "发布" : "在发布中"},不可重复发布(已发布于 ${when})`);
+      return;
+    }
     try {
       const record = await publishApi.createPublish({
         draft_id: draftId,
@@ -206,7 +217,16 @@ export default function DraftEditPage() {
       });
       toast.success(`已加入发布队列 (#${record.id})`);
     } catch (err: any) {
-      toast.error(err?.message || "发布失败");
+      // 后端 4xx 在 unwrapSingle 已经被翻译成 Error.message;
+      // 409 detail 可能带 published_at,这里再尝试从 axios 错误对象
+      // 提一下,让 toast 更精确。
+      const detail =
+        (err as any)?.response?.data?.detail ?? null;
+      const extra =
+        detail && typeof detail === "object" && detail.published_at
+          ? ` (已发布于 ${new Date(detail.published_at).toLocaleString("zh-CN")})`
+          : "";
+      toast.error(`${err?.message || "发布失败"}${extra}`);
     }
   };
 
@@ -453,27 +473,56 @@ export default function DraftEditPage() {
         <Button icon={<LayoutOutlined />} onClick={handleRender}>
           应用模板
         </Button>
-        <Dropdown
-          menu={{
-            items: [
-              {
-                key: "now",
-                label: "立即发布",
-                icon: <CloudUploadOutlined />,
-                onClick: handlePublishNow,
-              },
-              {
-                key: "save-only",
-                label: "仅存为微信草稿",
-                onClick: handlePublishNow,
-              },
-            ],
-          }}
-        >
-          <Button type="primary" icon={<CloudUploadOutlined />}>
-            发布
-          </Button>
-        </Dropdown>
+        {/* 发布按钮 — status in [publishing, published] 时 disable +
+            Tooltip 提示(spec §3.3:已发或正在发的不能再发)。
+            修 2026-08-07 dev 体验:draft 85 重复点击「发布」时按钮直接置灰,
+            不再走 409 兜底报错路径。 */}
+        {(() => {
+          const isLocked =
+            draft.status === "publishing" || draft.status === "published";
+          const publishedHint = isLocked
+            ? draft.published_at
+              ? `该草稿已发布于 ${new Date(
+                  draft.published_at
+                ).toLocaleString("zh-CN")},不可重复发布`
+              : "该草稿正在发布或已发布,不可重复发布"
+            : "";
+          return (
+            <Tooltip title={publishedHint} placement="top">
+              {/* 包一层 span 让 Tooltip 在 disabled Button 上还能 hover 触发
+                  (antd v5 Dropdown/Button disabled 时原生事件被屏蔽,
+                  需 span 接管 mouse 事件) */}
+              <span>
+                <Dropdown
+                  disabled={isLocked}
+                  menu={{
+                    items: [
+                      {
+                        key: "now",
+                        label: "立即发布",
+                        icon: <CloudUploadOutlined />,
+                        onClick: handlePublishNow,
+                      },
+                      {
+                        key: "save-only",
+                        label: "仅存为微信草稿",
+                        onClick: handlePublishNow,
+                      },
+                    ],
+                  }}
+                >
+                  <Button
+                    type="primary"
+                    icon={<CloudUploadOutlined />}
+                    disabled={isLocked}
+                  >
+                    发布
+                  </Button>
+                </Dropdown>
+              </span>
+            </Tooltip>
+          );
+        })()}
       </Space>
 
       <DraftEditor

@@ -144,9 +144,20 @@ class WxPublishService:
             raise HTTPException(status_code=422, detail="account is inactive")
 
         if draft.status in ("publishing", "published"):
+            # 重复发布锁定 — spec §3.3。返 409 时把 status / published_at
+            # 一起放进 detail,前端可以拿来给 inline 提示(不用再调
+            # GET /drafts/{id} 拉 published_at)。
             raise HTTPException(
                 status_code=409,
-                detail=f"draft is in '{draft.status}' state, cannot republish",
+                detail={
+                    "message": f"draft is in '{draft.status}' state, cannot republish",
+                    "status": draft.status,
+                    "published_at": (
+                        draft.published_at.isoformat()
+                        if draft.published_at
+                        else None
+                    ),
+                },
             )
 
         record = WxPublishRecord(

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime
 
 from lumen_core.database import SessionLocal
 from lumen_core.security import get_password_hash
@@ -205,6 +206,7 @@ def make_draft(
     account_id: int | None = None,
     template_id: int | None = None,
     content_markdown: str = "hello",
+    published_at: datetime | None = None,
 ) -> WxDraft:
     """Create + commit a minimal WxDraft row."""
     suffix = suffix or uuid.uuid4().hex[:8]
@@ -220,6 +222,7 @@ def make_draft(
         content_html=None,
         status=status,
         tags=None,
+        published_at=published_at,
     )
     db.add(row)
     db.commit()

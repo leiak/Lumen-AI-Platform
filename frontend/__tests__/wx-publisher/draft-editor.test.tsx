@@ -597,4 +597,53 @@ describe("DraftEditPage", () => {
       screen.getByRole("button", { name: /前往素材库新建/ })
     ).toBeInTheDocument();
   });
+
+  // ====== 2026-08-07 修 dev 体验:已发布草稿「发布」按钮置灰 ======
+  // spec §3.3 — status in [publishing, published] 不允许重复发布。
+  // 之前按钮永远可点 → 用户重复点 → 409 兜底报错,体验差。
+  // 这里 mock status='published' 验证按钮 disabled。
+
+  it("disables the publish button when draft status is 'published'", async () => {
+    hoisted.getMock.mockResolvedValue({
+      ...sampleDraft,
+      status: "published",
+      published_at: "2026-08-07T02:03:19Z",
+    });
+    render(<TestWrapper><DraftEditPage /></TestWrapper>);
+    await waitFor(() => expect(screen.getByDisplayValue("AI 行业洞察")).toBeInTheDocument());
+    // 「发布」按钮应在 DOM 里但 disabled。用文本匹配(antd Button
+    // 包了 CloudUploadOutlined icon,accessible name 含 icon label 干扰
+    // getByRole 严格匹配)。
+    const publishBtn = await screen.findByText("发布");
+    // closest button 父元素
+    const btn = publishBtn.closest("button");
+    expect(btn).toBeTruthy();
+    expect(btn).toBeDisabled();
+  });
+
+  it("disables the publish button when draft status is 'publishing'", async () => {
+    hoisted.getMock.mockResolvedValue({
+      ...sampleDraft,
+      status: "publishing",
+      published_at: null,
+    });
+    render(<TestWrapper><DraftEditPage /></TestWrapper>);
+    await waitFor(() => expect(screen.getByDisplayValue("AI 行业洞察")).toBeInTheDocument());
+    const publishBtn = await screen.findByText("发布");
+    const btn = publishBtn.closest("button");
+    expect(btn).toBeDisabled();
+  });
+
+  it("keeps publish button enabled when draft status is 'ready' (typical publish flow state)", async () => {
+    hoisted.getMock.mockResolvedValue({
+      ...sampleDraft,
+      status: "ready",
+      published_at: null,
+    });
+    render(<TestWrapper><DraftEditPage /></TestWrapper>);
+    await waitFor(() => expect(screen.getByDisplayValue("AI 行业洞察")).toBeInTheDocument());
+    const publishBtn = await screen.findByText("发布");
+    const btn = publishBtn.closest("button");
+    expect(btn).not.toBeDisabled();
+  });
 });
