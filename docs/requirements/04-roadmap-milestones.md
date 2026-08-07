@@ -94,8 +94,12 @@
 - **M36.1**:视频合成前端(`/dashboard/videos`)
 - **M36.2.1**:股票素材库(30 张预置图)
 - **M36.2.1.x**:video_compose image URL 解析扩展
+- **M36.2.2**:配乐生成 — BGM stock music 库(stock_musics 表 + 30 张预置音频)+ ComposeModal MusicPickerModal + 视频合成自动混音
+- **M37.1 收尾**:wx-publisher 账号 admin purge 端点(`POST /wx-publisher/accounts/{id}/purge`,admin-only 真硬删 publish_records + SET NULL drafts.account_id + DELETE 主行)
+- **M37.2 收尾**:draft-85 401 链修复(后端 409 detail 加 `published_at` 字段结构化 dict + 前端发布按钮 disable + Tooltip + 前端 5 个集合 POST 路径加尾斜杠防 FastAPI `redirect_slashes` 307 丢 Authorization)
+- **M37.3 收尾**:eval dashboard parent/children menu(layout 加 SubMenu 容器)+ runs 列表页新建入口
 
-### M37:RAG 评测体系(2026-08-06)
+### M37:RAG 评测体系(2026-08-06 ship)
 - **M37.1**:评测集管理(EvalDataset + items)
 - **M37.2**:Eval Run + Runner + Celery
 - **M37.3**:Eval Dashboard(看板 + 趋势 + Run 详情)
@@ -152,6 +156,8 @@
 | 2026-07-16 | M36.2.1.x | video URL 解析 |
 | 2026-08-06 | M37 | RAG 评测体系 |
 | 2026-08-06 | CP7 | 全量测试修复 |
+| 2026-08-07 | M36.2.2 | 配乐生成(BGM stock music) |
+| 2026-08-07 | M37 收尾 | wx-publisher admin purge / draft-85 401 链 / eval parent-children menu |
 
 ---
 
@@ -177,13 +183,13 @@
 
 ---
 
-## 数字基线(2026-08-06)
+## 数字基线(2026-08-07)
 
 | 维度 | 数字 |
 |------|------|
-| **里程碑数** | 37 |
-| **后端测试** | 1469 passed / 8 skipped / 1 xfailed |
-| **前端测试** | 13 个 eval 测试 100% pass / 整套件 baseline |
+| **里程碑数** | 37 + 3 收尾 |
+| **后端测试** | 1502 passed / 8 skipped / 1 xfailed / 0 failed(含 M37 3 个 wx_account purge 测试) |
+| **前端测试** | 492 passed / 1 failed(整套件 baseline;1 个 pre-existing fail 见 CLAUDE.md §8) |
 | **数据库表** | 80+ 张 |
 | **API 端点** | 250+ 个 |
 | **工作流节点** | 22 个 |
@@ -193,4 +199,4 @@
 ---
 
 **维护者**:产品经理 + 全栈架构师
-**最近更新**:2026-08-06(M37 + CP7 ship)
+**最近更新**:2026-08-07(M37 收尾 + M36.2.2 配乐 ship)
