@@ -52,7 +52,11 @@ def _decrypt_app_secret(account: WxAccount) -> str:
     吗?目前不,但留这个 lazy import 当保险)。
     """
     from lumen_services.wx_publisher.account_service import WxAccountService
-    return WxAccountService().decrypt_app_secret(account)
+    # BUG fix 2026-08-07:之前传整个 account ORM 对象进 decrypt_app_secret,
+    # 签名要 bytes — Fernet 收到 SQLAlchemy 实例抛 TypeError,RealClient
+    # 路径从 M32 ship 至今 1.5 个月在第一关 get_access_token 就跪,根本
+    # 碰不到微信 API。修后传 app_secret_encrypted (bytes)。
+    return WxAccountService().decrypt_app_secret(account.app_secret_encrypted)
 
 
 def _is_token_expired(account: WxAccount, *, now: Optional[datetime] = None) -> bool:
