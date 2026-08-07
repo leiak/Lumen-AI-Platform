@@ -103,12 +103,13 @@ logs/
 /wf*.json
 /wflist.json
 
-# Dev DB snapshots (backend/sql/*.sql) — see backend/sql/README.md
-# 5 MB per snapshot; regenerated on demand via scripts/dump_dev_db.py
-backend/sql/*.sql
-!backend/sql/.gitkeep
-!backend/sql/README.md
+# ============================================================================
+# 1.0 release cleanup — dev-time artifacts NOT shipped to GitHub
+# ============================================================================
 
+# Canonical database schema is tracked at scripts/sql/schema.sql (no data,
+# pure DDL from SHOW CREATE TABLE). Old local full-dump location backend/sql/
+# removed 2026-08-07 in favor of this tracked schema-only file.
 # ============================================================================
 # 1.0 release cleanup — dev-time artifacts NOT shipped to GitHub
 # ============================================================================
