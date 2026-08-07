@@ -92,6 +92,41 @@ def test_token_issue_origin_not_whitelisted_403(client):
     assert r.status_code == 403
 
 
+def test_token_issue_missing_origin_403(client):
+    """不携带 Origin 头必须被拒(spec §5.3:Referer fallback 已移除)。
+
+    Referer 不能作为 origin allowlist 的依据 —— 可被 redirect 欺骗 / 浏览器
+    referrer-policy 剥离 / 携带完整 URL(suffix attack + 信息泄露)。缺 Origin
+    的请求直接 403,逼调用方走浏览器 fetch() 路径。
+    """
+    _seed_dev_app_for_test()
+    r = client.post(
+        "/api/v1/external/auth/token",
+        json={"app_key": "lc_pub_dev_demo_only_replace_in_prod", "visitor_id": "test-visitor-missing-origin"},
+    )
+    assert r.status_code == 403, r.text
+    body = r.json()
+    assert body["detail"] == "origin not allowed"
+
+
+def test_token_issue_referer_only_still_403(client):
+    """只发 Referer(不 Origin)→ 403。
+
+    这是历史安全洞的关键回归测试。修复前代码读 ``Origin or Referer``,
+    Referer 即使单独存在也能让请求通过。修复后 match_origin() 拿到空字符串
+    → 立即 False → 403。
+    """
+    _seed_dev_app_for_test()
+    r = client.post(
+        "/api/v1/external/auth/token",
+        json={"app_key": "lc_pub_dev_demo_only_replace_in_prod", "visitor_id": "test-visitor-referer-only"},
+        headers={"Referer": "http://localhost:11337/some/path?token=stolen"},
+    )
+    assert r.status_code == 403, r.text
+    body = r.json()
+    assert body["detail"] == "origin not allowed"
+
+
 def test_token_issue_visitor_id_too_short_422(client):
     """Pydantic body validation surfaces as 422 (not 400).
 

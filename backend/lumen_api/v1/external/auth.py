@@ -7,8 +7,8 @@ Flow:
   2. Look up ExternalApp by app_key (only active rows) — 401 if not found
      (single generic message; don't reveal whether the key existed but
      was disabled vs. never existed)
-  3. Read Origin header (fallback to Referer) and check it against
-     ``app.allowed_origins`` — 403 if not whitelisted
+  3. Read Origin header (required — no Referer fallback) and check it
+     against ``app.allowed_origins`` — 403 if missing or not whitelisted
   4. Check in-process rate limit — 429 if over the per-app threshold
      (the check happens BEFORE the visitor upsert so a rate-limited
      request does NOT pollute the visitor table)
@@ -28,11 +28,6 @@ this endpoint. The plan's literal ``from lumen_services.external_auth_service
 import check_rate_limit, ...`` binds the function name at import time and
 would make the monkey-patch a silent no-op.
 
-TODO(security): the Origin-header fallback to Referer is a known soft spot
-in spec § 5.3. The Referer can be spoofed/spoofed-by-redirect and only
-enforces origin-style allowlisting by accident. Out-of-scope for the
-current fix batch — follow up with a spec change that drops the fallback
-or replaces it with a proper CORS preflight.
 """
 from datetime import datetime
 
@@ -59,7 +54,10 @@ def issue_token(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    origin = request.headers.get("origin") or request.headers.get("referer", "")
+    # 只读 Origin 头 —— Referer 可被 redirect / 浏览器 referrer-policy 剥离,
+    # 且携带完整 URL(信息泄露 + suffix attack),不可作为 origin allowlist 的依据。
+    # 缺 Origin 的请求直接被 match_origin 拒(空 origin → False)→ 403。
+    origin = request.headers.get("origin") or ""
 
     app = db.scalar(
         select(ExternalApp).where(
