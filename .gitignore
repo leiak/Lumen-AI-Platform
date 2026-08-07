@@ -53,10 +53,13 @@ backend/storage/generated_images/**/*.webp
 backend/storage/generated_images/**/*.gif
 
 # Root storage/ — dev helper scripts (run_mcp.ps1 / run_test.ps1 / test_sse.sh / uvicorn_restart.log) tracked;
-# 运行时生成内容(_tmp/ + 音视频 / 图像素材子目录)不进 git
+# 运行时生成内容(_tmp/ + 音视频 / 图像素材子目录 + stock music)不进 git
 storage/_tmp/
 storage/generated_audios/
 storage/generated_images/
+# M36.2.2 配乐生成 (BGM) — stock_music 落盘目录,运行时拉音频后写本地。
+# seed_stock_musics.py 只填 DB 不写这里。
+storage/stock/
 
 # Root-level dev fixtures (KB upload smoke 测试文件)
 /*.docx
@@ -147,4 +150,18 @@ docs-internal/
 /*.rej
 /coverage/
 /.nyc_output/
+
+# ============================================================================
+# Dev curl / login artifacts — 这些都是手动 `curl /auth/login` 或 `curl /models`
+# 拉下来调试时落盘的 json,内含 JWT access_token 或全量 model api_key。
+# 必须 ignore 否则容易习惯性 add -A 进去。每次需要重新跑接口拿。
+# (2026-08-07 cleanup:被 working copy 命中,前 commit 都 review 过)
+# ============================================================================
+/login.json
+/models_raw.json
+backend/login.json
+backend/run512_results.json
+
+# Dev debug Playwright/curl 一次性诊断脚本(不是真测试,只是诊断)
+/frontend/e2e/diag-*.cjs
 
