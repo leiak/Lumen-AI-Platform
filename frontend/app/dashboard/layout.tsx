@@ -24,6 +24,8 @@ import {
   SendOutlined,
   DatabaseOutlined,
   PlayCircleOutlined,
+  DashboardOutlined,
+  HistoryOutlined,
 } from "@ant-design/icons";
 import { ProLayout } from "@ant-design/pro-components";
 import zhCN from "antd/locale/zh_CN";
@@ -102,13 +104,21 @@ const menuItems = [
     name: "智能问数",
     icon: <DatabaseOutlined />,
   },
-  // M37.1 RAG 评测 — placed between 智能问数 and 记忆管理 (数据 / 业务
-  // 评测聚集,运营 + 算法都用得到)。未来 M37.3 看板做完后,这一项会
-  // 加 children 列出「数据集 / 运行 / 报告」三个子页。
+  // M37.1 + M37.3 — RAG 评测拆 parent + 2 children。
+  // parent path = /dashboard/eval 即 M37.3 评测看板 (KPI + trend + run 列表) —
+  // 借 layout.tsx:291-299 menuItemRender 强 router.push(item.path),点 parent
+  // 直接去看板。子菜单展开后:
+  //   - 评测数据集 → /dashboard/eval/datasets (M37.1 列表)
+  //   - 评测运行   → /dashboard/eval/runs    (M37.3 新增列表)
+  // 参照 wx-publisher (layout.tsx:60-69) parent + children 的现有形态。
   {
-    path: "/dashboard/eval/datasets",
+    path: "/dashboard/eval",
     name: "RAG 评测",
-    icon: <FileTextOutlined />,
+    icon: <DashboardOutlined />,
+    children: [
+      { path: "/dashboard/eval/datasets", name: "评测数据集" },
+      { path: "/dashboard/eval/runs", name: "评测运行" },
+    ],
   },
   {
     path: "/dashboard/memory",

@@ -482,7 +482,10 @@ function DatasetAndConfigPicker({
     enabled: Boolean(dsDetail?.kb_id),
   });
 
-  const embeddingModelConfigId = kbData?.embedding_model_config_id ?? 1;
+  // KB 详情还在路上时先不传值,RunConfigForm 内部 effect 等 KB 返回后
+  // 单字段更新。不能 ?? 1 —— dev DB id=1 是 MiniMax chat 不是 embedding,
+  // 后端 EvalRunCreate 会 500。
+  const embeddingModelConfigId = kbData?.embedding_model_config_id;
 
   return (
     <>

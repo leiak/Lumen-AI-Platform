@@ -316,10 +316,11 @@ export default function EvalDatasetsPage() {
             config,
           });
         }}
-        // 拉不到 KB → 兜底 1(nomic-embed-text);但 99% 情况拉得到
-        defaultEmbeddingModelConfigId={
-          runTargetKb?.embedding_model_config_id ?? 1
-        }
+        // KB 详情还在路上时先不传值,RunConfigForm 内部 effect 等 KB 返回后
+        // 用 setFieldValue 单字段更新(避开整表 resetFields 把用户已填值抹掉)。
+        // 不能兜底 1 —— dev DB id=1 是 MiniMax chat 模型,不是 embedding,
+        // 后端 EvalRunCreate 会 500 `embedding_model_config_id mismatch`。
+        defaultEmbeddingModelConfigId={runTargetKb?.embedding_model_config_id}
         submitting={startMut.isPending}
       />
     </div>

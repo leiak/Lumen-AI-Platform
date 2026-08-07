@@ -160,9 +160,9 @@ export default function EvalRunDetailPage() {
       >
         <Button
           icon={<ArrowLeftOutlined />}
-          onClick={() => router.push("/dashboard/eval")}
+          onClick={() => router.push("/dashboard/eval/runs")}
         >
-          返回看板
+          返回运行列表
         </Button>
         <h2 style={{ margin: 0, marginRight: "auto" }}>
           Run #{run.id} 详情
