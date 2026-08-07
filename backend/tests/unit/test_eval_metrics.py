@@ -4,7 +4,8 @@
 
 - TestRetrievalMetrics(10 测试)—— hit / mrr / ndcg / recall + aggregate
 - TestAnswerMetrics(4 测试)—— keyword_hit_rate + 2 个 prompt 构造器
-- TestJudgeParsing(4 测试)—— parse_judge_response + strict schema 兜底
+- TestJudgeParsing(6 测试)—— parse_judge_response + strict schema 兜底
+  + <think> 剥离 + 自然语言中夹 JSON 兜底
   (D8 关键:LLM 输出非 JSON / 多字段时 Pydantic 严格校验)
 
 Spec: docs-internal/superpowers/specs/m37-rag-evaluation.md §4.2
@@ -282,6 +283,42 @@ class TestJudgeParsing:
         result = parse_judge_response(content, AnswerRelevancyScore)
         assert result.score == 1
         assert result.reasoning == "部分支撑"
+
+    def test_parse_think_block_then_json(self):
+        """推理模型(MiniMax-M3 / deepseek-r1)先吐 ``<think>...</think>``
+        再吐 JSON,parse 应剥掉 think 块抓 JSON。
+
+        这是 M37 RAG Eval 全 0 分的根因修复 — id=1 MiniMax-M2.7-highspeed
+        推理模型吐 think 块,原 parse_judge_response 只剥 ```json``` fence,
+        第一字符 ``<think>`` 直接 json.loads 报 column 0。剥 think 后剩
+        纯 JSON,FaithfulnessScore strict schema 通过。
+        """
+        content = (
+            "<think>We need to evaluate the answer against the context.\n"
+            "The answer is partially supported by the retrieved chunks.\n"
+            "There is some inference not strictly grounded in the context.\n"
+            "</think>\n"
+            '{"score": 1, "reasoning": "部分支撑,有少量推断"}'
+        )
+        result = parse_judge_response(content, FaithfulnessScore)
+        assert result.score == 1
+        assert result.reasoning == "部分支撑,有少量推断"
+
+    def test_parse_json_embedded_in_prose(self):
+        """LLM 偶尔先写自然语言评估、再在末尾塞 JSON(没 `````json`` fence、
+        也没 think 块)。parse 应靠 brace-balance 兜底抓 JSON。
+
+        这条路径覆盖 judge 输出纯 prose + 散落 JSON 的场景。_extract_json_object
+        从第一个 ``{`` 起扫 brace 边界,字符串内 ``"`` 跳过,找到匹配 ``}`` 返回。
+        """
+        content = (
+            "我的评估如下。该答案部分由上下文支撑但有少量推断,\n"
+            "整体方向正确但细节需要补充。\n\n"
+            '{"score": 1, "reasoning": "部分支撑,有补充"}'
+        )
+        result = parse_judge_response(content, AnswerRelevancyScore)
+        assert result.score == 1
+        assert result.reasoning == "部分支撑,有补充"
 
     def test_parse_invalid_json_raises(self):
         """非 JSON 输入抛 ValueError(由 JudgeClient 兜底成 score=0)。"""

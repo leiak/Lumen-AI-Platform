@@ -75,28 +75,89 @@ class AnswerRelevancyScore(_JudgeScoreBase):
 # ---------------------------------------------------------------------------
 
 
+def _extract_json_object(text: str) -> Optional[str]:
+    """在 text 中 brace-balance 找第一个 ``{...}`` JSON object。
+
+    LLM 偶尔在自然语言里夹 JSON(没 ```` ```json ```` fence 也没
+    ``<think>`` 块),例如「我的评估如下。{...}」。从第一个 ``{``
+    开始 brace 计数,字符串内 ``"`` 跳过(支持 ``\"`` 转义),找到
+    匹配的 ``}`` 时返回该 JSON 子串。找不到返回 ``None``,让上层
+    抛 ValueError 兜底。
+
+    比 ``json.JSONDecoder.raw_decode`` 优势:即使 JSON 前面贴着自然
+    语言(开头不是 ``{``)也能从第一个 ``{`` 起扫;raw_decode 要
+    求起点必须是合法 JSON 头,贴 prose 时直接抛。
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if escape:
+            # \" 转义:吃掉这个字符,下个字符按字面意义处理
+            escape = False
+            continue
+        if c == "\\" and in_string:
+            escape = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
 def parse_judge_response(
     content: str, response_format: Type[_TModel]
 ) -> _TModel:
     """把 LLM 原始输出解析成 strict schema 实例。
 
-    兼容 3 种常见 LLM 输出形态:
+    兼容 4 种常见 LLM 输出形态:
 
     1. 纯 JSON(直接 ``model_validate_json``)
     2. ```` ```json ... ``` ```` 完整包(头尾都有 fence)
     3. 「客套话 + JSON + 客套话」混合 —— LLM 经常先说「我的评估如下」
        再贴 JSON。regex 抓 ```` ``` ```` 代码块内容。
+    4. 推理模型(deepseek-r1 / MiniMax-M3)先吐 ``<think>...</think>``
+       推理块,再贴 JSON —— 剥 think 块后用 brace-balance 兜底抓 JSON。
 
     解析失败抛 ``ValueError``(由 JudgeClient 兜底,转为 score=0)。
     """
     text = content.strip()
-    # regex 兜底:LLM 输出里有 ```json ... ``` 代码块就提取它
-    # re.DOTALL 让 . 匹配换行;非贪婪 .*? 防止跨多个代码块错抓
+    # 路径 1:regex 兜底 ```` ```json ... ``` ```` 完整包(原行为,优先)。
+    # re.DOTALL 让 . 匹配换行;非贪婪 .*? 防止跨多个代码块错抓。
     md_match = re.search(
         r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL
     )
     if md_match:
         text = md_match.group(1).strip()
+    else:
+        # 路径 2:推理模型(deepseek-r1 / MiniMax-M3)会先吐
+        # ``<think>...</think>`` 推理块再贴 JSON。think 块内可能有
+        # 反引号 / 嵌套 brace,不能直接 brace-balance —— 先剥 think
+        # 块再继续。re.DOTALL 让 .*? 跨换行,非贪婪匹配最近 ``</think>``。
+        think_match = re.search(r"<think>.*?</think>", text, re.DOTALL)
+        if think_match:
+            text = (text[: think_match.start()] + text[think_match.end() :]).strip()
+
+    # 路径 3:LLM 在自然语言里夹 JSON 时,brace-balance 找 ``{...}``。
+    # ``text.startswith("{")`` 直接走 json.loads;否则扫 brace 边界。
+    if not text.startswith("{"):
+        obj = _extract_json_object(text)
+        if obj is None:
+            raise ValueError(f"judge output not a JSON object: {text[:200]!r}")
+        text = obj
+
     # 严格 JSON 解析 + Pydantic 严格 schema 校验
     data = json.loads(text)
     if not isinstance(data, dict):
