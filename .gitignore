@@ -52,6 +52,12 @@ backend/storage/generated_images/**/*.jpeg
 backend/storage/generated_images/**/*.webp
 backend/storage/generated_images/**/*.gif
 
+# Root storage/ — dev helper scripts (run_mcp.ps1 / run_test.ps1 / test_sse.sh / uvicorn_restart.log) tracked;
+# 运行时生成内容(_tmp/ + 音视频 / 图像素材子目录)不进 git
+storage/_tmp/
+storage/generated_audios/
+storage/generated_images/
+
 # Root-level dev fixtures (KB upload smoke 测试文件)
 /*.docx
 /*.pdf
