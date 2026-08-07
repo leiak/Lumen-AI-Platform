@@ -134,6 +134,9 @@ docs-internal/
 /.claude/scheduled_tasks.lock
 /.claude/find-uvicorn.ps1
 
+# CLAUDE.md — Claude Code 项目铁律,本地配置不进 git(个人 Claude session 用,各人自维护)
+/CLAUDE.md
+
 # Claude Code 续作 session log(根目录会有)
 /2026-*-this-session-is-being-continued-from-a-previous-co*.txt
 
