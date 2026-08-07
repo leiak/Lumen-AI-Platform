@@ -74,7 +74,7 @@ class ImageGenerationService:
         """
         mc = db.query(ModelConfig).filter(
             ModelConfig.id == model_config_id,
-            ModelConfig.tenant_id == tenant_id,
+            (ModelConfig.tenant_id == tenant_id) | (ModelConfig.tenant_id.is_(None)),
         ).first()
         if not mc:
             return [], None  # signal not-found

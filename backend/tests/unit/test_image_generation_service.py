@@ -137,6 +137,48 @@ def test_create_model_not_found(db_session):
     assert batch is None
 
 
+def test_create_finds_global_builtin_model(db_session, clean_rows):
+    """Global builtin ModelConfig (tenant_id=NULL) must be findable from
+    any tenant — matches the IS NULL OR = pattern in agent_service.py:162.
+    Project model: configs are intentionally global, see
+    lumen_api/v1/models.py:54."""
+    mc = ModelConfig(
+        name=f"svc_test_global_mc_{uuid.uuid4().hex[:6]}",
+        model_type="minimax",
+        model_name="image-01",
+        tenant_id=None,
+        is_active=True,
+        is_chat=False,
+        is_embedding=False,
+        is_image_generation=True,
+    )
+    db_session.add(mc)
+    db_session.commit()
+    db_session.refresh(mc)
+
+    tenant_ids, mc_ids, _user_ids = clean_rows
+    mc_ids.append(mc.id)
+
+    svc = ImageGenerationService()
+    rows, batch = svc.create(
+        db_session,
+        tenant_id=1,
+        user_id=1,
+        model_config_id=mc.id,
+        prompt="global builtin test",
+        background_tasks=BackgroundTasks(),
+    )
+    assert len(rows) == 1
+    assert batch is None
+    assert rows[0].status == "pending"
+    assert rows[0].model_config_id == mc.id
+    assert rows[0].tenant_id == 1
+    # row's effective model config is the global builtin
+    fetched = db_session.query(ModelConfig).filter(ModelConfig.id == mc.id).first()
+    assert fetched is not None
+    assert fetched.tenant_id is None
+
+
 def test_create_model_not_image_capable(db_session, clean_rows):
     tenant_ids, mc_ids, user_ids = clean_rows
     suffix = uuid.uuid4().hex[:8]
