@@ -4,10 +4,25 @@
 -- Source: localhost:3307 (project dev MySQL via Docker, MySQL 8.0.46)
 -- Tool: pymysql SHOW CREATE TABLE on each table (utf8mb4)
 -- ============================================================
--- Usage: mysql < scripts/sql/schema.sql
--- WARNING: SCHEMA-ONLY. No user data.
--- Fresh setup: source this file, then lumen_main.py auto-runs
--- ensure_*_table migrations + lumen_scripts/seed_*.py for defaults.
+-- Usage:
+--   mysql < scripts/sql/schema.sql              -- 70 tables, no data
+--   mysql < scripts/sql/data.sql                -- default system rows
+--   (or in one shot, see scripts/sql/README.md)
+--
+-- SCHEMA-ONLY: no user data, no seed rows.  For a "use the system
+-- immediately" setup, also source ``scripts/sql/data.sql`` which
+-- contains the default tenant, admin, MCP demo, marketplace skills,
+-- workflow templates, wx-publisher templates, stock images / BGM
+-- metadata, and the LLM / embedding / image / TTS ModelConfig rows.
+--
+-- After schema + data are loaded, optionally regenerate the BLOB
+-- thumbnails and on-disk stock assets:
+--   cd backend && python -m scripts.seed_wx_template_thumbnails
+--   cd backend && python -m lumen_scripts.seed_stock_assets
+--   cd backend && python -m lumen_scripts.seed_stock_musics
+--
+-- Default login (set by data.sql): admin / admin123.
+-- See scripts/sql/README.md for the full new-install playbook.
 -- ============================================================
 
 SET NAMES utf8mb4;
@@ -311,7 +326,9 @@ CREATE TABLE `document_chunks` (
 
 CREATE TABLE `documents` (
   `filename` varchar(255) DEFAULT NULL COMMENT '文件名',
-  `file_path` varchar(500) DEFAULT NULL COMMENT '文件存储路径',
+  `file_path` varchar(500) DEFAULT NULL COMMENT 'legacy 本地相对路径(保留,新代码读 asset_storage_key)',
+  `asset_storage_key` varchar(500) DEFAULT NULL COMMENT 'M38.1 storage 后端 key,uploads/<tenant>/<kb>/<filename>',
+  `storage_backend` varchar(20) DEFAULT 'local' COMMENT 'M38.1 实际后端:local/s3',
   `file_type` varchar(100) DEFAULT NULL COMMENT '文件类型(MIME)',
   `file_size` int DEFAULT NULL COMMENT '文件大小(字节)',
   `content` text COMMENT '文档内容文本',
@@ -330,6 +347,8 @@ CREATE TABLE `documents` (
   KEY `ix_documents_created_by` (`created_by`),
   KEY `ix_documents_id` (`id`),
   KEY `ix_documents_knowledge_base_id` (`knowledge_base_id`),
+  KEY `ix_documents_asset_storage_key` (`asset_storage_key`),
+  KEY `ix_documents_storage_backend` (`storage_backend`),
   CONSTRAINT `documents_ibfk_1` FOREIGN KEY (`knowledge_base_id`) REFERENCES `knowledge_bases` (`id`),
   CONSTRAINT `documents_ibfk_2` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`),
   CONSTRAINT `documents_ibfk_3` FOREIGN KEY (`embedding_model_config_id`) REFERENCES `model_configs` (`id`) ON DELETE RESTRICT

@@ -194,6 +194,7 @@ async def startup_event():
     ensure_workflow_v2_migrated()
     ensure_notifications_table()
     ensure_documents_created_by()
+    ensure_documents_storage_columns()  # M38.1: storage backend abstraction
     ensure_conversations_deleted_at()
     ensure_conversations_team_id()
     ensure_conversations_user_id_nullable()

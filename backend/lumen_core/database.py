@@ -263,6 +263,59 @@ def ensure_documents_created_by() -> None:
         )
 
 
+def ensure_documents_storage_columns() -> None:
+    """M38.1: add ``asset_storage_key`` + ``storage_backend`` to
+    ``documents`` if missing.
+
+    Two new columns supporting the storage backend abstraction:
+
+    - ``asset_storage_key`` (VARCHAR(500) NULL): the storage backend
+      key for the document file. NULL on legacy rows — those continue
+      to read via the pre-M38.1 ``file_path`` local-disk convention.
+      When populated, takes precedence over ``file_path`` at read
+      time.
+    - ``storage_backend`` (VARCHAR(20) NULL, default ``'local'``):
+      which backend produced ``asset_storage_key`` (``local`` /
+      ``s3``). NULL is normalised to ``local`` at read time so the
+      pre-M38.1 behaviour is preserved.
+
+    Idempotent — each ALTER guards on ``_column_exists``. Safe to
+    re-run on every uvicorn boot.
+
+    Spec: ``docs-internal/superpowers/specs/2026-08-26-kb-storage-abstraction.md``
+    § 3.1.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        with engine.begin() as conn:
+            if not _column_exists("documents", "asset_storage_key"):
+                conn.execute(text(
+                    "ALTER TABLE documents "
+                    "ADD COLUMN asset_storage_key VARCHAR(500) NULL "
+                    "COMMENT 'M38.1 storage key; NULL on legacy rows'"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX idx_documents_asset_storage_key "
+                    "ON documents (asset_storage_key(191))"
+                ))
+            if not _column_exists("documents", "storage_backend"):
+                conn.execute(text(
+                    "ALTER TABLE documents "
+                    "ADD COLUMN storage_backend VARCHAR(20) NULL "
+                    "DEFAULT 'local' "
+                    "COMMENT 'M38.1 backend: local / s3; NULL ≡ local'"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX idx_documents_storage_backend "
+                    "ON documents (storage_backend)"
+                ))
+    except Exception:
+        logger.exception(
+            "ensure_documents_storage_columns failed; will retry on next startup"
+        )
+
+
 def ensure_conversations_deleted_at() -> None:
     """Add ``deleted_at`` to ``conversations`` if it's missing.
     Nullable DateTime used as a soft-delete tombstone; None = active,

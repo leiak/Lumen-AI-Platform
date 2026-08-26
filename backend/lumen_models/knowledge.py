@@ -40,6 +40,24 @@ class Document(BaseModel):
     file_path = Column(String(500), nullable=False)
     file_type = Column(String(100))
     file_size = Column(Integer)
+    # --- M38.1 storage backend abstraction ---
+    # ``asset_storage_key`` holds the storage-backend key (relative
+    # path for LocalBackend, full key for S3Backend). NULL on legacy
+    # rows — those still read via ``file_path`` on the local disk.
+    # ``storage_backend`` is the backend that produced the key
+    # (``local`` or ``s3``); NULL is interpreted as ``local`` so the
+    # pre-M38.1 behaviour is preserved by default.
+    asset_storage_key = Column(
+        String(500),
+        nullable=True,
+        comment="M38.1 storage key (relative path for local, s3 key for S3); NULL for legacy rows",
+    )
+    storage_backend = Column(
+        String(20),
+        nullable=True,
+        default="local",
+        comment="M38.1 backend that produced asset_storage_key: local / s3",
+    )
     content = Column(Text)
     doc_metadata = Column(JSON)
     status = Column(String(20), default="pending")  # pending, processing, completed, failed

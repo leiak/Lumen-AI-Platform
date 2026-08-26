@@ -211,15 +211,27 @@ async def upload_document(
     if not kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
 
-    # Save file to data directory
-    upload_dir = f"data/uploads/{current_user.tenant_id}/{kb_id}"
-    os.makedirs(upload_dir, exist_ok=True)
+    # M38.1: route the write through the storage backend abstraction.
+    # The key shape is ``uploads/<tenant>/<kb>/<filename>`` — for the
+    # default LocalBackend this resolves to the pre-M38.1 path
+    # (``./data/uploads/...``) so parsers that still ``open(file_path)``
+    # find the same bytes. ``file_path`` keeps the legacy shape for
+    # backwards compatibility; ``asset_storage_key`` / ``storage_backend``
+    # record the M38.1 source of truth.
+    from lumen_services.storage import get_storage_backend
+    storage = get_storage_backend()
     safe_filename = sanitize_filename(file.filename)
-    file_path = os.path.join(upload_dir, safe_filename).replace("\\", "/")
+    asset_storage_key = f"uploads/{current_user.tenant_id}/{kb_id}/{safe_filename}"
+    content = await file.read()
+    storage.put_object(asset_storage_key, content)
 
-    with open(file_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
+    # file_path stays as the legacy ``data/uploads/<tenant>/<kb>/<filename>``
+    # string — LocalBackend.root defaults to ``./data`` so parsers'
+    # ``open(file_path)`` resolves to the same bytes storage put.
+    # For s3 backend the file_path is a logical placeholder; the actual
+    # bytes live in S3 and parsers must be refactored to read via
+    # storage.get_object_stream (M38.x follow-up; see spec §10 risk).
+    file_path = f"data/{asset_storage_key}"
 
     # Create document record
     doc = Document(
@@ -230,6 +242,13 @@ async def upload_document(
         status="pending",
         knowledge_base_id=kb_id,
         created_by=current_user.id,
+        # M38.1: record which backend produced the bytes + the key it
+        # wrote under. ``asset_storage_key`` is the source of truth
+        # for the storage layer; ``file_path`` is kept around for
+        # parsers that still ``open(file_path)`` against the local
+        # disk. See spec §5.4 for the read precedence rule.
+        asset_storage_key=asset_storage_key,
+        storage_backend=storage.backend_name,
         # Copy the KB's embedder FK onto the doc so the async worker
         # (and retry/rechunk/delete paths, all of which read
         # ``doc.embedding_model_config_id``) can resolve the embedder

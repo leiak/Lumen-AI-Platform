@@ -101,3 +101,10 @@ router.include_router(eval_datasets.router)
 #   /api/v1/eval/runs/*  (run lifecycle + 详情 + cancel + compare)
 from . import eval_runs
 router.include_router(eval_runs.router)
+
+# M38.1: storage backend abstraction
+#   /api/v1/storage/health   (probe)
+#   /api/v1/storage/local/*  (bearer-auth local proxy)
+#   /api/v1/storage/migrate-to-s3  (admin-only cold migration)
+from . import storage
+router.include_router(storage.router)

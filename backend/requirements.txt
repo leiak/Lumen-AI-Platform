@@ -82,3 +82,16 @@ sse-starlette==1.8.2
 
 # M33: Text2SQL 智能问数 — SQL 静态校验(只允许 SELECT/WITH,黑名单 DDL/DML)
 sqlparse==0.5.5
+
+# M38.1: storage backend abstraction (S3-compatible boto3 client).
+# LocalBackend does not require it, so installations that never set
+# ``STORAGE_BACKEND=s3`` can omit this dependency. Marked as a
+# soft floor (``>=``) rather than pinning to a single version
+# because boto3's stable API surface is small and the botocore
+# pin often follows the boto3 release.
+boto3>=1.34.0,<2.0
+
+# M38.1 test dependency — mocks the S3 API so unit tests can run
+# without a live MinIO endpoint. ``moto`` is installed only in the
+# test environment via ``pip install -e .[test]`` or directly.
+moto[s3]>=5.0.0,<6.0

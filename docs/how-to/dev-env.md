@@ -409,6 +409,20 @@ MINIMAX_API_KEY=sk-cp-...
 Wx
 WX_PUBLISHER_REAL_CLIENT_ENABLED=false
 WX_PUBLISHER_FERNET_KEY=dev-only-fernet-key-do-not-use-in-prod-32b
+
+# Storage (M38.1). Default backend is local; flip STORAGE_BACKEND=s3 to
+# point KB uploads at MinIO/S3. S3 vars are only required when s3.
+STORAGE_BACKEND=local
+STORAGE_LOCAL_ROOT=./data
+# STORAGE_LOCAL_USE_LEGACY_ROOT=false  # 设为 true 时回落到 ./storage
+S3_ENDPOINT=http://localhost:9000
+S3_REGION=us-east-1
+S3_BUCKET=lumen-kb
+S3_ACCESS_KEY=minioadmin
+S3_SECRET_KEY=minioadmin
+S3_USE_SSL=false
+S3_PATH_STYLE=true
+S3_PRESIGNED_URL_EXPIRY=600
 ```
 
 **frontend/.env.local**:

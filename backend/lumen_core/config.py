@@ -86,6 +86,34 @@ class Settings(BaseSettings):
     # outside the backend checkout (e.g. mounted disk in production).
     IMAGE_STORAGE_DIR: str = ""
 
+    # --- M38.1 Storage backend abstraction ---
+    # Selects the backend used by ``lumen_services.storage``. Default
+    # ``local`` keeps the pre-M38.1 behaviour of writing under
+    # ``backend/storage/``. Switch to ``s3`` to route through boto3
+    # against any S3-compatible service (MinIO / AWS S3 / Aliyun OSS).
+    STORAGE_BACKEND: str = "local"
+    # Override the LocalBackend root (default: ./storage). Useful when
+    # uvicorn / celery runs in a different working directory from the
+    # backend checkout, or when the volume is bind-mounted from a
+    # different path inside the Docker container.
+    STORAGE_LOCAL_ROOT: str = ""
+    # --- S3 backend (only consulted when STORAGE_BACKEND=s3) ---
+    # Endpoint URL for S3-compatible services (MinIO defaults to
+    # http://localhost:9000). Leave empty for AWS S3.
+    S3_ENDPOINT: str = ""
+    S3_REGION: str = "us-east-1"
+    S3_BUCKET: str = ""
+    S3_ACCESS_KEY: str = ""
+    S3_SECRET_KEY: str = ""
+    # Use HTTPS for the endpoint. MinIO local dev wants this off;
+    # AWS / production wants it on.
+    S3_USE_SSL: bool = True
+    # Path-style addressing (``http://host/bucket/key``) is required by
+    # MinIO; AWS uses virtual-hosted (``bucket.host/key``) by default.
+    S3_PATH_STYLE: bool = False
+    # How long presigned URLs remain valid (seconds).
+    S3_PRESIGNED_URL_EXPIRY: int = 3600
+
     @property
     def STORAGE_DIR(self) -> Path:
         root = DEFAULT_STORAGE_DIR

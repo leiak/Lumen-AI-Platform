@@ -214,6 +214,30 @@ backend/storage/
 
 ---
 
+## 7b. M38.1 存储后端抽象
+
+| ENV | 默认 | 说明 |
+|-----|------|------|
+| `STORAGE_BACKEND` | `local` | `local` = 本地盘;`s3` = S3 兼容(MinIO/R2/S3) |
+| `STORAGE_LOCAL_ROOT` | `./data` | LocalBackend 根目录(KB 上传文件实际落在哪) |
+| `STORAGE_LOCAL_USE_LEGACY_ROOT` | `false` | true → 回落 `./storage`(旧 IMAGE_STORAGE_DIR 形态) |
+| `S3_ENDPOINT` | `""` | S3 endpoint URL(MinIO 必填,R2/AWS 可空) |
+| `S3_REGION` | `us-east-1` | AWS region |
+| `S3_BUCKET` | `""` | 桶名,**必填**当 `STORAGE_BACKEND=s3` |
+| `S3_ACCESS_KEY` | `""` | access key,**必填**当 `STORAGE_BACKEND=s3` |
+| `S3_SECRET_KEY` | `""` | secret key,**必填**当 `STORAGE_BACKEND=s3` |
+| `S3_USE_SSL` | `false` | MinIO dev = false;生产 AWS = true |
+| `S3_PATH_STYLE` | `true` | MinIO = true;AWS = false(virtual-hosted) |
+| `S3_PRESIGNED_URL_EXPIRY` | `600` | presigned URL 过期秒数 |
+
+**默认根 `./data`** 的原因:pre-M38.1 上传代码写 `data/uploads/<tenant>/<kb>/<filename>`,LocalBackend 落同样的相对路径,parsers 还 `open(file_path)` 直接读,零迁移。
+
+**冷迁移**:`POST /api/v1/storage/migrate-to-s3` (admin-only) 把 `documents.asset_storage_key IS NULL` 的行从 LocalBackend 拷到 S3Backend,幂等,返 `{scanned, migrated, failed, errors}`。
+
+详见 `docs-internal/superpowers/specs/2026-08-26-kb-storage-abstraction.md` §6。
+
+---
+
 ## 8. 后端 .env 默认值(dev)
 
 ```bash
