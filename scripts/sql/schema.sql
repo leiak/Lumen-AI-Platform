@@ -337,6 +337,7 @@ CREATE TABLE `documents` (
   `error_message` text COMMENT '错误信息',
   `chunk_count` int DEFAULT NULL COMMENT '分块数量',
   `knowledge_base_id` int DEFAULT NULL COMMENT '所属知识库ID',
+  `folder_id` int DEFAULT NULL COMMENT 'M38.2 folder;NULL=KB 根',
   `created_by` int DEFAULT NULL COMMENT '上传用户ID',
   `embedding_model_config_id` int DEFAULT NULL COMMENT 'Embedding模型配置ID',
   `id` int NOT NULL AUTO_INCREMENT,
@@ -349,9 +350,11 @@ CREATE TABLE `documents` (
   KEY `ix_documents_knowledge_base_id` (`knowledge_base_id`),
   KEY `ix_documents_asset_storage_key` (`asset_storage_key`),
   KEY `ix_documents_storage_backend` (`storage_backend`),
+  KEY `idx_documents_folder` (`folder_id`),
   CONSTRAINT `documents_ibfk_1` FOREIGN KEY (`knowledge_base_id`) REFERENCES `knowledge_bases` (`id`),
   CONSTRAINT `documents_ibfk_2` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`),
-  CONSTRAINT `documents_ibfk_3` FOREIGN KEY (`embedding_model_config_id`) REFERENCES `model_configs` (`id`) ON DELETE RESTRICT
+  CONSTRAINT `documents_ibfk_3` FOREIGN KEY (`embedding_model_config_id`) REFERENCES `model_configs` (`id`) ON DELETE RESTRICT,
+  CONSTRAINT `fk_documents_folder` FOREIGN KEY (`folder_id`) REFERENCES `document_folders` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB AUTO_INCREMENT=640 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='知识库文档表';
 
 CREATE TABLE `embedding_call_logs` (
@@ -755,6 +758,7 @@ CREATE TABLE `knowledge_bases` (
   `name` varchar(100) DEFAULT NULL COMMENT '知识库名称',
   `description` text COMMENT '知识库描述',
   `tenant_id` int DEFAULT NULL COMMENT '所属租户ID',
+  `workspace_id` int DEFAULT NULL COMMENT 'M38.2 navigation root; NULL=tenant root',
   `embedding_model` varchar(50) DEFAULT NULL COMMENT 'Embedding模型名称',
   `embedding_model_config_id` int DEFAULT NULL COMMENT 'Embedding模型配置ID',
   `status` varchar(20) DEFAULT NULL COMMENT '状态(active/inactive)',
@@ -769,9 +773,48 @@ CREATE TABLE `knowledge_bases` (
   KEY `ix_knowledge_bases_embedding_model_config_id` (`embedding_model_config_id`),
   KEY `ix_knowledge_bases_id` (`id`),
   KEY `ix_knowledge_bases_tenant_id` (`tenant_id`),
+  KEY `idx_kb_workspace` (`workspace_id`),
   CONSTRAINT `knowledge_bases_ibfk_1` FOREIGN KEY (`tenant_id`) REFERENCES `tenants` (`id`),
-  CONSTRAINT `knowledge_bases_ibfk_2` FOREIGN KEY (`embedding_model_config_id`) REFERENCES `model_configs` (`id`) ON DELETE RESTRICT
+  CONSTRAINT `knowledge_bases_ibfk_2` FOREIGN KEY (`embedding_model_config_id`) REFERENCES `model_configs` (`id`) ON DELETE RESTRICT,
+  CONSTRAINT `fk_kb_workspace` FOREIGN KEY (`workspace_id`) REFERENCES `workspaces` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB AUTO_INCREMENT=1471 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='知识库表';
+
+CREATE TABLE `workspaces` (
+  `tenant_id` int NOT NULL COMMENT '所属租户ID',
+  `name` varchar(100) NOT NULL COMMENT 'Workspace 名(同租户内唯一)',
+  `description` text COMMENT 'Workspace 描述',
+  `owner_id` int DEFAULT NULL COMMENT '创建人;NULL=已删',
+  `icon` varchar(50) DEFAULT NULL COMMENT '图标 emoji 或 antd key',
+  `color` varchar(20) DEFAULT NULL COMMENT '展示色 hex',
+  `id` int NOT NULL AUTO_INCREMENT,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_workspaces_tenant` (`tenant_id`),
+  UNIQUE KEY `uq_workspaces_tenant_name` (`tenant_id`,`name`),
+  CONSTRAINT `workspaces_ibfk_1` FOREIGN KEY (`tenant_id`) REFERENCES `tenants` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `workspaces_ibfk_2` FOREIGN KEY (`owner_id`) REFERENCES `users` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='M38.2 工作区(导航聚合根)';
+
+CREATE TABLE `document_folders` (
+  `knowledge_base_id` int NOT NULL COMMENT '所属知识库ID',
+  `parent_id` int DEFAULT NULL COMMENT '父 folder id;NULL=KB 根',
+  `name` varchar(100) NOT NULL COMMENT 'Folder 名(同级唯一由 app 层保证)',
+  `description` text COMMENT 'Folder 描述',
+  `order_index` int NOT NULL DEFAULT 0 COMMENT '同级排序',
+  `created_by` int DEFAULT NULL COMMENT '创建人',
+  `deleted_at` datetime DEFAULT NULL COMMENT '软删时间戳;NULL=活跃',
+  `id` int NOT NULL AUTO_INCREMENT,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_folders_kb` (`knowledge_base_id`),
+  KEY `idx_folders_parent` (`parent_id`),
+  KEY `idx_folders_deleted_at` (`deleted_at`),
+  CONSTRAINT `document_folders_ibfk_1` FOREIGN KEY (`knowledge_base_id`) REFERENCES `knowledge_bases` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `document_folders_ibfk_2` FOREIGN KEY (`parent_id`) REFERENCES `document_folders` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `document_folders_ibfk_3` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='M38.2 文档目录(单 KB 内树)';
 
 CREATE TABLE `llm_call_logs` (
   `call_id` varchar(36) DEFAULT NULL COMMENT '调用ID(UUID)',

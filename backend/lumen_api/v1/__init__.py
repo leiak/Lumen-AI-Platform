@@ -108,3 +108,12 @@ router.include_router(eval_runs.router)
 #   /api/v1/storage/migrate-to-s3  (admin-only cold migration)
 from . import storage
 router.include_router(storage.router)
+
+# M38.2: workspace + document folder navigation layer
+#   /api/v1/workspaces/*            (workspace CRUD + tree)
+#   /api/v1/knowledge/{kb_id}/folders  (per-KB folder list + create)
+#   /api/v1/folders/{id}/*          (folder single + patch + soft-delete + restore)
+#   /api/v1/knowledge/documents/{id}/move  (document move endpoint)
+from . import workspace, folders
+router.include_router(workspace.router)
+router.include_router(folders.router)

@@ -195,6 +195,15 @@ async def startup_event():
     ensure_notifications_table()
     ensure_documents_created_by()
     ensure_documents_storage_columns()  # M38.1: storage backend abstraction
+    # M38.2: Workspace + DocumentFolder navigation layer.
+    # Order matters — workspaces / document_folders tables must
+    # exist before the FK columns on knowledge_bases / documents
+    # are added. All four functions are idempotent so re-running
+    # on every uvicorn boot is a no-op.
+    ensure_workspaces_table()
+    ensure_document_folders_table()
+    ensure_knowledge_bases_workspace_column()
+    ensure_documents_folder_column()
     ensure_conversations_deleted_at()
     ensure_conversations_team_id()
     ensure_conversations_user_id_nullable()

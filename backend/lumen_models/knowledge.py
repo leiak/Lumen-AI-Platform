@@ -9,6 +9,18 @@ class KnowledgeBase(BaseModel):
     name = Column(String(100), nullable=False)
     description = Column(Text)
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    # --- M38.2 Workspace aggregation root ---
+    # Optional FK to ``workspaces.id``. NULL = the KB hangs
+    # directly off the tenant (the pre-M38.2 world). ON DELETE
+    # SET NULL so deleting a workspace leaves the KB intact —
+    # workspaces are navigation only, not a permission boundary.
+    workspace_id = Column(
+        Integer,
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="M38.2 navigation root; NULL = hangs directly off tenant",
+    )
     embedding_model = Column(String(50), default="nomic-embed-text")
     # FK to ModelConfig.id. Nullable during the migration period; will
     # be flipped to NOT NULL once all KBs are guaranteed to have a
@@ -64,6 +76,18 @@ class Document(BaseModel):
     error_message = Column(Text)  # Error message if processing failed
     chunk_count = Column(Integer)  # Number of chunks after processing
     knowledge_base_id = Column(Integer, ForeignKey("knowledge_bases.id"), nullable=False, index=True)
+    # --- M38.2 DocumentFolder nesting ---
+    # Optional FK to ``document_folders.id``. NULL = the document
+    # sits at the KB root (the pre-M38.2 world). ON DELETE SET
+    # NULL so soft-deleting a folder clears the folder_id here
+    # rather than cascading the document row away.
+    folder_id = Column(
+        Integer,
+        ForeignKey("document_folders.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="M38.2 folder inside the KB; NULL = KB root",
+    )
     # User who uploaded the document. Used by the v1 completion-notification
     # feature to route a Notification row to the right user. Nullable so
     # legacy uploads (made before this column existed) can still exist; the

@@ -316,6 +316,189 @@ def ensure_documents_storage_columns() -> None:
         )
 
 
+def ensure_workspaces_table() -> None:
+    """M38.2: create ``workspaces`` table + indexes + unique key if missing.
+
+    The table is created via ``Base.metadata.create_all`` (idempotent,
+    no-op on the second call) so the column-by-column ALTER pattern
+    used elsewhere is not needed for a brand-new table. The unique
+    key ``uq_workspaces_tenant_name`` IS added with a
+    ``_index_exists`` guard because ``CREATE INDEX`` is not
+    idempotent in MySQL.
+
+    On any failure (stale uvicorn worker holding MDL, see
+    MEMORY.md "taskkill /F" entry), log and return so app
+    startup continues; the next restart will retry.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from lumen_models.workspace import Workspace  # noqa: F401
+        Base.metadata.create_all(bind=engine, tables=[Workspace.__table__])
+        with engine.begin() as conn:
+            if not _index_exists("workspaces", "uq_workspaces_tenant_name"):
+                conn.execute(text(
+                    "ALTER TABLE workspaces "
+                    "ADD CONSTRAINT uq_workspaces_tenant_name "
+                    "UNIQUE (tenant_id, name)"
+                ))
+            if not _index_exists("workspaces", "idx_workspaces_tenant"):
+                conn.execute(text(
+                    "CREATE INDEX idx_workspaces_tenant "
+                    "ON workspaces (tenant_id)"
+                ))
+    except Exception:
+        logger.exception(
+            "ensure_workspaces_table failed; will retry on next startup"
+        )
+
+
+def ensure_document_folders_table() -> None:
+    """M38.2: create ``document_folders`` table + indexes if missing.
+
+    The tree is enforced via self-FK on ``parent_id`` (created by
+    ``Base.metadata.create_all`` because the column declaration
+    carries ``ForeignKey(..., ondelete="CASCADE")``). The
+    service-layer BFS cascade does the soft delete; this FK is
+    only the hard-delete safety net for direct ``DELETE``
+    statements that don't go through the service.
+
+    Idempotent. Safe to re-run on every uvicorn boot.
+
+    Spec: ``docs-internal/superpowers/specs/2026-08-26-kb-workspace-folder.md``
+    § 3.2.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from lumen_models.workspace import DocumentFolder  # noqa: F401
+        Base.metadata.create_all(bind=engine, tables=[DocumentFolder.__table__])
+        with engine.begin() as conn:
+            # ``Base.metadata.create_all`` already emits the
+            # CREATE INDEX for ``__table_args__`` indexes, but the
+            # standalone ALTER-gated ones below protect against
+            # deployments where the table was hand-created without
+            # all the indexes.
+            if not _index_exists("document_folders", "idx_folders_kb"):
+                conn.execute(text(
+                    "CREATE INDEX idx_folders_kb "
+                    "ON document_folders (knowledge_base_id)"
+                ))
+            if not _index_exists("document_folders", "idx_folders_parent"):
+                conn.execute(text(
+                    "CREATE INDEX idx_folders_parent "
+                    "ON document_folders (parent_id)"
+                ))
+            if not _index_exists("document_folders", "idx_folders_deleted_at"):
+                conn.execute(text(
+                    "CREATE INDEX idx_folders_deleted_at "
+                    "ON document_folders (deleted_at)"
+                ))
+    except Exception:
+        logger.exception(
+            "ensure_document_folders_table failed; will retry on next startup"
+        )
+
+
+def ensure_knowledge_bases_workspace_column() -> None:
+    """M38.2: add ``workspace_id`` column + FK + index to
+    ``knowledge_bases`` if missing.
+
+    Nullable FK to ``workspaces.id`` (ON DELETE SET NULL) so a
+    workspace delete doesn't cascade the KBs away — the workspace
+    is purely a navigation root, never an ownership boundary
+    (spec §3.3).
+
+    Idempotent: each step guards on ``_column_exists`` /
+    ``_index_exists``.
+
+    Spec: § 3.3.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        with engine.begin() as conn:
+            if not _column_exists("knowledge_bases", "workspace_id"):
+                conn.execute(text(
+                    "ALTER TABLE knowledge_bases "
+                    "ADD COLUMN workspace_id INT NULL "
+                    "COMMENT 'M38.2 navigation root; NULL = tenant root'"
+                ))
+            if not _index_exists("knowledge_bases", "idx_kb_workspace"):
+                conn.execute(text(
+                    "CREATE INDEX idx_kb_workspace "
+                    "ON knowledge_bases (workspace_id)"
+                ))
+            # FK constraint. ``information_schema.TABLE_CONSTRAINTS``
+            # is the source of truth here — ``ADD CONSTRAINT``
+            # raises 1062 "Duplicate foreign key" if the FK already
+            # exists, so we must check first.
+            fk_exists = conn.execute(text(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS "
+                "WHERE TABLE_SCHEMA = DATABASE() "
+                "AND TABLE_NAME = 'knowledge_bases' "
+                "AND CONSTRAINT_NAME = 'fk_kb_workspace'"
+            )).scalar()
+            if not fk_exists:
+                conn.execute(text(
+                    "ALTER TABLE knowledge_bases "
+                    "ADD CONSTRAINT fk_kb_workspace "
+                    "FOREIGN KEY (workspace_id) "
+                    "REFERENCES workspaces(id) "
+                    "ON DELETE SET NULL"
+                ))
+    except Exception:
+        logger.exception(
+            "ensure_knowledge_bases_workspace_column failed; will retry on next startup"
+        )
+
+
+def ensure_documents_folder_column() -> None:
+    """M38.2: add ``folder_id`` column + FK + index to ``documents`` if missing.
+
+    Nullable FK to ``document_folders.id`` (ON DELETE SET NULL) so
+    soft-deleting a folder clears ``folder_id`` on the documents
+    inside rather than hard-deleting them (spec §3.4).
+
+    Idempotent. Safe to re-run on every uvicorn boot.
+
+    Spec: § 3.4.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        with engine.begin() as conn:
+            if not _column_exists("documents", "folder_id"):
+                conn.execute(text(
+                    "ALTER TABLE documents "
+                    "ADD COLUMN folder_id INT NULL "
+                    "COMMENT 'M38.2 folder inside KB; NULL = KB root'"
+                ))
+            if not _index_exists("documents", "idx_documents_folder"):
+                conn.execute(text(
+                    "CREATE INDEX idx_documents_folder "
+                    "ON documents (folder_id)"
+                ))
+            fk_exists = conn.execute(text(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS "
+                "WHERE TABLE_SCHEMA = DATABASE() "
+                "AND TABLE_NAME = 'documents' "
+                "AND CONSTRAINT_NAME = 'fk_documents_folder'"
+            )).scalar()
+            if not fk_exists:
+                conn.execute(text(
+                    "ALTER TABLE documents "
+                    "ADD CONSTRAINT fk_documents_folder "
+                    "FOREIGN KEY (folder_id) "
+                    "REFERENCES document_folders(id) "
+                    "ON DELETE SET NULL"
+                ))
+    except Exception:
+        logger.exception(
+            "ensure_documents_folder_column failed; will retry on next startup"
+        )
+
+
 def ensure_conversations_deleted_at() -> None:
     """Add ``deleted_at`` to ``conversations`` if it's missing.
     Nullable DateTime used as a soft-delete tombstone; None = active,

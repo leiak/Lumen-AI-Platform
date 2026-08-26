@@ -53,6 +53,9 @@ export interface KnowledgeBase {
   chunk_size?: number;
   chunk_overlap?: number;
   document_count?: number;
+  // M38.2: navigation root. ``null`` / ``undefined`` = KB hangs off the
+  // tenant directly (no workspace).
+  workspace_id?: number | null;
 }
 
 export interface Agent {

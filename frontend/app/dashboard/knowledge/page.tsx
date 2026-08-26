@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
+  Layout,
   Table,
   Button,
   Space,
@@ -22,6 +23,7 @@ import {
   Slider,
   Switch,
   Tabs,
+  Breadcrumb,
 } from "antd";
 import {
   PlusOutlined,
@@ -34,6 +36,7 @@ import {
   RedoOutlined,
   BarsOutlined,
   AppstoreOutlined,
+  SwapOutlined,
 } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -44,10 +47,24 @@ import EmbeddingModelSelect from "@/components/EmbeddingModelSelect";
 import FAQTab from "@/components/knowledge/FAQTab";
 import { ModelConfig } from "@/services/models";
 import { useNotificationsStore } from "@/store/notifications";
+// M38.2: workspace + folder navigation + 3 个 modal。
+import WorkspaceTree from "@/components/knowledge/WorkspaceTree";
+import CreateWorkspaceModal from "@/components/knowledge/CreateWorkspaceModal";
+import CreateFolderModal from "@/components/knowledge/CreateFolderModal";
+import MoveDocumentModal from "@/components/knowledge/MoveDocumentModal";
+import { listWorkspaces, createWorkspace, getWorkspaceTree } from "@/services/workspace";
+import {
+  listFolders,
+  createFolder,
+  moveDocument,
+} from "@/services/folder";
+import type { WorkspaceTreeResponse } from "@/types/workspace";
+import type { DocumentFolderTreeNode } from "@/types/folder";
 
 const { TextArea } = Input;
 const { Text } = Typography;
 const { Panel } = Collapse;
+const { Sider, Content } = Layout;
 
 interface SearchResult {
   id: string;
@@ -201,6 +218,19 @@ export default function KnowledgePage() {
   const [rechunkSubmitting, setRechunkSubmitting] = useState(false);
   const [rechunkForm] = Form.useForm();
 
+  // M38.2: 侧边栏 workspace → KB → folder 三层选择状态。
+  // - selectedWorkspaceId = null 表示「未分组」(tenant root,workspace_id IS NULL)
+  // - selectedKbId 由 selectedKB?.id 派生,KB 选中即同步
+  // - selectedFolderId = null 表示「KB 根目录」(folder_id=0);>0 表示具体 folder
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<number | null>(null);
+  const [selectedFolderId, setSelectedFolderId] = useState<number | null>(null);
+
+  // M38.2: 3 个 modal 显隐。
+  const [createWsOpen, setCreateWsOpen] = useState(false);
+  const [createFolderOpen, setCreateFolderOpen] = useState(false);
+  const [moveDocOpen, setMoveDocOpen] = useState(false);
+  const [movingDoc, setMovingDoc] = useState<DocumentResponse | null>(null);
+
   // Fetch parser types
   const { data: parserTypesData } = useQuery({
     queryKey: ["parserTypes"],
@@ -228,11 +258,15 @@ export default function KnowledgePage() {
         // so they don't trigger a refetch.
         prev.items.length < state.items.length
       ) {
+        // M38.2: 通知触发的刷新也得带上 folder 过滤 —— 否则在 folder 视图下
+        // 收到的 doc 通知会污染显示成「全部文档」。
         fetchDocuments(selectedKB.id);
       }
     });
     return () => { unsub(); };
-  }, [selectedKB?.id]);
+    // M38.2: selectedFolderId 进入依赖 —— 切换 folder 时也要重订一次订阅
+    // (虽然 subscribe 本身不需要,但保持 deps 干净,eslint 不报警)。
+  }, [selectedKB?.id, selectedFolderId]);
 
   // Highlight a specific doc when the URL has ?doc=<id> — used by the
   // notification "Open" action to deep-link into the KB page.
@@ -254,8 +288,8 @@ export default function KnowledgePage() {
 
   // Upload mutation - background safe, survives page navigation
   const uploadMutation = useMutation({
-    mutationFn: ({ kbId, file, docType }: { kbId: number; file: File; docType?: string }) =>
-      knowledgeApi.upload(kbId, file, docType),
+    mutationFn: ({ kbId, file, docType, folderId }: { kbId: number; file: File; docType?: string; folderId?: number }) =>
+      knowledgeApi.upload(kbId, file, docType, folderId),
     onMutate: () => {
       message.loading("上传中...", 0);
     },
@@ -288,7 +322,8 @@ export default function KnowledgePage() {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const response = await knowledgeApi.list(page, pageSize);
+      // M38.2: workspace 筛选。-1 = 全部,undefined/null = 不传。
+      const response = await knowledgeApi.list(page, pageSize, selectedWorkspaceId ?? undefined);
       if (response.data.code === 200) {
         setData(response.data.data || []);
         setTotal(response.data.total || 0);
@@ -300,10 +335,14 @@ export default function KnowledgePage() {
     }
   };
 
-  const fetchDocuments = async (kbId: number) => {
+  const fetchDocuments = async (kbId: number, folderId?: number | null) => {
     setLoadingDocs(true);
     try {
-      const response = await knowledgeApi.getDocuments(kbId);
+      // M38.2: folder 筛选。null = 不过滤(全部),number = 那个 folder。
+      // folderId 优先用入参,fallback 到 state —— sidebar 切换 folder 时入参
+      // 是新值,state 还是旧值,避免 stale closure 拿到错的 folder_id。
+      const fId = folderId !== undefined ? folderId : selectedFolderId;
+      const response = await knowledgeApi.getDocuments(kbId, fId ?? undefined);
       if (response.data.code === 200) {
         setDocuments(response.data.data || []);
       }
@@ -317,7 +356,7 @@ export default function KnowledgePage() {
   useEffect(() => {
     fetchData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize]);
+  }, [page, pageSize, selectedWorkspaceId]);
 
   // Auto-default the create-KB form's `embedding_model_config_id` to
   // the user's `is_default` embedding model (or the first available).
@@ -336,10 +375,195 @@ export default function KnowledgePage() {
     form.setFieldValue("embedding_model_config_id", def.id);
   }, [modalVisible, loadedEmbeddingModels, form]);
 
+  // M38.2: 拉 workspace 列表 —— sidebar enumeration 用。
+  // page_size 设大一点,dev 环境下 workspace 数量本来就不多。
+  const { data: workspacesResp } = useQuery({
+    queryKey: ["workspaces", "list"],
+    queryFn: () => listWorkspaces({ page: 1, page_size: 100 }),
+  });
+  const workspaces = workspacesResp?.data || [];
+
+  // M38.2: 「未分组」桶的 tree —— 后端把 workspace_id IS NULL 的 KB 塞到
+  // workspace_id = -1 这一档里(详见 backend spec § 4.3)。
+  const { data: ungroupedTreeResp } = useQuery({
+    queryKey: ["workspace-tree", -1],
+    queryFn: () => getWorkspaceTree(-1),
+    enabled: true,
+  });
+
+  // M38.2: 真实 workspace 的 tree —— 按 workspacesResp 数量并行拉。
+  const workspaceTreeQueries = useQuery({
+    queryKey: ["workspace-trees", workspaces.map((w) => w.id).join(",")],
+    queryFn: async () => {
+      const map: Record<number, WorkspaceTreeResponse | null> = {
+        [-1]: ungroupedTreeResp?.data ?? null,
+      };
+      await Promise.all(
+        workspaces.map(async (w) => {
+          const r = await getWorkspaceTree(w.id);
+          map[w.id] = r.data ?? null;
+        })
+      );
+      return map;
+    },
+    enabled: workspaces.length > 0,
+  });
+
+  // 把上面的 useQuery 输出拍平成 WorkspaceTree 期待的 Record<wsId, tree|null>。
+  // -1 桶单独塞进去。
+  const treesByWorkspace = useMemo<Record<number, WorkspaceTreeResponse | null>>(() => {
+    if (workspaceTreeQueries.data) return workspaceTreeQueries.data;
+    return { [-1]: ungroupedTreeResp?.data ?? null };
+  }, [workspaceTreeQueries.data, ungroupedTreeResp?.data]);
+
+  // M38.2: 当前 KB 的 folder 树 —— 给 CreateFolderModal / MoveDocumentModal 用。
+  const { data: folderTreeResp, refetch: refetchFolders } = useQuery({
+    queryKey: ["folders-tree", selectedKB?.id],
+    queryFn: () => listFolders(selectedKB!.id, { tree: true }),
+    enabled: !!selectedKB,
+  });
+  const folderTree = (folderTreeResp?.data ?? []) as DocumentFolderTreeNode[];
+
+  // M38.2: sidebar 点击 workspace 节点 —— 切换 workspace,KB 选择保留(folder 由
+  // 侧边栏 tree 的子节点管理)。WorkspaceTree 已经把当前 KB/folder 推过来。
+  const handleSelectWorkspace = (workspaceId: number | null) => {
+    setSelectedWorkspaceId(workspaceId);
+    setSelectedKB(null);
+    setSelectedFolderId(null);
+    setDocuments([]);
+  };
+
+  // M38.2: sidebar 点击 KB 节点 —— 切换 KB。重新拉 KB 详情设 selectedKB,
+  // folder 留 null(KB 根目录)。
+  const handleSelectKb = async (
+    _workspaceId: number | null,
+    kbId: number | null
+  ) => {
+    if (kbId == null) {
+      setSelectedKB(null);
+      setSelectedFolderId(null);
+      setDocuments([]);
+      return;
+    }
+    try {
+      const resp = await knowledgeApi.get(kbId);
+      if (resp.data.code === 200 && resp.data.data) {
+        handleSelectKB(resp.data.data);
+        setSelectedFolderId(null);
+      }
+    } catch {
+      message.error("加载知识库详情失败");
+    }
+  };
+
+  // M38.2: sidebar 点击 folder 节点 —— 设 folderId 并重新拉文档。
+  const handleSelectFolder = async (
+    _workspaceId: number | null,
+    kbId: number,
+    folderId: number | null
+  ) => {
+    // 确保 selectedKB 同步(可能 sidebar 直接点 folder,KB 也得跟)。
+    if (!selectedKB || selectedKB.id !== kbId) {
+      try {
+        const resp = await knowledgeApi.get(kbId);
+        if (resp.data.code === 200 && resp.data.data) {
+          setSelectedKB(resp.data.data);
+        }
+      } catch {
+        message.error("加载知识库详情失败");
+        return;
+      }
+    }
+    setSelectedFolderId(folderId);
+    // 显式把新 folderId 传给 fetchDocuments —— setState 是异步的,
+    // 直接读 selectedFolderId 会拿到 stale 值,导致 server 端过滤不到。
+    fetchDocuments(kbId, folderId);
+  };
+
+  // M38.2: CreateWorkspaceModal 提交回调 —— 刷新 workspace 列表。
+  const handleCreateWorkspace = async (payload: {
+    name: string;
+    description?: string;
+    icon?: string;
+    color?: string;
+  }) => {
+    try {
+      const resp = await createWorkspace(payload);
+      if (resp.code === 200) {
+        message.success("Workspace 已创建");
+        setCreateWsOpen(false);
+        queryClient.invalidateQueries({ queryKey: ["workspaces", "list"] });
+        queryClient.invalidateQueries({ queryKey: ["workspace-trees"] });
+      } else {
+        message.error(resp.message || "创建失败");
+      }
+    } catch (error: any) {
+      message.error(
+        error?.response?.data?.detail || error?.message || "创建失败"
+      );
+    }
+  };
+
+  // M38.2: CreateFolderModal 提交回调 —— 刷新 folder tree + 重拉文档。
+  // payload 与 DocumentFolderCreatePayload 形状一致(只取用得到的字段)。
+  const handleCreateFolder = async (payload: {
+    name: string;
+    parent_id?: number | null;
+    description?: string;
+    order_index?: number;
+  }) => {
+    if (!selectedKB) return;
+    try {
+      const resp = await createFolder(selectedKB.id, payload);
+      if (resp.code === 200) {
+        message.success("Folder 已创建");
+        setCreateFolderOpen(false);
+        refetchFolders();
+        queryClient.invalidateQueries({ queryKey: ["workspace-trees"] });
+      } else {
+        message.error(resp.message || "创建失败");
+      }
+    } catch (error: any) {
+      message.error(
+        error?.response?.data?.detail || error?.message || "创建失败"
+      );
+    }
+  };
+
+  // M38.2: MoveDocumentModal 提交回调 —— 移动完刷新文档 + folder tree。
+  const handleMoveDocument = async (payload: {
+    target_folder_id: number | null;
+  }) => {
+    if (!movingDoc) return;
+    try {
+      const resp = await moveDocument(movingDoc.id, payload);
+      if (resp.moved) {
+        message.success(
+          payload.target_folder_id == null
+            ? "已移到 KB 根目录"
+            : "文档已移动"
+        );
+        setMoveDocOpen(false);
+        setMovingDoc(null);
+        // 当前选中 folder 改变 → 重拉文档列表;
+        // folder tree 也得刷新(document_count 变化)。
+        if (selectedKB) fetchDocuments(selectedKB.id);
+        refetchFolders();
+        queryClient.invalidateQueries({ queryKey: ["workspace-trees"] });
+      }
+    } catch (error: any) {
+      message.error(
+        error?.response?.data?.detail || error?.message || "移动失败"
+      );
+    }
+  };
+
   const handleSelectKB = (kb: KnowledgeBase | null) => {
     setSelectedKB(kb);
     setSearchResults([]);
     setSearchQuery("");
+    // M38.2: KB 切换 → 默认重置 folder 选择(根目录),等用户从侧边栏点 folder 再 fetch。
+    setSelectedFolderId(null);
     if (kb) {
       fetchDocuments(kb.id);
     } else {
@@ -356,7 +580,13 @@ export default function KnowledgePage() {
         ...values,
         search_weights: searchWeights,
       };
-      const response = await knowledgeApi.create(payload);
+      // M38.2: 当前 workspace 选中时新建 KB 自动挂到该 workspace 下;
+      // -1 / null(未分组)时不传 workspace_id,KB 落到 tenant 根。
+      const wsArg =
+        selectedWorkspaceId != null && selectedWorkspaceId > 0
+          ? selectedWorkspaceId
+          : undefined;
+      const response = await knowledgeApi.create(payload, wsArg);
       if (response.data.code === 200) {
         message.success("创建成功");
         setModalVisible(false);
@@ -452,7 +682,13 @@ export default function KnowledgePage() {
   };
 
   const handleUpload = (kbId: number, file: File) => {
-    uploadMutation.mutate({ kbId, file, docType: selectedDocType });
+    uploadMutation.mutate({
+      kbId,
+      file,
+      docType: selectedDocType,
+      // M38.2: 当前 folder 选中时上传自动落到该 folder。
+      folderId: selectedFolderId ?? undefined,
+    });
     return false; // prevent default upload behavior
   };
 
@@ -776,7 +1012,79 @@ export default function KnowledgePage() {
   ];
 
   return (
-    <div style={{ padding: 24 }}>
+    <Layout style={{ minHeight: "calc(100vh - 64px)", background: "#fff" }}>
+      {/* M38.2: workspace → KB → folder 侧边栏导航 */}
+      <Sider
+        width={260}
+        theme="light"
+        style={{ borderRight: "1px solid #f0f0f0", overflow: "auto" }}
+      >
+        <WorkspaceTree
+          selectedWorkspaceId={selectedWorkspaceId}
+          selectedKbId={selectedKB?.id ?? null}
+          selectedFolderId={selectedFolderId}
+          treesByWorkspace={treesByWorkspace}
+          loading={workspaceTreeQueries.isLoading}
+          // M38.2 UX: 默认展开所有层级 —— workspace 数量少,
+          // 一次性看到 workspace → KB → folder 结构减少认知成本。
+          defaultExpandAll
+          onCreateWorkspace={() => setCreateWsOpen(true)}
+          onCreateFolder={(_ws, kbId) => {
+            // Sider 入口:KB 必须先选中才能新建 folder。
+            if (!selectedKB || selectedKB.id !== kbId) {
+              knowledgeApi.get(kbId).then((r) => {
+                if (r.data.code === 200 && r.data.data) handleSelectKB(r.data.data);
+              });
+            }
+            setCreateFolderOpen(true);
+          }}
+          onSelectWorkspace={handleSelectWorkspace}
+          onSelectKb={handleSelectKb}
+          onSelectFolder={handleSelectFolder}
+        />
+      </Sider>
+      <Content style={{ padding: 24, overflow: "auto" }}>
+        {/* M38.2: breadcrumb —— workspace › KB › folder 名 */}
+        <Breadcrumb
+          style={{ marginBottom: 16 }}
+          items={[
+            {
+              title:
+                selectedWorkspaceId != null && selectedWorkspaceId > 0
+                  ? workspaces.find((w) => w.id === selectedWorkspaceId)?.name ||
+                    `Workspace #${selectedWorkspaceId}`
+                  : "未分组",
+            },
+            ...(selectedKB
+                ? [
+                    {
+                      title: (
+                        <a
+                          onClick={(e) => {
+                            e.preventDefault();
+                            setSelectedFolderId(null);
+                            if (selectedKB) fetchDocuments(selectedKB.id);
+                          }}
+                          href="#"
+                        >
+                          {selectedKB.name}
+                        </a>
+                      ),
+                    },
+                  ]
+                : []),
+            ...(selectedFolderId != null
+              ? [
+                  {
+                    title: `Folder #${selectedFolderId}`,
+                  },
+                ]
+              : []),
+            ...(selectedKB && selectedFolderId == null
+              ? [{ title: "KB 根目录" }]
+              : []),
+          ]}
+        />
       {/* Knowledge Base List */}
       <Card title="知识库列表" style={{ marginBottom: 16 }}>
         <div style={{ marginBottom: 16 }}>
@@ -859,6 +1167,14 @@ export default function KnowledgePage() {
                             上传文档
                           </Button>
                         </Upload>
+                        {/* M38.2: 当前 KB 下新建 folder —— 没选中 KB 时不显示 */}
+                        <Button
+                          size="small"
+                          icon={<PlusOutlined />}
+                          onClick={() => setCreateFolderOpen(true)}
+                        >
+                          新建 folder
+                        </Button>
                       </Space>
                       {loadingDocs ? (
                         <Text type="secondary">加载中...</Text>
@@ -894,6 +1210,19 @@ export default function KnowledgePage() {
                                   onClick={() => handleRechunk(doc)}
                                 >
                                   重新分块
+                                </Button>,
+                                // M38.2: 移动文档到其他 folder / KB 根
+                                <Button
+                                  key="move"
+                                  size="small"
+                                  type="link"
+                                  icon={<SwapOutlined />}
+                                  onClick={() => {
+                                    setMovingDoc(doc);
+                                    setMoveDocOpen(true);
+                                  }}
+                                >
+                                  移动
                                 </Button>,
                                 retriable && (
                                   <Popconfirm
@@ -1309,6 +1638,19 @@ export default function KnowledgePage() {
                   >
                     重新分块
                   </Button>,
+                  // M38.2: 文档列表 modal 也支持移动
+                  <Button
+                    key="move"
+                    size="small"
+                    type="link"
+                    icon={<SwapOutlined />}
+                    onClick={() => {
+                      setMovingDoc(doc);
+                      setMoveDocOpen(true);
+                    }}
+                  >
+                    移动
+                  </Button>,
                   retriable && (
                     <Popconfirm
                       key="retry"
@@ -1577,6 +1919,44 @@ export default function KnowledgePage() {
           </Typography.Text>
         )}
       </Modal>
-    </div>
+      </Content>
+
+      {/* M38.2: 新建 workspace modal */}
+      <CreateWorkspaceModal
+        open={createWsOpen}
+        onCancel={() => setCreateWsOpen(false)}
+        onSubmit={handleCreateWorkspace}
+      />
+
+      {/* M38.2: 新建 folder modal —— 当前选中 KB 必须存在。
+          folders 给 tree 形态供 parent_choice 选择;defaultParentId 留给
+          「右键新建子文件夹」等场景,当前 UI 暂不暴露入口。 */}
+      {selectedKB && (
+        <CreateFolderModal
+          open={createFolderOpen}
+          kbId={selectedKB.id}
+          folders={folderTree}
+          onCancel={() => setCreateFolderOpen(false)}
+          onSubmit={handleCreateFolder}
+        />
+      )}
+
+      {/* M38.2: 移动文档 modal —— 给「从当前 folder 移到别处」用。
+          movingDoc 为 null 时 modal 不渲染,避免无效状态。 */}
+      {movingDoc && selectedKB && (
+        <MoveDocumentModal
+          open={moveDocOpen}
+          documentId={movingDoc.id}
+          documentName={movingDoc.filename}
+          currentFolderId={selectedFolderId}
+          folders={folderTree}
+          onCancel={() => {
+            setMoveDocOpen(false);
+            setMovingDoc(null);
+          }}
+          onSubmit={handleMoveDocument}
+        />
+      )}
+    </Layout>
   );
 }

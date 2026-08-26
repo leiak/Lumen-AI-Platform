@@ -121,15 +121,32 @@ export interface FAQBulkImportResult {
 }
 
 export const knowledgeApi = {
-  list: (page = 1, pageSize = 10) =>
-    api.get<PaginatedResponse<KnowledgeBase>>(
-      `/knowledge/?page=${page}&page_size=${pageSize}`
-    ),
+  list: (page = 1, pageSize = 10, workspaceId?: number) => {
+    let url = `/knowledge/?page=${page}&page_size=${pageSize}`;
+    // M38.2: workspace filter. ``workspaceId === 0`` means "tenant root
+    // (no workspace)" — backend uses ``0`` as the sentinel.
+    if (workspaceId !== undefined && workspaceId !== -1) {
+      url += `&workspace_id=${workspaceId}`;
+    }
+    return api.get<PaginatedResponse<KnowledgeBase>>(url);
+  },
   get: (id: number) => api.get<ApiResponse<KnowledgeBase>>(`/knowledge/${id}`),
-  getDocuments: (kbId: number) =>
-    api.get<ApiResponse<DocumentResponse[]>>(`/knowledge/${kbId}/documents`),
-  create: (data: KnowledgeBaseCreate) =>
-    api.post<ApiResponse<KnowledgeBase>>("/knowledge/", data),
+  getDocuments: (kbId: number, folderId?: number) => {
+    // M38.2: ``folder_id`` filter — 0 = KB root, -1/None = all, >0 = that folder.
+    let url = `/knowledge/${kbId}/documents`;
+    if (folderId !== undefined) {
+      url += `?folder_id=${folderId}`;
+    }
+    return api.get<ApiResponse<DocumentResponse[]>>(url);
+  },
+  create: (data: KnowledgeBaseCreate, workspaceId?: number) => {
+    // M38.2: optional workspace binding at create.
+    let url = "/knowledge/";
+    if (workspaceId !== undefined && workspaceId !== null) {
+      url += `?workspace_id=${workspaceId}`;
+    }
+    return api.post<ApiResponse<KnowledgeBase>>(url, data);
+  },
   update: (id: number, data: KnowledgeBaseUpdate) =>
     api.put<ApiResponse<KnowledgeBase>>(`/knowledge/${id}`, data),
   delete: (id: number) => api.delete(`/knowledge/${id}`),
@@ -141,11 +158,15 @@ export const knowledgeApi = {
         vector_cleanup_failed: boolean;
       }>
     >(`/knowledge/documents/${docId}`),
-  upload: (kbId: number, file: File, docType?: string) => {
+  upload: (kbId: number, file: File, docType?: string, folderId?: number) => {
     const formData = new FormData();
     formData.append("file", file);
     if (docType) {
       formData.append("doc_type", docType);
+    }
+    // M38.2: optional folder_id for upload.
+    if (folderId !== undefined && folderId !== null) {
+      formData.append("folder_id", String(folderId));
     }
     return api.post(`/knowledge/${kbId}/documents`, formData, {
       headers: { "Content-Type": "multipart/form-data" },

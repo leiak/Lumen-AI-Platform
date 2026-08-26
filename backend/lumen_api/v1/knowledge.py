@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import logging
@@ -38,11 +38,27 @@ def sanitize_filename(filename: str) -> str:
 async def list_knowledge_bases(
     page: int = 1,
     page_size: int = 10,
+    # M38.2: optional workspace filter. ``workspace_id=-1`` (default)
+    # means "all KBs in this tenant regardless of workspace". Any
+    # other value restricts to that workspace; ``0`` means "KBs
+    # hanging directly off the tenant" (workspace_id IS NULL).
+    workspace_id: int = Query(
+        -1,
+        description="M38.2 workspace 过滤;-1 = 全部;0 = 直属 tenant;>0 = 指定 workspace",
+    ),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    from lumen_models.knowledge import KnowledgeBase
     service = KnowledgeService()
+    # Service still returns all KBs in the tenant; we filter
+    # here so the service signature stays simple and matches the
+    # existing pattern in list_documents.
     kbs = service.list_knowledge_bases(db, current_user.tenant_id)
+    if workspace_id == 0:
+        kbs = [kb for kb in kbs if kb.workspace_id is None]
+    elif workspace_id > 0:
+        kbs = [kb for kb in kbs if kb.workspace_id == workspace_id]
     total = len(kbs)
     start = (page - 1) * page_size
     end = start + page_size
@@ -69,11 +85,30 @@ async def get_parser_types(
 @router.post("/", response_model=SingleResponse[KnowledgeBaseResponse])
 async def create_knowledge_base(
     data: KnowledgeBaseCreate,
+    # M38.2: optional workspace binding. When set, the workspace
+    # must belong to the caller's tenant. We validate here
+    # rather than in the service so the 404/403 stays inside the
+    # tenant-isolation contract.
+    workspace_id: Optional[int] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    if workspace_id is not None:
+        from lumen_models.workspace import Workspace
+        ws = db.get(Workspace, workspace_id)
+        if ws is None:
+            raise HTTPException(status_code=400, detail="workspace 不存在")
+        if ws.tenant_id != current_user.tenant_id and not getattr(current_user, "is_superuser", False):
+            raise HTTPException(
+                status_code=403,
+                detail="workspace 不属于当前租户",
+            )
     service = KnowledgeService()
     kb = service.create_knowledge_base(db, current_user.tenant_id, data)
+    if workspace_id is not None:
+        kb.workspace_id = workspace_id
+        db.commit()
+        db.refresh(kb)
     return SingleResponse(data=KnowledgeBaseResponse.model_validate(kb))
 
 
@@ -197,6 +232,10 @@ async def upload_document(
     chunking_params: str = Form("{}", description="分块参数 JSON"),
     doc_type: str = Form(None, description="文档类型: general, paper, qa, table, manual, laws (auto-detect if not specified)"),
     async_process: bool = Form(True, description="是否异步处理文档"),
+    # M38.2: optional target folder. ``None`` = KB root
+    # (backward-compatible default). Service-layer validation
+    # ensures the folder belongs to the same KB.
+    folder_id: Optional[int] = Form(None, description="M38.2 目标 folder id; 不传 = KB 根"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -210,6 +249,22 @@ async def upload_document(
     ).first()
     if not kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+    # M38.2: validate the optional target folder. Reuses the
+    # service-layer helper so we don't duplicate the cycle /
+    # deleted-folder checks.
+    if folder_id is not None:
+        from lumen_models.workspace import DocumentFolder
+        folder = db.get(DocumentFolder, folder_id)
+        if folder is None:
+            raise HTTPException(status_code=400, detail="目标 folder 不存在")
+        if folder.knowledge_base_id != kb_id:
+            raise HTTPException(
+                status_code=400,
+                detail="目标 folder 不属于该 KB",
+            )
+        if folder.deleted_at is not None:
+            raise HTTPException(status_code=400, detail="目标 folder 已软删")
 
     # M38.1: route the write through the storage backend abstraction.
     # The key shape is ``uploads/<tenant>/<kb>/<filename>`` — for the
@@ -241,6 +296,9 @@ async def upload_document(
         file_size=len(content),
         status="pending",
         knowledge_base_id=kb_id,
+        # M38.2: persist the optional folder binding so the doc
+        # appears in the right place in the sidebar.
+        folder_id=folder_id,
         created_by=current_user.id,
         # M38.1: record which backend produced the bytes + the key it
         # wrote under. ``asset_storage_key`` is the source of truth
@@ -424,6 +482,15 @@ async def count_knowledge_bases(
 @router.get("/{kb_id}/documents", response_model=SingleResponse[List[DocumentResponse]])
 async def list_documents(
     kb_id: int,
+    # M38.2: filter by folder. ``None`` (default) = KB root +
+    # all sub-folders flattened. Pass ``?folder_id=0`` explicitly
+    # for KB root only. The sentinel ``-1`` means "no filter"
+    # (same as ``None``) — kept for backward compat with the
+    # legacy sidebar that sent ``-1`` as "all".
+    folder_id: Optional[int] = Query(
+        None,
+        description="M38.2 folder filter; 0 = KB root, -1/None = 全部",
+    ),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -461,13 +528,20 @@ async def list_documents(
             )
         )
     )
-    docs = (
+    doc_query = (
         db.query(Document)
         .filter(Document.knowledge_base_id == kb_id)
         .filter(~Document.id.in_(faq_doc_ids_subq))
-        .order_by(Document.created_at.desc())
-        .all()
     )
+    # M38.2: folder filter. ``0`` = KB root only (folder_id IS NULL);
+    # ``-1`` or ``None`` = no filter (return everything in this KB).
+    # Positive folder ids = restrict to that folder.
+    if folder_id is not None and folder_id >= 0:
+        if folder_id == 0:
+            doc_query = doc_query.filter(Document.folder_id.is_(None))
+        elif folder_id > 0:
+            doc_query = doc_query.filter(Document.folder_id == folder_id)
+    docs = doc_query.order_by(Document.created_at.desc()).all()
     return SingleResponse(data=[DocumentResponse.model_validate(d) for d in docs])
 
 
@@ -730,6 +804,35 @@ async def rechunk_document(
     db.refresh(doc)
 
     return SingleResponse(data=DocumentResponse.model_validate(doc))
+
+
+@router.post("/documents/{document_id}/move", response_model=SingleResponse[dict])
+async def move_document(
+    document_id: int,
+    # ``folder_id=None`` means "move to KB root". Use a JSON
+    # body so the field name matches the spec; FastAPI's
+    # ``Body(..., embed=True)`` keeps the wire shape flat.
+    payload: Optional[dict] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """M38.2: move a document into a folder (or KB root when null).
+
+    Body shape: ``{"folder_id": 5}`` or ``{"folder_id": null}``.
+    Tenant isolation is enforced via the doc's parent KB.
+    """
+    from lumen_services.folder_service import folder_service
+    target = (payload or {}).get("folder_id")
+    moved = folder_service.move_document(
+        db,
+        document_id=document_id,
+        target_folder_id=target,
+        tenant_id=current_user.tenant_id,
+        is_superuser=bool(getattr(current_user, "is_superuser", False)),
+    )
+    if not moved:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return SingleResponse(data={"document_id": document_id, "folder_id": target})
 
 
 @router.delete("/documents/{document_id}", response_model=SingleResponse[dict])
