@@ -90,6 +90,73 @@ class DocumentChunk(Base):
 
 ---
 
+## 3.6 Workspace + DocumentFolder(M38.2,2026-08-26 ship)
+
+KB 之上引入两层导航结构。**只做骨架,不引入 RBAC**(留 M38.2.x v2)。
+
+### 3.7 workspaces
+```python
+class Workspace(Base):
+    id: int
+    tenant_id: int              # 租户隔离
+    name: str                   # 100 字内,unique per tenant
+    knowledge_base_count: int   # 反范式冗余,trigger 维护
+```
+
+- KB 通过 `KnowledgeBase.workspace_id`(NULL-able)选挂在哪个 workspace 下
+- 多个 KB 可挂同一 workspace(协作分组)
+- NULL workspace_id 的 KB 视为「未分组」,`tenant root` 节点
+
+### 3.8 document_folders
+```python
+class DocumentFolder(Base):
+    id: int
+    kb_id: int                  # 严格属于 1 个 KB(不跨 KB)
+    parent_id: int | None       # 自引用,NULL = KB 根
+    name: str
+    order_index: int
+    document_count: int         # 冗余
+    tenant_id: int              # 冗余,走 KB 即可
+```
+
+- 树状(folder 可以嵌套),但仅在同一 KB 内
+- Document 通过 `Document.folder_id` 关联(NULL = KB 根)
+- `move_document(kb_id, doc_id, target_folder_id)` API 移动文档
+
+### 3.9 前端导航结构
+`/dashboard/knowledge` 页加入 `<WorkspaceTree>` 侧边栏(AntD DirectoryTree):
+
+```
+ws:root (未分组,workspace_id=NULL 的 KB)
+  └ KB 「legacy」
+ws:1 (研发)
+  └ KB 「API 规范」
+     ├ kb-root:100 根目录 (12)
+     └ folder:200 v1 (5)
+         └ folder:201 auth (2)
+```
+
+点击节点通过回调冒泡:
+- `ws:*` → `onSelectWorkspace` + `onSelectKb(ws, null)`
+- `kb:*` / `kb-root:*` → `onSelectKb(ws, kbId)`(+`onSelectFolder` for kb-root)
+- `folder:*` → `onSelectFolder(ws, kbId, folderId)`
+
+### 3.10 文件
+- ORM: `backend/lumen_models/workspace.py` + `backend/lumen_models/document_folder.py`
+- Schema: `backend/lumen_schemas/workspace.py` + `backend/lumen_schemas/folder.py`
+- 服务: `backend/lumen_services/workspace_service.py` + `backend/lumen_services/folder_service.py`
+- 路由: `backend/lumen_api/v1/workspace.py` + `backend/lumen_api/v1/folder.py`
+- 前端: `frontend/components/knowledge/WorkspaceTree.tsx` + `CreateWorkspaceModal` + `CreateFolderModal` + `MoveDocumentModal`
+- 页面: `frontend/app/dashboard/knowledge/page.tsx` 集成 sidebar + breadcrumb
+
+### 3.11 向后兼容
+- `KnowledgeBase.workspace_id` NULL → KB 仍在「未分组」节点可见
+- `Document.folder_id` NULL → 文档仍列在 KB 根(虚节点「根目录 (N)」)
+- 旧 API 路径不变;workspace / folder 是新增维度
+- **不删旧 API**(无破坏性更新)
+
+---
+
 ## 4. UI
 
 ### 4.1 列表
@@ -354,4 +421,4 @@ async def retrieve(
 ---
 
 **维护者**:全栈架构师
-**最近更新**:2026-08-06
+**最近更新**:2026-08-26(M38.2 ship:Workspace + Folder 三层导航)

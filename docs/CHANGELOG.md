@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-08-26 — M38.2 KB 工作区 + 文档目录层级
+
+### 背景
+KB 之上缺少导航层级,租户 > 30 个 KB 或单 KB > 200 文档时 UX 接近不可用。
+
+### 主要工作
+- **`docs/requirements/04-roadmap-milestones.md`**:新增 M38.2 里程碑条目 + 12 个月时间线 + 数字基线更新
+- **`docs/modules/knowledge-base.md`**:新增 §3.6–3.11 六节描述 workspace / folder 数据模型、API、前端导航结构、向后兼容
+- **保留 v1 文档路径**:无破坏性变更,workspace_id / folder_id 都是 NULL-able 字段,旧 KB / Document 自动落在「未分组」/「KB 根」
+
+---
+
 ## 2026-08-06 — 完整文档体系建立
 
 ### 背景

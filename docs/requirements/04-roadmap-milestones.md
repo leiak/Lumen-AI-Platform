@@ -105,6 +105,13 @@
 - **M37.3**:Eval Dashboard(看板 + 趋势 + Run 详情)
 - **CP7**:全量测试修复(1469 passed)
 
+### M38:KB 协作工作区 + 文档目录层级(2026-08-26 ship)
+- **M38.1**:Storage Abstraction(准备 KB / Document 抽到统一接口)
+- **M38.2**:Workspace + DocumentFolder 三层侧边栏导航(ws → KB → folder)
+  - 后端:`workspaces` + `document_folders` 表 + `WorkspaceApi` 14 端点 + `FolderService` CRUD + `MoveDocumentService`
+  - 前端:`WorkspaceTree` sidebar + 3 modal(CreateWorkspace / CreateFolder / MoveDocument)+ `knowledge/page.tsx` 集成
+  - 测试:后端 35 + 前端 45 vitest 全绿
+
 ---
 
 ## 最近 12 个月详细时间线
@@ -158,6 +165,8 @@
 | 2026-08-06 | CP7 | 全量测试修复 |
 | 2026-08-07 | M36.2.2 | 配乐生成(BGM stock music) |
 | 2026-08-07 | M37 收尾 | wx-publisher admin purge / draft-85 401 链 / eval parent-children menu |
+| 2026-08-26 | M38.1 | Storage Abstraction |
+| 2026-08-26 | M38.2 | KB workspace + folder 三层侧边栏 |
 
 ---
 
@@ -187,14 +196,14 @@
 
 | 维度 | 数字 |
 |------|------|
-| **里程碑数** | 37 + 3 收尾 |
-| **后端测试** | 1502 passed / 8 skipped / 1 xfailed / 0 failed(含 M37 3 个 wx_account purge 测试) |
-| **前端测试** | 492 passed / 1 failed(整套件 baseline;1 个 pre-existing fail 见 CLAUDE.md §8) |
-| **数据库表** | 80+ 张 |
-| **API 端点** | 250+ 个 |
+| **里程碑数** | 38 + 3 收尾 |
+| **后端测试** | 1502 + M38.2 35 passed / 0 failed |
+| **前端测试** | 492 + M38.2 45 passed / 1 failed(整套件 baseline;1 个 pre-existing fail 见 CLAUDE.md §8) |
+| **数据库表** | 82+ 张(+`workspaces`, `document_folders`) |
+| **API 端点** | 264+ 个(+workspace 8 + folder 5 + move_document 1) |
 | **工作流节点** | 22 个 |
 | **技能** | 15+ 个内置 |
-| **代码行数** | 约 12 万行(后端 6 万 + 前端 4 万 + Widget/Electron 2 万) |
+| **代码行数** | 约 12.5 万行(后端 6.2 万 + 前端 4.1 万 + Widget/Electron 2 万) |
 
 ---
 
