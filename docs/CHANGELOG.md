@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-08-27 — M38.2.x v2 Workspace RBAC ship
+
+### 背景
+M38.2 把 workspace 落库后只做导航骨架,同 tenant 任何 user 都能看所有 workspace / KB / document,不符合企业内协场景。新 spec `docs-internal/superpowers/specs/2026-08-27-workspace-rbac.md`(200+ 行)定义 19 项 ACL permission + owner/admin bypass + workspace_id IS NULL 默认开放 read + chat/workflow KB RAG 集成。
+
+### 主要工作
+- **`docs/requirements/04-roadmap-milestones.md`**:M38.2 段追加 v2 子里程碑 + 时间线追加 2026-08-27 行 + 数字基线更新(后端 1562 / 前端 555,1 pre-existing fail)
+- **`docs/modules/knowledge-base.md`**:新增 §3.12 完整描述 RBAC 19 perm 清单 + implication 链 + owner/admin/IS NULL 三层 bypass + API 端点表 + check helper 签名 + chat/workflow KB RAG 集成模式
+
+### 关键 invariant(spec §6)
+1. owner bypass:`Workspace.owner_id == user.id` 自动全 19 perm
+2. superuser bypass:`User.is_superuser = true` 横跨全 workspace
+3. workspace_id IS NULL:read-class 全员开放,写操作仍要 superuser
+4. implication 链:`kb.update → kb.read → document.read` 等
+5. transfer_ownership 30s 防误点 + workspace 名二次输入 + AuditLog 同事务
+
+---
+
 ## 2026-08-26 — M38.2 KB 工作区 + 文档目录层级
 
 ### 背景

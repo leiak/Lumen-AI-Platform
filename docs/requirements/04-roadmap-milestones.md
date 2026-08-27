@@ -111,6 +111,11 @@
   - 后端:`workspaces` + `document_folders` 表 + `WorkspaceApi` 14 端点 + `FolderService` CRUD + `MoveDocumentService`
   - 前端:`WorkspaceTree` sidebar + 3 modal(CreateWorkspace / CreateFolder / MoveDocument)+ `knowledge/page.tsx` 集成
   - 测试:后端 35 + 前端 45 vitest 全绿
+- **M38.2.x v2**:Workspace RBAC(2026-08-27 ship)
+  - 后端:`workspace_member_permissions` 表 + `PermissionService`(19 perm + implication 链)+ `WorkspaceMemberService`(invite/update/remove/transfer)+ 5 endpoint + 14 既有 endpoint 加 RBAC check + chat/workflow KB RAG graceful skip
+  - 前端:`useCanI` hook + `useCurrentUserWorkspacePermissions` + `WorkspaceMembersModal`(19 perm Checkbox 矩阵 + 4 预设)+ `TransferOwnershipModal`(30s 倒计时 + workspace 名二次输入)
+  - invariant:owner / superuser 自动全 perm;`kb.update` imply `kb.read + document.read`;`workspace_id IS NULL` 默认开放 read
+  - 测试:后端 +25(1537 → 1562)+ 前端 +18 / 修复 1 pre-existing workspace-tree test(537 → 555)+ pre-existing 1 fail(`llm-node-skill-picker`)
 
 ---
 
@@ -167,6 +172,7 @@
 | 2026-08-07 | M37 收尾 | wx-publisher admin purge / draft-85 401 链 / eval parent-children menu |
 | 2026-08-26 | M38.1 | Storage Abstraction |
 | 2026-08-26 | M38.2 | KB workspace + folder 三层侧边栏 |
+| 2026-08-27 | M38.2.x v2 | Workspace RBAC(19 perm + owner/admin bypass + chat/workflow KB graceful skip) |
 
 ---
 
@@ -192,13 +198,13 @@
 
 ---
 
-## 数字基线(2026-08-07)
+## 数字基线(2026-08-27)
 
 | 维度 | 数字 |
 |------|------|
-| **里程碑数** | 38 + 3 收尾 |
-| **后端测试** | 1502 + M38.2 35 passed / 0 failed |
-| **前端测试** | 492 + M38.2 45 passed / 1 failed(整套件 baseline;1 个 pre-existing fail 见 CLAUDE.md §8) |
+| **里程碑数** | 39(M38.2.x v2)+ 3 收尾 |
+| **后端测试** | 1502 + M38.2 35 + M38.2.x v2 25 = 1562 passed / 0 failed |
+| **前端测试** | 492 + M38.2 45 + M38.2.x v2 18 = 555 passed / 1 failed(pre-existing `llm-node-skill-picker` 见 CLAUDE.md §8) |
 | **数据库表** | 82+ 张(+`workspaces`, `document_folders`) |
 | **API 端点** | 264+ 个(+workspace 8 + folder 5 + move_document 1) |
 | **工作流节点** | 22 个 |

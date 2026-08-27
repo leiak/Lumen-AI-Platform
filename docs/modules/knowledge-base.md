@@ -155,6 +155,72 @@ ws:1 (研发)
 - 旧 API 路径不变;workspace / folder 是新增维度
 - **不删旧 API**(无破坏性更新)
 
+### 3.12 Workspace RBAC(M38.2.x v2,2026-08-27 ship)
+
+M38.2 把 workspace 落库后只做导航骨架,M38.2.x v2 在它之上加 19 项 ACL 权限 + owner / admin bypass,workspace_id IS NULL 默认开放 read。
+
+**19 项 permission 清单**:
+
+| 维度 | 权限 |
+|------|------|
+| workspace | `workspace.read` / `update` / `delete` / `manage_members` / `transfer_ownership` |
+| KB | `kb.read` / `create` / `update` / `delete` |
+| folder | `folder.read` / `create` / `update` / `delete` / `restore` |
+| document | `document.read` / `create` / `update` / `delete` / `move` |
+
+**implication 链**(后端 `_PERM_IMPLIES` + 前端 `effectivePerms` 镜像):
+
+```
+kb.update        → kb.read → document.read
+kb.delete        → kb.read → document.read
+folder.update    → folder.read
+document.move    → folder.read + folder.update
+... (见 backend/lumen_services/permission_service.py)
+```
+
+**核心规则**:
+
+1. **owner bypass**: `Workspace.owner_id == user.id` 自动全 19 项 perm,无须在 `workspace_member_permissions` 插 row。
+2. **superuser bypass**: `User.is_superuser = true` 直接全 perm(横跨所有 workspace)。
+3. **workspace_id IS NULL 默认开放**: 老数据 / 没归 workspace 的 KB,read-class(workspace/kb/folder/document.read)同 tenant 全员开放;**写操作仍要 superuser**。
+4. **implication**: grant `kb.update` 自动获 `kb.read` + `document.read`(前端按钮 enable 用)。
+5. **transfer_ownership 30s 防误点**: 前端 modal 倒计时 + workspace 名二次输入确认,同事务写 `AuditLog` 保原子性。
+
+**API 端点**(`/api/v1/workspaces/{id}/members/*`):
+
+| Method | Path | 权限 | 用途 |
+|--------|------|------|------|
+| GET | `/members` | `workspace.read` | 列成员 + 每人权限 |
+| POST | `/members` | `workspace.manage_members` | 邀请 user(整组权限一次性 set) |
+| PUT | `/members/{uid}` | `workspace.manage_members` | 改 user 权限(整组覆盖) |
+| DELETE | `/members/{uid}` | `workspace.manage_members` | 移除 user(member 权限回收) |
+| POST | `/transfer-ownership` | `workspace.transfer_ownership` | 转让 owner + AuditLog |
+| GET | `/auth/me/workspaces` | 任意已登录 | 当前 user 在各 ws 上的 effective perm |
+
+**check helper 签名**(`backend/lumen_services/permission_service.py`):
+
+```python
+class PermissionService:
+    def check(db: Session, user: User, permission: str, workspace_id: int) -> bool: ...
+    def load_user_workspace_permissions(db, user, ws_ids) -> dict[int, set[str]]: ...
+    def require_workspace_perm(permission: str) -> Callable: ...  # FastAPI Depends
+```
+
+**chat / workflow KB RAG 集成**: agent_rag / chat_features / agent_service / workflow KB 节点全部加 `user` 入参;**user 无 kb.read 时该 KB 在检索结果里被 skip**(不 throw),spec §6.6。
+
+**前端 useCanI 模式**:
+
+```ts
+import { useCanI } from "@/hooks/useWorkspacePermissions";
+
+function KnowledgePage() {
+  const canManage = useCanI("workspace.manage_members", selectedWorkspaceId);
+  return <Button disabled={!canManage}>成员管理</Button>;
+}
+```
+
+详见 `docs-internal/superpowers/specs/2026-08-27-workspace-rbac.md`(200+ 行,完整 invariant 列表 + spec §6 implication 全链)。
+
 ---
 
 ## 4. UI
@@ -421,4 +487,4 @@ async def retrieve(
 ---
 
 **维护者**:全栈架构师
-**最近更新**:2026-08-26(M38.2 ship:Workspace + Folder 三层导航)
+**最近更新**:2026-08-27(M38.2.x v2 ship:Workspace RBAC 19 perm + owner/admin bypass + chat/workflow KB graceful skip)
