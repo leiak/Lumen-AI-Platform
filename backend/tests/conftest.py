@@ -48,6 +48,7 @@ def tmp_user():
             hashed_password=get_password_hash("x"),
             tenant_id=1,
             is_active=True,
+            is_superuser=True,  # M38.2.x v2: 旧 fixture 的 tmp_kb 默认 workspace_id=None,写操作(document.create 等)按 spec §6.4 要 superuser
         )
         db.add(u)
         db.commit()

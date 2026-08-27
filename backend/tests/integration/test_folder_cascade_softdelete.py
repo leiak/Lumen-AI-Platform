@@ -35,9 +35,10 @@ class _FakeUser:
 
 
 class _FakeKB:
-    def __init__(self, *, id: int = 1, tenant_id: int = 1) -> None:
+    def __init__(self, *, id: int = 1, tenant_id: int = 1, workspace_id: Optional[int] = None) -> None:
         self.id = id
         self.tenant_id = tenant_id
+        self.workspace_id = workspace_id  # M38.2.x v2: permission service reads kb.workspace_id
 
 
 class _FakeFolder:
@@ -166,7 +167,10 @@ class _FakeSession:
         # (document_folders / documents),singular/plural 都试一下。
         import re
         snake = re.sub(r"(?<!^)(?=[A-Z])", "_", class_name).lower()
-        rows = self.state.get(snake, self.state.get(f"{snake}s", []))
+        rows = self.state.get(
+            snake,
+            self.state.get(f"{snake}s", self.state.get("kb_lookups", [])),
+        )
         return _FakeQuery(rows)
 
     def get(self, model, pk):
@@ -298,7 +302,7 @@ def client(state):
     def _override_db():
         yield _FakeSession(state)
 
-    caller = _FakeUser(tenant_id=1, is_superuser=False, uid=11)
+    caller = _FakeUser(tenant_id=1, is_superuser=True, uid=11)  # M38.2.x v2: folder soft-delete 需 folder.delete;测试不验 RBAC 语义,直接 admin 绕过
 
     def _override_current_user():
         return caller
