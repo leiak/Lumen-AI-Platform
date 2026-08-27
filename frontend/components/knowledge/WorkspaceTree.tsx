@@ -11,15 +11,17 @@
 // § 4.1 (workspace API) + § 4.2 (folder API) + § 5.2 (sidebar tree shape).
 
 import { useMemo } from "react";
-import { Tree, Button, Empty, Spin } from "antd";
+import { Tree, Button, Empty, Spin, Tooltip } from "antd";
 import type { TreeDataNode } from "antd";
 import {
   PlusOutlined,
   ApartmentOutlined,
   FolderOutlined,
   DatabaseOutlined,
+  LockOutlined,
 } from "@ant-design/icons";
 
+import { useCanI } from "@/hooks/useWorkspacePermissions";
 import type {
   KnowledgeBaseTreeNode,
   WorkspaceTreeResponse,
@@ -83,13 +85,38 @@ function kbNode(
   return {
     key: `kb:${kb.id}`,
     title: (
-      <span>
-        <DatabaseOutlined /> {kb.name}{" "}
-        <span style={{ color: "#999" }}>({kb.document_count})</span>
-      </span>
+      <KbTitle workspaceId={workspaceId} name={kb.name} documentCount={kb.document_count} />
     ),
     children,
   };
+}
+
+/** KB 节点标题 —— 无写权限时挂 LockOutlined + tooltip。 */
+function KbTitle({
+  workspaceId,
+  name,
+  documentCount,
+}: {
+  workspaceId: number | null;
+  name: string;
+  documentCount: number;
+}) {
+  // M38.2.x v2: workspace_id IS NULL 的 KB 视为 graceful read-only — 标 lock 图标
+  // 提示用户该 KB 不可写但可读。
+  const canUpdate = useCanI("kb.update", workspaceId);
+  const icon = !canUpdate ? (
+    <Tooltip title="无写权限(只读)">
+      <LockOutlined style={{ color: "#faad14", marginRight: 6 }} />
+    </Tooltip>
+  ) : (
+    <DatabaseOutlined style={{ marginRight: 6 }} />
+  );
+  return (
+    <span>
+      {icon}
+      {name} <span style={{ color: "#999" }}>({documentCount})</span>
+    </span>
+  );
 }
 
 function folderNode(

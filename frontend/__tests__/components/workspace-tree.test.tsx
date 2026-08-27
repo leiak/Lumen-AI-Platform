@@ -14,10 +14,39 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { ConfigProvider, App } from "antd";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import WorkspaceTree, {
   workspaceTreeKeyOf,
 } from "@/components/knowledge/WorkspaceTree";
 import type { WorkspaceTreeResponse } from "@/types/workspace";
+
+// M38.2.x v2:WorkspaceTree 现在用 useCanI("kb.update") 决定 KB 节点 lock 图标,
+// useCanI 内部走 useQuery,所以测试 wrap 必须有 QueryClientProvider。
+// 这里 stub fetchMyWorkspacePermissions 让 byWorkspace 是空 Map → 所有 KB 都 lock,
+// 不影响 selection callback 路由测试。
+const mockFetch = vi.fn().mockResolvedValue({ workspaces: [] });
+vi.mock("@/hooks/useWorkspacePermissions", () => ({
+  useCurrentUserWorkspacePermissions: () => ({
+    byWorkspace: new Map(),
+    ownedWorkspaceIds: new Set(),
+    isLoading: false,
+    error: null,
+    refetch: vi.fn(),
+  }),
+  useCanI: () => false, // 这组测试不查 lock 状态,固定 false 就行
+  usePermissions: () => ({ has: () => false, hasAny: () => false, hasAll: () => false }),
+}));
+
+const TreeWrapper = ({ children }: { children: React.ReactNode }) => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return (
+    <ConfigProvider>
+      <App>
+        <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+      </App>
+    </ConfigProvider>
+  );
+};
 
 const sampleWsTree = (): WorkspaceTreeResponse => ({
   workspace: {
@@ -80,9 +109,8 @@ describe("WorkspaceTree — selection callback routing", () => {
     const onCreateFolder = vi.fn();
 
     render(
-      <ConfigProvider>
-        <App>
-          <WorkspaceTree
+      <TreeWrapper>
+        <WorkspaceTree
             selectedWorkspaceId={null}
             selectedKbId={null}
             selectedFolderId={null}
@@ -94,9 +122,9 @@ describe("WorkspaceTree — selection callback routing", () => {
             onSelectKb={onSelectKb}
             onSelectFolder={onSelectFolder}
           />
-        </App>
-      </ConfigProvider>
+      </TreeWrapper>
     );
+
 
     fireEvent.click(screen.getByText("未分组"));
     expect(onSelectWorkspace).toHaveBeenCalledWith(null);
@@ -110,9 +138,8 @@ describe("WorkspaceTree — selection callback routing", () => {
     const onSelectFolder = vi.fn();
 
     render(
-      <ConfigProvider>
-        <App>
-          <WorkspaceTree
+      <TreeWrapper>
+        <WorkspaceTree
             selectedWorkspaceId={null}
             selectedKbId={null}
             selectedFolderId={null}
@@ -124,9 +151,9 @@ describe("WorkspaceTree — selection callback routing", () => {
             onSelectKb={onSelectKb}
             onSelectFolder={onSelectFolder}
           />
-        </App>
-      </ConfigProvider>
+      </TreeWrapper>
     );
+
 
     fireEvent.click(screen.getByText("研发"));
     expect(onSelectWorkspace).toHaveBeenCalledWith(1);
@@ -148,9 +175,8 @@ describe("WorkspaceTree — selection callback routing", () => {
     const onCreateWorkspace = vi.fn();
 
     render(
-      <ConfigProvider>
-        <App>
-          <WorkspaceTree
+      <TreeWrapper>
+        <WorkspaceTree
             selectedWorkspaceId={null}
             selectedKbId={null}
             selectedFolderId={null}
@@ -162,9 +188,9 @@ describe("WorkspaceTree — selection callback routing", () => {
             onSelectKb={vi.fn()}
             onSelectFolder={vi.fn()}
           />
-        </App>
-      </ConfigProvider>
+      </TreeWrapper>
     );
+
 
     fireEvent.click(screen.getByTitle("新建 workspace"));
     expect(onCreateWorkspace).toHaveBeenCalledOnce();
@@ -172,9 +198,8 @@ describe("WorkspaceTree — selection callback routing", () => {
 
   it("无 workspace / KB 时显示 Empty 占位", () => {
     render(
-      <ConfigProvider>
-        <App>
-          <WorkspaceTree
+      <TreeWrapper>
+        <WorkspaceTree
             selectedWorkspaceId={null}
             selectedKbId={null}
             selectedFolderId={null}
@@ -186,9 +211,9 @@ describe("WorkspaceTree — selection callback routing", () => {
             onSelectKb={vi.fn()}
             onSelectFolder={vi.fn()}
           />
-        </App>
-      </ConfigProvider>
+      </TreeWrapper>
     );
+
 
     expect(screen.getByText(/还没有 workspace/)).toBeTruthy();
   });

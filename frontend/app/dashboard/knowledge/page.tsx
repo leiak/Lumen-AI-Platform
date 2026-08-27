@@ -37,6 +37,7 @@ import {
   BarsOutlined,
   AppstoreOutlined,
   SwapOutlined,
+  TeamOutlined,
 } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -60,6 +61,9 @@ import {
 } from "@/services/folder";
 import type { WorkspaceTreeResponse } from "@/types/workspace";
 import type { DocumentFolderTreeNode } from "@/types/folder";
+// M38.2.x v2: workspace RBAC members 管理 + useCanI gate
+import { WorkspaceMembersModal } from "@/components/knowledge/WorkspaceMembersModal";
+import { useCanI } from "@/hooks/useWorkspacePermissions";
 
 const { TextArea } = Input;
 const { Text } = Typography;
@@ -230,6 +234,23 @@ export default function KnowledgePage() {
   const [createFolderOpen, setCreateFolderOpen] = useState(false);
   const [moveDocOpen, setMoveDocOpen] = useState(false);
   const [movingDoc, setMovingDoc] = useState<DocumentResponse | null>(null);
+  // M38.2.x v2: workspace 成员管理 modal + currentUserId for owner 比较。
+  const [membersOpen, setMembersOpen] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState<number>(0);
+
+  // M38.2.x v2: 从 localStorage 读当前 user id;用于成员管理 owner 判断。
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = localStorage.getItem("user");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed?.id === "number") setCurrentUserId(parsed.id);
+      }
+    } catch {
+      // 静默:不阻塞 UI
+    }
+  }, []);
 
   // Fetch parser types
   const { data: parserTypesData } = useQuery({
@@ -1087,7 +1108,7 @@ export default function KnowledgePage() {
         />
       {/* Knowledge Base List */}
       <Card title="知识库列表" style={{ marginBottom: 16 }}>
-        <div style={{ marginBottom: 16 }}>
+        <div style={{ marginBottom: 16, display: "flex", gap: 8, alignItems: "center" }}>
           <Button
             type="primary"
             icon={<PlusOutlined />}
@@ -1095,6 +1116,20 @@ export default function KnowledgePage() {
           >
             创建知识库
           </Button>
+          {selectedWorkspaceId != null && selectedWorkspaceId > 0 && (
+            <WorkspaceMembersButton
+              workspaceId={selectedWorkspaceId}
+              workspaceName={
+                workspaces.find((w) => w.id === selectedWorkspaceId)?.name ??
+                `Workspace #${selectedWorkspaceId}`
+              }
+              currentUserId={currentUserId}
+              currentOwnerId={
+                workspaces.find((w) => w.id === selectedWorkspaceId)?.owner_id ?? 0
+              }
+              onClick={() => setMembersOpen(true)}
+            />
+          )}
         </div>
         <Table
           columns={columns}
@@ -1957,6 +1992,53 @@ export default function KnowledgePage() {
           onSubmit={handleMoveDocument}
         />
       )}
+
+      {/* M38.2.x v2: workspace 成员管理 modal —— 选中 workspace 时才显示。 */}
+      {selectedWorkspaceId != null && selectedWorkspaceId > 0 && (
+        <WorkspaceMembersModal
+          open={membersOpen}
+          workspaceId={selectedWorkspaceId}
+          workspaceName={
+            workspaces.find((w) => w.id === selectedWorkspaceId)?.name ??
+            `Workspace #${selectedWorkspaceId}`
+          }
+          currentUserId={currentUserId}
+          currentOwnerId={
+            workspaces.find((w) => w.id === selectedWorkspaceId)?.owner_id ?? 0
+          }
+          onClose={() => setMembersOpen(false)}
+        />
+      )}
     </Layout>
+  );
+}
+
+// --- 成员管理按钮子组件 ------------------------------------------------
+
+interface WorkspaceMembersButtonProps {
+  workspaceId: number;
+  workspaceName: string;
+  currentUserId: number;
+  currentOwnerId: number;
+  onClick: () => void;
+}
+
+/**
+ * 「成员」按钮 —— useCanI("workspace.manage_members") 决定 enabled。
+ * owner 自动有 manage_members 权限(spec §6.5),但这里直接由 useCanI 处理。
+ */
+function WorkspaceMembersButton({
+  workspaceId,
+  onClick,
+}: WorkspaceMembersButtonProps) {
+  const canManage = useCanI("workspace.manage_members", workspaceId);
+  return (
+    <Button
+      icon={<TeamOutlined />}
+      disabled={!canManage}
+      onClick={onClick}
+    >
+      成员管理
+    </Button>
   );
 }
