@@ -121,6 +121,7 @@ from lumen_models.system_config import SystemConfig  # M34: 平台 KV 配置
 from lumen_models.llm_call_log import LLMCallLog  # M26: LLM call observability
 from lumen_models.embedding_call_log import EmbeddingCallLog  # M27: Embedding call observability
 from lumen_services.logging_service import AuditLog, OperationLog, QueryLog  # Logging models
+from lumen_models.workspace import Workspace, DocumentFolder  # M38.2: 注册 workspaces / document_folders 表到 Base.metadata,否则 knowledge_bases.workspace_id 和 documents.folder_id FK 无法解析(M38.2 ship 漏项,2026-08-27 回归补)
 from lumen_models.workspace_member_permission import WorkspaceMemberPermission  # M38.2.x v2: workspace RBAC grants
 
 app = FastAPI(

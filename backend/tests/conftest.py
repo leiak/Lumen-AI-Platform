@@ -7,6 +7,20 @@ from lumen_core.security import get_password_hash
 from lumen_models.user import User
 from lumen_models.tenant import Tenant
 from lumen_models.knowledge import KnowledgeBase
+# M38.2 ship 漏项补注册 + 全量 ensure_*:tests 走 conftest.py 而不 import lumen_main,
+# 但 Base.metadata 需要所有 model 类注册才能解析 FK,MySQL schema 也需要 lumen_main
+# 的 startup_event 跑过 ensure_* 才完整(workspace_id / folder_id / asset_storage_key 等
+# 后加列不会出现在 schema.sql 里)。直调 lumen_main.startup_event() 一次性全跑,
+# 后续 lumen_main 加新 model / 新 ensure_* 时 conftest 不需要改。
+import asyncio
+from lumen_main import startup_event
+
+try:
+    asyncio.run(startup_event())
+except Exception as e:
+    # startup_event 在已有 dev DB 状态上对幂等 ALTER 会偶发重复键警告等,
+    # schema 已就位时 ensure_* 应 no-op,任何异常继续往下(让个别 test 自己报清晰的错)。
+    print(f"WARNING: lumen_main.startup_event() failed: {e}")
 
 
 @pytest.fixture

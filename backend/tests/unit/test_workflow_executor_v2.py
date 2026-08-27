@@ -223,12 +223,13 @@ def test_executor_passes_tenant_id_to_nodes(monkeypatch):
     class _RecordingNode:
         # Duck-typed BaseNode: same __init__ signature, same surface area used
         # by WorkflowExecutor._instantiate and run_node_with_handling.
-        def __init__(self, node_id, config, pool, db, tenant_id=None):
+        def __init__(self, node_id, config, pool, db, tenant_id=None, user=None):
             self.node_id = node_id
             self.config = config
             self.pool = pool
             self.db = db
             self.tenant_id = tenant_id
+            self.user = user  # M38.2.x v2: WorkflowExecutor 现在透传 user 给所有 node
             self._data = BaseNodeData.model_validate(config)
             seen_tenant.append(tenant_id)
 
