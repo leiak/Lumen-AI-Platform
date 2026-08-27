@@ -117,3 +117,10 @@ router.include_router(storage.router)
 from . import workspace, folders
 router.include_router(workspace.router)
 router.include_router(folders.router)
+
+# M38.2.x v2: workspace member management (RBAC)
+#   /api/v1/workspaces/{id}/members              (GET list / POST invite)
+#   /api/v1/workspaces/{id}/members/{user_id}    (PUT update / DELETE remove)
+#   /api/v1/workspaces/{id}/transfer-ownership   (POST transfer)
+from . import workspace_members  # noqa: E402
+router.include_router(workspace_members.router)
