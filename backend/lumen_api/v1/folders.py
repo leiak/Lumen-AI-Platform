@@ -29,6 +29,10 @@ from lumen_schemas.document_folder import (
     DocumentFolderUpdate,
 )
 from lumen_services.folder_service import folder_service
+from lumen_services.permission_service import (
+    assert_perm_via_folder,
+    assert_perm_via_kb,
+)
 
 router = APIRouter(tags=["folders"])
 
@@ -55,10 +59,12 @@ def list_folders(
 ):
     """List folders under a KB.
 
+    M38.2.x v2: ``folder.read`` permission is required via KB.
     Soft-deleted folders are filtered out; restore endpoints
     surface them separately so a "Recently Deleted" UI can fetch
     them out-of-band.
     """
+    assert_perm_via_kb(db, current_user, "folder.read", kb_id)
     items = folder_service.list_folders(
         db,
         kb_id=kb_id,
@@ -81,9 +87,11 @@ def create_folder(
 ):
     """Create a folder under a KB.
 
+    M38.2.x v2: ``folder.create`` permission is required via KB.
     Cross-KB parents are rejected at the service layer; this
     endpoint forwards the caller as the ``created_by`` owner.
     """
+    assert_perm_via_kb(db, current_user, "folder.create", kb_id)
     folder = folder_service.create_folder(
         db,
         kb_id=kb_id,
@@ -107,7 +115,11 @@ def get_folder(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Single folder including the ancestor ``path`` string."""
+    """Single folder including the ancestor ``path`` string.
+
+    M38.2.x v2: ``folder.read`` permission is required via folder → KB.
+    """
+    assert_perm_via_folder(db, current_user, "folder.read", folder_id)
     folder = folder_service.get_folder(
         db,
         folder_id=folder_id,
@@ -131,9 +143,11 @@ def update_folder(
 ):
     """Patch a folder.
 
+    M38.2.x v2: ``folder.update`` permission is required via folder → KB.
     Re-parenting is allowed; the service rejects cycles
     (a folder cannot be moved into its own subtree).
     """
+    assert_perm_via_folder(db, current_user, "folder.update", folder_id)
     folder = folder_service.update_folder(
         db,
         folder_id=folder_id,
@@ -153,6 +167,8 @@ def delete_folder(
     current_user: User = Depends(get_current_user),
 ):
     """Soft-delete a folder + all descendants.
+
+    M38.2.x v2: ``folder.delete`` permission is required via folder → KB.
 
     Returns the BFS subtree size + the number of rows the
     UPDATE flipped, so the frontend can render a "Moved N
@@ -177,6 +193,8 @@ def delete_folder(
     )
     if folder is None:
         raise HTTPException(status_code=404, detail="Folder not found")
+
+    assert_perm_via_folder(db, current_user, "folder.delete", folder_id)
 
     # BFS descendants (module-level helper in folder_service).
     from lumen_services.folder_service import _bfs_descendants
@@ -227,11 +245,13 @@ def restore_folder(
 ):
     """Restore a soft-deleted folder.
 
+    M38.2.x v2: ``folder.restore`` permission is required via folder → KB.
     30-day window enforcement is a follow-up Celery task (spec
     §8 risk). The endpoint surfaces ``deleted_at`` on the
     response so the frontend can grey out rows older than the
     window without needing a separate fetch.
     """
+    assert_perm_via_folder(db, current_user, "folder.restore", folder_id)
     folder = folder_service.restore_folder(
         db,
         folder_id=folder_id,

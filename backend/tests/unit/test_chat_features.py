@@ -179,7 +179,7 @@ class TestPrepare:
         # Mock build_agent_kb_context 返固定字符串
         monkeypatch.setattr(
             "lumen_services.chat_features.build_agent_kb_context",
-            lambda agent_id, query, db: "## Knowledge Context\n[Source: Test KB]\ntest content",
+            lambda agent_id, query, db, user=None: "## Knowledge Context\n[Source: Test KB]\ntest content",
         )
 
         service = ChatFeatureService(db=None, tenant_id=1)

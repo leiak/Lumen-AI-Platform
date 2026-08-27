@@ -158,11 +158,22 @@ class KnowledgeRetrievalNode(BaseNode):
         assert isinstance(self._data, KnowledgeRetrievalNodeData)
         d: KnowledgeRetrievalNodeData = self._data
 
+        # M38.2.x v2: 未选 KB 不再 throw,改为返空 result(spec §5.2.1 graceful skip)
+        # —— workflow 不应该因为一个空配置节点就整个中断。
+        empty_result = lambda reason: NodeRunResult(  # noqa: E731
+            node_id=self.node_id,
+            output_values={
+                "chunks": [],
+                "merged_text": "",
+                "count": 0,
+                "error": reason,
+            },
+        )
         if not d.kb_id:
-            raise ValueError(f"KB {d.kb_id} not found or inactive")
+            return empty_result(f"KB {d.kb_id} not found or inactive")
 
         if self.db is None:
-            raise ValueError("KnowledgeRetrievalNode 需要 db session 才能查找知识库")
+            return empty_result("KnowledgeRetrievalNode 需要 db session 才能查找知识库")
 
         kb = (
             self.db.query(KnowledgeBase)
@@ -173,7 +184,21 @@ class KnowledgeRetrievalNode(BaseNode):
         if kb is not None and self.tenant_id is not None and kb.tenant_id != self.tenant_id:
             kb = None
         if not kb:
-            raise ValueError(f"KB {d.kb_id} not found or inactive")
+            return empty_result(f"KB {d.kb_id} not found or inactive")
+
+        # M38.2.x v2: per-KB ``kb.read`` 过滤。``user is None`` 走 graceful open
+        # (widget / 系统 cron / 老 fixture 不传 user)。
+        kb_workspace_id = getattr(kb, "workspace_id", None)
+        if self.user is not None and kb_workspace_id is not None:
+            from lumen_services.permission_service import PermissionService
+            if not PermissionService().check(
+                self.db, self.user, "kb.read", kb_workspace_id,
+            ):
+                logger.info(
+                    "KnowledgeRetrievalNode skip KB %s: user %s no kb.read",
+                    kb.id, getattr(self.user, "id", None),
+                )
+                return empty_result("permission_denied")
 
         query = VariableTemplateParser(d.query).format(self.pool)
         # M28 后 ``get_retrieval_pipeline`` 签名是 3-arg ``(kb_id, model_config_id, db)``,

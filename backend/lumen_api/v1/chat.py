@@ -395,7 +395,8 @@ async def chat_stream(
 
             # —— Feature preprocessing pipeline ——
             try:
-                feats = ChatFeatureService(db, current_user.tenant_id)
+                # M38.2.x v2: 透传 user 让 KB RAG 做 per-KB ``kb.read`` 过滤
+                feats = ChatFeatureService(db, current_user.tenant_id, user=current_user)
                 # M21: pass agent_id so step 4 (KB RAG context) runs.
                 # ``request.agent_id`` was auto-resolved from the conversation
                 # at the top of this function (see M14 logic) — passing it

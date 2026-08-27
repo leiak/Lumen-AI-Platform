@@ -144,17 +144,74 @@ class _FakeSession:
         if getattr(obj, "updated_at", None) is None:
             obj.updated_at = obj.created_at
 
+    def execute(self, stmt=None, *args, **kwargs):
+        """M38.2.x v2: PermissionService.check() 调 ``db.execute()`` 查 owner + grants。
+
+        本测试集关心 tenant 隔离 + RBAC owner bypass:对 ``Workspace.owner_id``
+        查询(``SELECT owner_id FROM workspace WHERE id = X``),从 state 查
+        匹配的 workspace 返 owner_id;grant 查询返空。
+        """
+        class _ScalarResult:
+            def __init__(self, v):
+                self._v = v
+
+            def scalar_one_or_none(self_inner):
+                return self_inner._v
+
+            def scalars(self_inner):
+                return self_inner
+
+            def all(self_inner):
+                return [self_inner._v] if self_inner._v is not None else []
+
+        class _EmptyResult:
+            def first(self_inner):
+                return None
+
+            def scalar_one_or_none(self_inner):
+                return None
+
+            def scalars(self_inner):
+                return self_inner
+
+            def all(self_inner):
+                return []
+
+        if stmt is None:
+            return _EmptyResult()
+        try:
+            sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+            params = dict(stmt.compile().params)
+        except Exception:
+            return _EmptyResult()
+        # owner 查询模式:含 "owner_id" + "workspace" + LIMIT
+        if "owner_id" in sql.lower() and "workspace" in sql.lower():
+            # 拿 workspace_id(参数化 bound param)
+            for v in params.values():
+                if isinstance(v, int):
+                    for ws in self.state["workspaces"]:
+                        if ws.id == v:
+                            return _ScalarResult(ws.owner_id)
+            return _ScalarResult(None)
+        # 其它查询(grant lookup / implication reverse) — 返空
+        return _EmptyResult()
+
 
 # --- fixtures -----------------------------------------------------------
 
 
 @pytest.fixture
 def state() -> Dict[str, Any]:
+    """M38.2.x v2: 给 tenant-1 测试 user (uid=11) 自动 owner ws 1+2。
+
+    让 RBAC permission check 通过 (_is_owner bypass);ws 3 (tenant 2)
+    owner 是 tenant-2 内的 user,所以 tenant-1 caller 永远拿不到。
+    """
     return {
         "workspaces": [
-            _FakeWorkspace(id=1, tenant_id=1, name="T1-A"),
+            _FakeWorkspace(id=1, tenant_id=1, name="T1-A", owner_id=11),
             _FakeWorkspace(id=2, tenant_id=1, name="T1-B", owner_id=11),
-            _FakeWorkspace(id=3, tenant_id=2, name="T2-A"),
+            _FakeWorkspace(id=3, tenant_id=2, name="T2-A", owner_id=99),
         ],
         "next_ws_id": 100,
     }
@@ -246,6 +303,9 @@ def test_delete_workspace_other_tenant_returns_404(client):
 def test_update_workspace_non_owner_non_admin_returns_403(client, state):
     """非 owner 非 admin 改别人 workspace → 403。
     workspace id=2 的 owner_id=11,但 caller uid=999 → 拒。
+
+    M38.2.x v2: 通过 PermissionService.check 实现 — 403 detail 是
+    ``无权限: workspace.update``(不是老的 owner/创建人 字符串)。
     """
     # 换 caller 成同租户但非 owner
     other = _FakeUser(tenant_id=1, is_superuser=False, uid=999)
@@ -260,7 +320,7 @@ def test_update_workspace_non_owner_non_admin_returns_403(client, state):
             json={"name": "by-non-owner"},
         )
         assert resp.status_code == 403
-        assert "owner" in resp.json()["detail"] or "创建人" in resp.json()["detail"]
+        assert "无权限" in resp.json()["detail"]
     finally:
         # restore
         caller = _FakeUser(tenant_id=1, is_superuser=False, uid=11)

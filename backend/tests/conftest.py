@@ -144,3 +144,74 @@ def make_team(db, *, tenant_id: int, name="t", manager_agent_id=None,
     db.commit()
     db.refresh(t)
     return t
+
+
+# —— M38.2.x v2: Workspace RBAC fixture helpers ——
+#
+# `_grant_default_workspace_admin(user_id, ws_id=None)` 把指定 user 在
+# 指定 workspace 上「全 perm」都开出来。spec §6.4 老数据 (``workspace_id
+# IS NULL`` 的 KB) 默认 read-class 对全员 in-tenant 开放,所以既有 1537 测试
+# (用的都是 ``workspace_id=None`` KB) 不破 —— 读操作天然通过,写操作本来
+# 就需要 superuser,那些 test 本身就走 superuser 路径。
+#
+# 新加的 workspace-scoped RBAC 测试 (``test_workspace_rbac_api`` 等) 走
+# workspace fixture 路径,调用本 helper 后 user 就有 owner-bypass 之外的
+# 全 perm 可测。
+
+def _grant_default_workspace_admin(db, user_id: int, workspace_id: int) -> None:
+    """给指定 user 在指定 workspace 上 grant ALL 19 个 perm。
+
+    用 ``db.flush()`` 让 caller 在同一 session 里看到 grant 行;不在这里
+    commit —— 由 caller 决定事务边界(便于多 fixture 共享一个 transaction)。
+    """
+    from lumen_models.workspace_member_permission import WorkspaceMemberPermission
+    from lumen_services.permission_service import _ALL_PERMS
+    for perm in _ALL_PERMS:
+        db.add(WorkspaceMemberPermission(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            permission=perm,
+            granted_by=user_id,  # 测试 helper 自授权,生产路径走真正的 actor
+        ))
+    db.flush()
+
+
+@pytest.fixture
+def tmp_workspace(tmp_user):
+    """Create a workspace owned by ``tmp_user`` (so owner auto-bypass 触发),
+    yield it, then cleanup (delete member rows first, then workspace).
+
+    ``tmp_user`` 自动成为 owner → ``_is_owner`` check 在 workspace-scoped
+    endpoint 一律 pass,无须手动 grant。RBAC 否定用例自己调
+    ``_grant_default_workspace_admin(db, tmp_user.id, ws.id)`` 正面 grant,
+    然后再 DELETE 来测拒绝。
+    """
+    from lumen_models.workspace import Workspace
+    db = SessionLocal()
+    ws = None
+    try:
+        ws = Workspace(
+            tenant_id=tmp_user.tenant_id,
+            owner_id=tmp_user.id,
+            name=f"notif_test_ws_{uuid.uuid4().hex[:6]}",
+            description="M38.2.x v2 fixture workspace",
+        )
+        db.add(ws)
+        db.commit()
+        db.refresh(ws)
+        yield ws
+    finally:
+        try:
+            if ws is not None:
+                from lumen_models.workspace_member_permission import (
+                    WorkspaceMemberPermission,
+                )
+                db.query(WorkspaceMemberPermission).filter(
+                    WorkspaceMemberPermission.workspace_id == ws.id
+                ).delete()
+                db.delete(ws)
+                db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()

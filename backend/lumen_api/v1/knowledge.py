@@ -15,6 +15,11 @@ from lumen_schemas.knowledge import (
 )
 from lumen_schemas.common import SingleResponse, PaginatedResponse
 from lumen_services.knowledge_service import KnowledgeService, KnowledgeBaseNotEmptyError
+from lumen_services.permission_service import (
+    PermissionService,
+    assert_perm_via_document,
+    assert_perm_via_kb,
+)
 from lumen_tools.vector_store_factory import VectorStoreFactory
 import os
 import re
@@ -59,6 +64,14 @@ async def list_knowledge_bases(
         kbs = [kb for kb in kbs if kb.workspace_id is None]
     elif workspace_id > 0:
         kbs = [kb for kb in kbs if kb.workspace_id == workspace_id]
+    # M38.2.x v2: 非 admin 按 kb.read 过滤。workspace_id IS NULL 的 KB
+    # 自动放行(spec §6.4 默认开放),workspace_id > 0 的 KB 走 check。
+    if not getattr(current_user, "is_superuser", False):
+        svc = PermissionService()
+        kbs = [
+            kb for kb in kbs
+            if svc.check(db, current_user, "kb.read", kb.workspace_id)
+        ]
     total = len(kbs)
     start = (page - 1) * page_size
     end = start + page_size
@@ -103,6 +116,10 @@ async def create_knowledge_base(
                 status_code=403,
                 detail="workspace 不属于当前租户",
             )
+        # M38.2.x v2: 需要 workspace 的 kb.create 权限
+        if not getattr(current_user, "is_superuser", False):
+            if not PermissionService().check(db, current_user, "kb.create", workspace_id):
+                raise HTTPException(status_code=403, detail="无权限: kb.create")
     service = KnowledgeService()
     kb = service.create_knowledge_base(db, current_user.tenant_id, data)
     if workspace_id is not None:
@@ -118,7 +135,9 @@ async def get_knowledge_base(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """M38.2.x v2: ``kb.read`` permission is required."""
     from lumen_models.knowledge import KnowledgeBase
+    assert_perm_via_kb(db, current_user, "kb.read", kb_id)
     kb = db.query(KnowledgeBase).filter(
         KnowledgeBase.id == kb_id,
         KnowledgeBase.tenant_id == current_user.tenant_id
@@ -135,7 +154,9 @@ async def update_knowledge_base(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """M38.2.x v2: ``kb.update`` permission is required."""
     service = KnowledgeService()
+    assert_perm_via_kb(db, current_user, "kb.update", kb_id)
     kb = service.update_knowledge_base(db, kb_id, current_user.tenant_id, data)
     if not kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
@@ -148,6 +169,8 @@ async def delete_knowledge_base(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    # M38.2.x v2: ``kb.delete`` permission is required via KB.
+    assert_perm_via_kb(db, current_user, "kb.delete", kb_id)
     # M21: 引用计数 (agent + document) — 在走 service 之前先拦截,
     # 避免走到 DB 层才被 FK constraint 500。先做轻量 count,再走原逻辑。
     from sqlalchemy import func, select
@@ -242,6 +265,9 @@ async def upload_document(
     from lumen_models.knowledge import KnowledgeBase, Document
     from lumen_models.tenant import Tenant  # Import Tenant to resolve SQLAlchemy relationship
     from lumen_core.config import settings
+
+    # M38.2.x v2: ``document.create`` permission is required via KB.
+    assert_perm_via_kb(db, current_user, "document.create", kb_id)
 
     kb = db.query(KnowledgeBase).filter(
         KnowledgeBase.id == kb_id,
@@ -717,6 +743,8 @@ async def rechunk_document(
 ):
     """Re-process a document with user-supplied chunking settings.
 
+    M38.2.x v2: ``document.update`` permission is required via doc → KB.
+
     Unlike :func:`retry_document` — which is meant for documents
     stuck in ``pending``/``queued``/``processing`` and uses the
     parent KB's defaults — ``rechunk`` is for *any* state (typically
@@ -728,6 +756,7 @@ async def rechunk_document(
     and their FAISS vector IDs are removed best-effort before the
     worker is enqueued.
     """
+    assert_perm_via_document(db, current_user, "document.update", document_id)
     from lumen_models.knowledge import Document, DocumentChunk
     from lumen_tasks.document_tasks import process_document_task
 
@@ -818,9 +847,13 @@ async def move_document(
 ):
     """M38.2: move a document into a folder (or KB root when null).
 
+    M38.2.x v2: ``document.move`` permission is required via doc → KB.
+    implication:folder.read + folder.update 自动覆盖。
+
     Body shape: ``{"folder_id": 5}`` or ``{"folder_id": null}``.
     Tenant isolation is enforced via the doc's parent KB.
     """
+    assert_perm_via_document(db, current_user, "document.move", document_id)
     from lumen_services.folder_service import folder_service
     target = (payload or {}).get("folder_id")
     moved = folder_service.move_document(
@@ -844,6 +877,7 @@ async def delete_document(
     """
     Delete a document, its chunks, and its FAISS vectors.
 
+    M38.2.x v2: ``document.delete`` permission is required via doc → KB.
     Tenant-scoped via the doc's parent knowledge base. The uploaded
     file on disk is intentionally left in place because we don't
     track reference counts — if the same filename was uploaded
@@ -859,6 +893,9 @@ async def delete_document(
     fix; for now the symptom is a few extra junk hits.
     """
     from lumen_models.knowledge import Document, DocumentChunk
+
+    # M38.2.x v2: ``document.delete`` permission is required via doc → KB.
+    assert_perm_via_document(db, current_user, "document.delete", document_id)
 
     doc = db.query(Document).filter(
         Document.id == document_id,

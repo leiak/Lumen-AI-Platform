@@ -28,6 +28,7 @@ from lumen_services.web_search import (
 )
 from lumen_services import skill_runner
 from lumen_services.skill_runner import SkillRunner
+from lumen_models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +66,17 @@ class PreparedContext(BaseModel):
 
 
 class ChatFeatureService:
-    def __init__(self, db: Optional[Session], tenant_id: int):
+    def __init__(
+        self,
+        db: Optional[Session],
+        tenant_id: int,
+        user: Optional[User] = None,
+    ):
         self.db = db
         self.tenant_id = tenant_id
+        # M38.2.x v2: 透传到 build_agent_kb_context 做 per-KB RBAC 过滤;
+        # ``None`` 保留 pre-M38.2 行为(widget visitor / cron / fixture)。
+        self.user = user
         self._search_provider: WebSearchProvider = get_web_search_provider()
 
     def prepare(
@@ -128,8 +137,11 @@ class ChatFeatureService:
 
         # 4) M21: Agent KB RAG context — append LAST so it sits right
         # before the user message (per spec §6.2 position decision).
+        # M38.2.x v2: 透传 self.user 做 per-KB ``kb.read`` 过滤。
         if agent_id is not None:
-            kb_context = build_agent_kb_context(agent_id, request.message, self.db)  # type: ignore[arg-type]
+            kb_context = build_agent_kb_context(
+                agent_id, request.message, self.db, user=self.user,  # type: ignore[arg-type]
+            )
             if kb_context:
                 system_messages.append(SystemMessage(content=kb_context))
 

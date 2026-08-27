@@ -36,6 +36,7 @@ from lumen_core.embedding_call_context import (
 )
 from lumen_models.agent import Agent
 from lumen_models.knowledge import KnowledgeBase
+from lumen_models.user import User
 from lumen_tools.vector_store_factory import VectorStoreFactory
 
 logger = logging.getLogger(__name__)
@@ -203,10 +204,18 @@ def build_agent_kb_context(
     agent_id: int,
     query: str,
     db: Session,
+    user: Optional[User] = None,
 ) -> Optional[str]:
     """Build RAG context string from agent's bound KBs.
 
     None = no active KB / all KBs returned 0 results / agent not found.
+
+    M38.2.x v2: pass ``user`` to enable per-KB ``kb.read`` (which
+    implies ``document.read``) gating. KBs the user has no read
+    access to are silently skipped — the agent still gets context
+    from the remaining accessible KBs. ``user is None`` keeps the
+    pre-M38.2 behaviour (widget visitor / cron / fixture) of "see
+    everything" for backwards compatibility.
     """
     agent = db.get(Agent, agent_id)
     if agent is None:
@@ -226,6 +235,20 @@ def build_agent_kb_context(
     ]
     if not active_kbs:
         return None
+
+    # M38.2.x v2: per-KB RBAC 过滤。``user is None`` 走 graceful open
+    # (widget visitor / cron / 老 fixture 不传 user 不破)。
+    if user is not None:
+        # 延迟 import 避免和 permission_service 的循环依赖
+        from lumen_services.permission_service import PermissionService
+
+        svc = PermissionService()
+        active_kbs = [
+            kb for kb in active_kbs
+            if svc.check(db, user, "kb.read", kb.workspace_id)
+        ]
+        if not active_kbs:
+            return None
 
     # M27: install an EmbeddingCallContext if the caller hasn't already.
     # The /chat/stream endpoint installs one (with the trace_id from the

@@ -181,12 +181,14 @@ async def chat_with_agent(
 
         # 2. Call the LLM (existing behavior, untouched).
         history = [h.model_dump() for h in data.history] if data.history else None
+        # M38.2.x v2: 透传 user 让 KB RAG 做 per-KB ``kb.read`` 过滤
         response = service.chat(
             db=db,
             agent_id=agent_id,
             tenant_id=current_user.tenant_id,
             message=data.message,
-            history=history
+            history=history,
+            user=current_user,
         )
 
         # 3. Best-effort persistence to Message / ConversationMemory /

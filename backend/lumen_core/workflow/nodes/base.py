@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from lumen_core.workflow.entities import BaseNodeData, NodeRunResult, OutputVar
 from lumen_core.workflow.variable_pool import VariablePool
+from lumen_models.user import User
 
 
 class NodeMetadata:
@@ -85,12 +86,17 @@ class BaseNode(ABC):
         pool: VariablePool,
         db: Session | None,
         tenant_id: int | None = None,
+        user: Optional[User] = None,
     ) -> None:
         self.node_id = node_id
         self.config = config
         self.pool = pool
         self.db = db
         self.tenant_id = tenant_id
+        # M38.2.x v2: 透传 caller user 给 RBAC-aware 节点(目前仅
+        # knowledge_retrieval)。``None`` 保留 pre-M38.2 行为(widget /
+        # 系统 cron / 老 fixture 不传 user 不破)。
+        self.user = user
         # init_node_data 立即执行,把 config 强类型化。子类可以在 _run 中读 self._data。
         # 配置错误会在这里抛出 — 这是预期行为(尽早暴露错误)。
         self._data: BaseNodeData = self.init_node_data(config)

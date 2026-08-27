@@ -31,7 +31,7 @@ import time
 import uuid
 from collections import deque
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -43,6 +43,9 @@ from lumen_core.workflow.executor_helpers import (
 from lumen_core.workflow.node_mapping import resolve_node_class
 from lumen_core.workflow.retry import NodeRunError
 from lumen_core.workflow.variable_pool import VariablePool
+
+if TYPE_CHECKING:
+    from lumen_models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +84,7 @@ class WorkflowExecutor:
         on_event: Optional[EventCallback] = None,
         cancel_event: Optional[asyncio.Event] = None,
         persist_node_runs: bool = False,
+        user: Optional["User"] = None,
     ) -> Dict[str, Any]:
         # Note: `db` parameter is intentionally unused. The executor opens
         # its own session per node (see _instantiate) and closes them in
@@ -201,7 +205,7 @@ class WorkflowExecutor:
                 execution_order += 1
 
                 try:
-                    node_instance = self._instantiate(node, tenant_id)
+                    node_instance = self._instantiate(node, tenant_id, user)
                     result = await run_node_with_handling(node_instance)
                     # P2: P1's BaseNode.run() also wrote outputs to pool. The
                     # helper only awaits _run() with retry/timeout — we replicate
@@ -382,7 +386,7 @@ class WorkflowExecutor:
         ).update(update)
         self._meta_session.commit()
 
-    def _instantiate(self, node: dict, tenant_id: int):
+    def _instantiate(self, node: dict, tenant_id: int, user: Optional["User"] = None):
         # SPEC FIX: open a session per node and track it for cleanup
         from lumen_core.database import SessionLocal
         session = SessionLocal()
@@ -405,6 +409,7 @@ class WorkflowExecutor:
             pool=self.pool,  # type: ignore[arg-type]
             db=session,
             tenant_id=tenant_id,
+            user=user,
         )
 
     def _route(

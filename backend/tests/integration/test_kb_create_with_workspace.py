@@ -39,12 +39,14 @@ class _FakeUser:
 
 
 class _FakeWorkspace:
-    def __init__(self, *, id: int, tenant_id: int, name: str = "W") -> None:
+    def __init__(
+        self, *, id: int, tenant_id: int, name: str = "W", owner_id: int = 0
+    ) -> None:
         self.id = id
         self.tenant_id = tenant_id
         self.name = name
         self.description = None
-        self.owner_id = None
+        self.owner_id = owner_id
         self.icon = None
         self.color = None
 
@@ -135,16 +137,65 @@ class _FakeSession:
         if getattr(obj, "updated_at", None) is None:
             obj.updated_at = obj.created_at
 
+    def execute(self, stmt=None, *args, **kwargs):
+        """M38.2.x v2: PermissionService.check() 调 ``db.execute()``。
+
+        owner 查询 → state 查 workspace 返 owner_id;grant 查询 → 返空。
+        """
+        class _ScalarResult:
+            def __init__(self, v):
+                self._v = v
+
+            def scalar_one_or_none(self_inner):
+                return self_inner._v
+
+            def scalars(self_inner):
+                return self_inner
+
+            def all(self_inner):
+                return [self_inner._v] if self_inner._v is not None else []
+
+        class _EmptyResult:
+            def first(self_inner):
+                return None
+
+            def scalar_one_or_none(self_inner):
+                return None
+
+            def scalars(self_inner):
+                return self_inner
+
+            def all(self_inner):
+                return []
+
+        if stmt is None:
+            return _EmptyResult()
+        try:
+            sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+            params = dict(stmt.compile().params)
+        except Exception:
+            return _EmptyResult()
+        if "owner_id" in sql.lower() and "workspace" in sql.lower():
+            for v in params.values():
+                if isinstance(v, int):
+                    for ws in self.state["workspaces"]:
+                        if ws.id == v:
+                            return _ScalarResult(ws.owner_id)
+            return _ScalarResult(None)
+        return _EmptyResult()
+
 
 # --- fixtures -----------------------------------------------------------
 
 
 @pytest.fixture
 def kb_state() -> Dict[str, Any]:
+    """M38.2.x v2: ws 1 owner_id=11 (caller) 让 PermissionService._is_owner bypass
+    kb.create check;ws 2 owner_id=99 (tenant-2 user) 隔离 cross-tenant 拒绝。"""
     return {
         "workspaces": [
-            _FakeWorkspace(id=1, tenant_id=1, name="T1"),
-            _FakeWorkspace(id=2, tenant_id=2, name="T2"),
+            _FakeWorkspace(id=1, tenant_id=1, name="T1", owner_id=11),
+            _FakeWorkspace(id=2, tenant_id=2, name="T2", owner_id=99),
         ],
         "kbs": [],
         "next_kb_id": 100,

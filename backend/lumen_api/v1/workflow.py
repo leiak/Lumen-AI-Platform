@@ -172,6 +172,8 @@ async def run_workflow(
             current_user.tenant_id,
             body.input_data,
             trigger_source="manual",
+            # M38.2.x v2: 透传 user 让 KB node 做 per-KB ``kb.read`` 过滤
+            user=current_user,
         )
         return SingleResponse(data=WorkflowRunResponse.model_validate(run))
     except ValueError as e:
@@ -222,6 +224,8 @@ async def stream_workflow(
                     trigger_source="manual",
                     on_event=on_event,
                     cancel_event=cancel_event,
+                    # M38.2.x v2: 透传 user 让 KB node 做 per-KB ``kb.read`` 过滤
+                    user=current_user,
                 )
             except Exception as e:  # noqa: BLE001
                 await queue.put(("error", {"error_message": str(e)}))

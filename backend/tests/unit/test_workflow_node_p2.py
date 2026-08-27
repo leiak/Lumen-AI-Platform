@@ -823,25 +823,35 @@ def test_kb_node_query_template_rendered(monkeypatch):
     assert call["query"] == "what is AI"
 
 
-def test_kb_node_not_found_raises(monkeypatch):
+def test_kb_node_not_found_returns_empty(monkeypatch):
+    """M38.2.x v2: KB 不存在 / 无效 → graceful skip,返空 result + error 信息。
+
+    之前 throw ``ValueError`` 让 workflow 整个中断;改成返 ``{"chunks": [],
+    "count": 0, "error": "..."}`` 让下游可以继续。
+    """
     n = _make_kb_node(
         {"kb_id": 99, "query": "q"},
         kb=None,
     )
     _patch_kb_pipeline(monkeypatch, n.db)
-    with pytest.raises(ValueError, match="not found"):
-        asyncio.run(n._run())
+    r = asyncio.run(n._run())
+    assert r.output_values["chunks"] == []
+    assert r.output_values["count"] == 0
+    assert "not found" in r.output_values["error"]
 
 
-def test_kb_node_cross_tenant_raises(monkeypatch):
+def test_kb_node_cross_tenant_returns_empty(monkeypatch):
+    """M38.2.x v2: 跨租户 KB → graceful skip,返空 result。"""
     kb = _FakeKB(1, tenant_id=2)
     n = _make_kb_node(
         {"kb_id": 1, "query": "q"},
         kb=kb,
     )
     _patch_kb_pipeline(monkeypatch, n.db)
-    with pytest.raises(ValueError, match="not found"):
-        asyncio.run(n._run())
+    r = asyncio.run(n._run())
+    assert r.output_values["chunks"] == []
+    assert r.output_values["count"] == 0
+    assert "not found" in r.output_values["error"]
 
 
 def test_kb_node_default_value_strategy_on_failure(monkeypatch):

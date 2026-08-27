@@ -206,7 +206,8 @@ class AgentService:
         agent_id: int,
         tenant_id: int,
         message: str,
-        history: List[Dict[str, str]] = None
+        history: List[Dict[str, str]] = None,
+        user: Optional[User] = None,
     ) -> str:
         logger.info("[AgentService.chat] agent_id=%s, tenant_id=%s", agent_id, tenant_id)
         agent = self.get_agent(db, agent_id, tenant_id)
@@ -229,12 +230,24 @@ class AgentService:
             try:
                 all_results = []
                 per_kb_k = max(1, 3 // len(kb_ids))
+                # M38.2.x v2: per-KB ``kb.read`` 过滤。``user is None`` 走
+                # graceful open(widget visitor / cron / fixture)。
+                from lumen_services.permission_service import PermissionService
+                _perm_svc = PermissionService() if user is not None else None
                 for link in kb_links:
                     kb = db.query(KnowledgeBase).filter(
                         KnowledgeBase.id == link.knowledge_base_id,
                         KnowledgeBase.tenant_id == tenant_id,
                     ).first()
                     if kb is None or kb.embedding_model_config_id is None:
+                        continue
+                    if _perm_svc is not None and not _perm_svc.check(
+                        db, user, "kb.read", kb.workspace_id,
+                    ):
+                        logger.info(
+                            "[AgentService.chat] skip KB %s: user %s no kb.read",
+                            kb.id, getattr(user, "id", None),
+                        )
                         continue
                     vector_store = VectorStoreFactory.get_store(
                         kb_id=kb.id,

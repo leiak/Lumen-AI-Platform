@@ -1,10 +1,13 @@
 from datetime import datetime
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
 from lumen_models.workflow import Workflow, WorkflowRun
 from lumen_schemas.workflow import WorkflowCreate, WorkflowDefinition, WorkflowUpdate
+
+if TYPE_CHECKING:
+    from lumen_models.user import User
 
 
 class WorkflowService:
@@ -111,6 +114,7 @@ class WorkflowService:
         trigger_source: str = "manual",
         on_event: Optional[Any] = None,
         cancel_event: Optional[Any] = None,
+        user: Optional["User"] = None,
     ) -> WorkflowRun:
         """
         Persist a ``WorkflowRun`` row, then delegate to the unified
@@ -165,6 +169,8 @@ class WorkflowService:
                 # output_data, and error_message. The executor opens its
                 # own session for these writes (so the caller's session
                 # lifecycle is unaffected).
+                # M38.2.x v2: 透传 user 让 KB node 做 per-KB ``kb.read`` 过滤
+                user=user,
             )
             if isinstance(result, dict) and result.get("status") == "failed":
                 run.status = "failed"
