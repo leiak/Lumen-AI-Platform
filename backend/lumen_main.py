@@ -63,6 +63,8 @@ from lumen_core.database import (
     ensure_eval_datasets_table,
     # M37.2: 评测运行器 - eval_runs + eval_run_results
     ensure_eval_runs_table,
+    # M38.2.x v2: workspace RBAC grants table
+    ensure_workspace_member_permissions_table,
 )
 from lumen_core.notification_migration import ensure_notifications_table
 from lumen_api.v1 import router as v1_router
@@ -119,6 +121,7 @@ from lumen_models.system_config import SystemConfig  # M34: 平台 KV 配置
 from lumen_models.llm_call_log import LLMCallLog  # M26: LLM call observability
 from lumen_models.embedding_call_log import EmbeddingCallLog  # M27: Embedding call observability
 from lumen_services.logging_service import AuditLog, OperationLog, QueryLog  # Logging models
+from lumen_models.workspace_member_permission import WorkspaceMemberPermission  # M38.2.x v2: workspace RBAC grants
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -266,6 +269,8 @@ async def startup_event():
     ensure_eval_datasets_table()
     # M37.2: eval_runs + eval_run_results(评测运行器 + 单条 item 结果)
     ensure_eval_runs_table()
+    # M38.2.x v2: workspace RBAC grants table (workspace_member_permissions)
+    ensure_workspace_member_permissions_table()
     # Seed a demo ExternalApp for local dev (idempotent). Runs after
     # ensure_external_apps_tables() so the parent table is guaranteed
     # to exist, and before scheduler reload so the DB is fresh.

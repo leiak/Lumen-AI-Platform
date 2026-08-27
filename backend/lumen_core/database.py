@@ -1528,6 +1528,32 @@ def ensure_stock_musics_table() -> None:
     Base.metadata.create_all(bind=engine, tables=[StockMusic.__table__])
 
 
+def ensure_workspace_member_permissions_table() -> None:
+    """M38.2.x v2: create ``workspace_member_permissions`` table.
+
+    New ACL grants table for workspace-scoped RBAC. The ``UNIQUE
+    (workspace_id, user_id, permission)`` constraint, the
+    ``idx_wmp_user`` / ``idx_wmp_ws`` reverse-lookup indexes, and the
+    FK CASCADE behaviour all come from the model's ``__table_args__``
+    + ``Column(... ondelete=...)`` declarations, so
+    ``Base.metadata.create_all`` is enough to create everything
+    idempotently.
+
+    The table is empty on first install — owner-bypass and
+    ``workspace_id IS NULL`` legacy open-access are enforced in code
+    (see ``permission_service``), no data backfill needed.
+
+    Spec: ``docs-internal/superpowers/specs/2026-08-27-workspace-rbac.md`` § 3.1.
+    """
+    from lumen_models.workspace_member_permission import (  # noqa: F401
+        WorkspaceMemberPermission,
+    )
+    Base.metadata.create_all(
+        bind=engine,
+        tables=[WorkspaceMemberPermission.__table__],
+    )
+
+
 def ensure_generated_videos_table() -> None:
     """M36: create ``generated_videos`` table if it doesn't exist.
 

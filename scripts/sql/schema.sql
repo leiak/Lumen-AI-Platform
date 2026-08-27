@@ -1729,4 +1729,21 @@ CREATE TABLE `wx_templates` (
   CONSTRAINT `wx_templates_ibfk_2` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=185 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='微信图文模板表';
 
+CREATE TABLE `workspace_member_permissions` (
+  `workspace_id` int NOT NULL COMMENT 'FK -> workspaces.id; ON DELETE CASCADE drops the grants with the workspace',
+  `user_id` int NOT NULL COMMENT 'FK -> users.id; ON DELETE CASCADE drops the grants when the user is hard-deleted',
+  `permission` varchar(64) NOT NULL COMMENT 'ACL permission token (e.g. kb.read, document.create); see permission_service._PERM_IMPLIES',
+  `granted_by` int DEFAULT NULL COMMENT 'Who granted the permission (audit trail); nullable + SET NULL',
+  `id` int NOT NULL AUTO_INCREMENT,
+  `created_at` datetime DEFAULT NULL,
+  `updated_at` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_wmp_ws_user_perm` (`workspace_id`,`user_id`,`permission`),
+  KEY `idx_wmp_user` (`user_id`),
+  KEY `idx_wmp_ws` (`workspace_id`),
+  CONSTRAINT `workspace_member_permissions_ibfk_1` FOREIGN KEY (`workspace_id`) REFERENCES `workspaces` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `workspace_member_permissions_ibfk_2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `workspace_member_permissions_ibfk_3` FOREIGN KEY (`granted_by`) REFERENCES `users` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='M38.2.x v2 workspace RBAC ACL grants';
+
 SET FOREIGN_KEY_CHECKS = 1;
