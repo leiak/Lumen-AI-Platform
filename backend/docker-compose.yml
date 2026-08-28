@@ -38,8 +38,9 @@ services:
   redis:
     image: redis:7-alpine
     container_name: lumen-platform-redis
+    # 端口 16379 被同机 IntelliEngine-redis 占用,改为 26380 避开冲突。
     ports:
-      - "16379:6379"
+      - "26380:6379"
     volumes:
       - redis_data:/data
     healthcheck:
