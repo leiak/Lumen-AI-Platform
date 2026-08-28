@@ -65,6 +65,15 @@ from lumen_core.database import (
     ensure_eval_runs_table,
     # M38.2.x v2: workspace RBAC grants table
     ensure_workspace_member_permissions_table,
+    # M38.1: documents.asset_storage_key + storage_backend 列 + 索引
+    ensure_documents_storage_columns,
+    # M38.2: workspaces / document_folders 表 + knowledge_bases.workspace_id
+    # / documents.folder_id 列。Order matters — workspace/folder 表先建,
+    # 后两步才能 ALTER 加 FK 列。
+    ensure_workspaces_table,
+    ensure_document_folders_table,
+    ensure_knowledge_bases_workspace_column,
+    ensure_documents_folder_column,
 )
 from lumen_core.notification_migration import ensure_notifications_table
 from lumen_api.v1 import router as v1_router
