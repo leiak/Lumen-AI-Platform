@@ -215,3 +215,76 @@ async def test_list_models_omits_is_chat_filter_when_not_provided():
         f"applied when the caller doesn't pass is_chat."
     )
 
+
+@pytest.mark.asyncio
+async def test_list_models_coerces_null_temperature_max_tokens_timeout():
+    """Workflow designer 500 fix: 历史 row 允许 temperature/max_tokens/timeout
+    为 NULL(`model_configs` 三列 nullable=True,早期 fixture 直插 SQL 跳过
+    ORM 默认值),Pydantic 严格 float/int 校验 None 会让 GET /models/ 整
+    endpoint 500。Schema validator 把 None 兜底成 Field 默认值(0.7/4096/120),
+    验证 model_validate 不再 500,响应保持类型对齐。
+    """
+    from datetime import datetime
+    from lumen_schemas.model_config import ModelConfigResponse
+
+    # 模拟 ORM row:三列都是 None,is_default 也为 None(双重覆盖)
+    fake_row = MagicMock()
+    fake_row.id = 7
+    fake_row.name = "legacy-row"
+    fake_row.model_type = "ollama"
+    fake_row.model_name = "qwen2.5:7b"
+    fake_row.base_url = None
+    fake_row.api_key = None
+    fake_row.api_version = None
+    fake_row.temperature = None
+    fake_row.max_tokens = None
+    fake_row.timeout = None
+    fake_row.is_default = None
+    fake_row.is_active = True
+    fake_row.tenant_id = 1
+    fake_row.created_at = datetime(2026, 1, 1)
+    fake_row.updated_at = datetime(2026, 1, 1)
+    fake_row.is_chat = True
+    fake_row.is_embedding = False
+    fake_row.is_image_generation = False
+    fake_row.is_tts = False
+    fake_row.is_subtitle_generation = False
+    fake_row.is_video = False
+    fake_row.description = None
+
+    # model_validate 不能再炸 ValidationError;None 已被 validator 兜底
+    parsed = ModelConfigResponse.model_validate(fake_row)
+    assert parsed.temperature == 0.7
+    assert parsed.max_tokens == 4096
+    assert parsed.timeout == 120
+    assert parsed.is_default is False  # 跟 _coerce_is_default 同模式
+    assert parsed.id == 7
+
+    # 同样的兜底对 endpoint list_models 也得生效:模拟 list endpoint 调
+    # ModelConfigResponse.model_validate(m) 时不抛。
+    from lumen_api.v1.models import list_models
+
+    db = MagicMock()
+    query = MagicMock()
+    db.query.return_value = query
+    query.filter.return_value = query
+    query.count.return_value = 1
+    # list_models 真实链:query.order_by(...).slice(start, end).all()
+    # 现有两个 is_chat 测试只验证 filter 链路所以漏了 order_by/slice 链,
+    # 我们要拿到 row 让 ModelConfigResponse.model_validate 真跑一遍。
+    query.order_by.return_value = query
+    query.slice.return_value.all.return_value = [fake_row]
+
+    current_user = MagicMock(tenant_id=1)
+
+    result = await list_models(
+        page=1, page_size=10,
+        is_active=True,
+        current_user=current_user, db=db,
+    )
+    # endpoint 没炸,信封 round-trip 干净
+    assert result.total == 1
+    assert result.data[0].temperature == 0.7
+    assert result.data[0].max_tokens == 4096
+    assert result.data[0].timeout == 120
+

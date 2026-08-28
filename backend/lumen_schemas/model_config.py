@@ -38,6 +38,19 @@ class ModelConfigBase(BaseModel):
     def _coerce_is_default(cls, v: Any) -> Any:
         return False if v is None else v
 
+    # 跟 is_default 同套路:`model_configs.temperature/max_tokens/timeout` 三列
+    # 允许 NULL(早期 row 没填),Pydantic 严格 float/int 校验 None 会让
+    # `GET /models/` 整 endpoint 500 — workflow designer LLM 节点的 ModelSelector
+    # 因此加载不出任何模型。None 兜底成 Field 默认值(0.7 / 4096 / 120),
+    # 响应保持类型对齐前端 TS,不改 schema 字段语义。
+    @field_validator("temperature", "max_tokens", "timeout", mode="before")
+    @classmethod
+    def _coerce_optional_defaults(cls, v: Any, info: Any) -> Any:
+        if v is None:
+            defaults = {"temperature": 0.7, "max_tokens": 4096, "timeout": 120}
+            return defaults[info.field_name]
+        return v
+
 
 class ModelConfigCreate(ModelConfigBase):
     pass
