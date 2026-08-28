@@ -23,9 +23,10 @@ export function AgentPanel({ node, onChange }: PanelProps) {
       .list(1, 100)
       .then((res: any) => {
         if (cancelled) return;
-        // API returns {data: {code, data: {items: [...]}}}
-        const items = res?.data?.data?.items ?? res?.data?.items ?? [];
-        setAgents(items);
+        // PaginatedResponse 信封:res.data = 信封 {code,data,total,...},
+        // res.data.data 才是数组(CLAUDE.md §2 契约,跟 lumen_schemas.common.PaginatedResponse 一致)
+        const items = res?.data?.data ?? res?.data ?? [];
+        setAgents(Array.isArray(items) ? items : []);
       })
       .catch((e: any) => !cancelled && setError(String(e)))
       .finally(() => !cancelled && setLoading(false));
