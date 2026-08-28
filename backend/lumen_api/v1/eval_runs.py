@@ -108,40 +108,73 @@ def _to_read(row: EvalRun) -> EvalRunRead:
 
 
 def _to_result_read(row: EvalRunResult) -> EvalRunResultRead:
-    """EvalRunResult ORM → schema(嵌套 RetrievalMetrics + AnswerMetrics)。"""
-    rm: Dict[str, Any] = dict(row.retrieval_metrics or {})
-    retrieval = RetrievalMetrics(
-        hit_at_5=float(rm.get("hit_at_5", 0.0)),
-        hit_at_10=float(rm.get("hit_at_10", 0.0)),
-        mrr=float(rm.get("mrr", 0.0)),
-        ndcg_at_10=float(rm.get("ndcg_at_10", 0.0)),
-        recall_at_10=float(rm.get("recall_at_10", 0.0)),
-    )
-    answer: Optional[AnswerMetrics] = None
-    if row.answer_metrics is not None:
-        am: Dict[str, Any] = dict(row.answer_metrics)
-        answer = AnswerMetrics(
-            faithfulness=am.get("faithfulness"),
-            answer_relevancy=am.get("answer_relevancy"),
-            keyword_hit_rate=float(am.get("keyword_hit_rate", 0.0)),
+    """EvalRunResult ORM → schema(嵌套 RetrievalMetrics + AnswerMetrics)。
+
+    任何 Pydantic 校验失败都降级返回 — 历史 run 可能因 NDCG 边界 bug
+    等原因算出 schema 范围外的值(NDCG>1.0 等),不能让单条 result 校验
+    失败导致整个详情 endpoint 500。降级时 log.warning + 用
+    ``model_construct`` 跳过校验构造。
+    """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+    try:
+        rm: Dict[str, Any] = dict(row.retrieval_metrics or {})
+        retrieval = RetrievalMetrics(
+            hit_at_5=float(rm.get("hit_at_5", 0.0)),
+            hit_at_10=float(rm.get("hit_at_10", 0.0)),
+            mrr=float(rm.get("mrr", 0.0)),
+            ndcg_at_10=float(rm.get("ndcg_at_10", 0.0)),
+            recall_at_10=float(rm.get("recall_at_10", 0.0)),
         )
-    return EvalRunResultRead(
-        id=int(row.id),  # type: ignore[arg-type]
-        run_id=int(row.run_id),  # type: ignore[arg-type]
-        item_id=int(row.item_id),  # type: ignore[arg-type]
-        query=str(row.query),
-        retrieved_doc_ids=list(row.retrieved_doc_ids or []),
-        retrieval_scores=list(row.retrieval_scores or []),
-        retrieved_contexts=list(row.retrieved_contexts) if row.retrieved_contexts else None,
-        answer=row.answer,
-        retrieval_metrics=retrieval,
-        answer_metrics=answer,
-        llm_judge_calls=list(row.llm_judge_calls) if row.llm_judge_calls else None,
-        latency_ms=row.latency_ms,
-        embedding_call_log_ids=list(row.embedding_call_log_ids) if row.embedding_call_log_ids else None,
-        error_message=row.error_message,
-        created_at=row.created_at,
-    )
+        answer: Optional[AnswerMetrics] = None
+        if row.answer_metrics is not None:
+            am: Dict[str, Any] = dict(row.answer_metrics)
+            answer = AnswerMetrics(
+                faithfulness=am.get("faithfulness"),
+                answer_relevancy=am.get("answer_relevancy"),
+                keyword_hit_rate=float(am.get("keyword_hit_rate", 0.0)),
+            )
+        return EvalRunResultRead(
+            id=int(row.id),  # type: ignore[arg-type]
+            run_id=int(row.run_id),  # type: ignore[arg-type]
+            item_id=int(row.item_id),  # type: ignore[arg-type]
+            query=str(row.query),
+            retrieved_doc_ids=list(row.retrieved_doc_ids or []),
+            retrieval_scores=list(row.retrieval_scores or []),
+            retrieved_contexts=list(row.retrieved_contexts) if row.retrieved_contexts else None,
+            answer=row.answer,
+            retrieval_metrics=retrieval,
+            answer_metrics=answer,
+            llm_judge_calls=list(row.llm_judge_calls) if row.llm_judge_calls else None,
+            latency_ms=row.latency_ms,
+            embedding_call_log_ids=list(row.embedding_call_log_ids) if row.embedding_call_log_ids else None,
+            error_message=row.error_message,
+            created_at=row.created_at,
+        )
+    except Exception as e:  # noqa: BLE001
+        _log.warning(
+            "EvalRunResult id=%s 反序列化降级(Pydantic 校验失败 / 类型错): %s",
+            getattr(row, "id", "?"), e,
+        )
+        # model_construct 跳过校验,允许 NDCG 等指标超 [0,1] 范围,详情页能展示
+        # raw 数据,失去类型保护但比 500 强。
+        return EvalRunResultRead.model_construct(
+            id=int(getattr(row, "id", 0)),
+            run_id=int(getattr(row, "run_id", 0)),
+            item_id=int(getattr(row, "item_id", 0)),
+            query=str(getattr(row, "query", "") or ""),
+            retrieved_doc_ids=list(getattr(row, "retrieved_doc_ids", None) or []),
+            retrieval_scores=list(getattr(row, "retrieval_scores", None) or []),
+            retrieved_contexts=None,
+            answer=getattr(row, "answer", None),
+            retrieval_metrics=getattr(row, "retrieval_metrics", None) or {},
+            answer_metrics=getattr(row, "answer_metrics", None),
+            llm_judge_calls=None,
+            latency_ms=getattr(row, "latency_ms", None),
+            embedding_call_log_ids=None,
+            error_message=getattr(row, "error_message", None),
+            created_at=getattr(row, "created_at", None),
+        )
 
 
 # ---------------------------------------------------------------------------

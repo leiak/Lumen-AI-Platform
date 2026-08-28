@@ -165,7 +165,10 @@ class RetrievalMetrics(BaseModel):
     hit_at_5: float = Field(ge=0.0, le=1.0)
     hit_at_10: float = Field(ge=0.0, le=1.0)
     mrr: float = Field(ge=0.0, le=1.0)
-    ndcg_at_10: float = Field(ge=0.0, le=1.0)
+    # NDCG@10 二元相关简化算法下可 > 1(IDCG 边界 bug 历史 run 已 ship,见
+    # lumen_services.eval.metrics.ndcg_at_k)。强校验 le=1.0 会让含 NDCG>1 的
+    # 历史 run 详情 endpoint 500,因此这里只设 ge=0.0。
+    ndcg_at_10: float = Field(ge=0.0)
     recall_at_10: float = Field(ge=0.0, le=1.0)
 
 
