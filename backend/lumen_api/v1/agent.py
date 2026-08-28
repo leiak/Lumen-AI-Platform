@@ -6,11 +6,13 @@ import logging
 from lumen_core.database import get_db
 
 logger = logging.getLogger(__name__)
-from lumen_api.v1.auth import get_current_user
+from lumen_api.v1.auth import get_current_user, require_admin
 from lumen_models.user import User
 from lumen_models.agent import Agent
+from lumen_models.model_config import ModelConfig
 from lumen_schemas.agent import (
     AgentCreate, AgentUpdate, AgentResponse,
+    AgentUpdateModel,
     ChatRequest, ChatMessage
 )
 from lumen_schemas.common import SingleResponse, PaginatedResponse
@@ -137,6 +139,112 @@ async def delete_agent(
     if not success:
         raise HTTPException(status_code=404, detail="Agent not found")
     return SingleResponse(message="Deleted successfully")
+
+
+@router.put(
+    "/{agent_id}/model",
+    response_model=SingleResponse[dict],
+    summary="Admin-only:切换 Agent 引用 ModelConfig",
+    description=(
+        "Agent 调 chat API 时由 agent.model_name 反查 model_configs 表拿 "
+        "(base_url / api_key / model_type)。当某 ModelConfig 的 API key "
+        "死了(例如 MiniMax 401 → workflow 节点 60s 超时),admin 可以用这个 "
+        "端点把 agent 切到另一个 active 的 ModelConfig 恢复流程。\n\n"
+        "行为:\n"
+        "- 传 model_config_id → 反查 model_configs 取 model_name 写回 agent\n"
+        "- 传 model_name → 走 AgentService._get_model_config 验证 active + "
+        "base_url + api_key 完备,任一缺失 422\n"
+        "- 都不传或都传 → 422(AgentUpdateModel 互斥校验)\n"
+        "- 不存在 agent / model_config → 404\n"
+        "- 非 admin → 403(require_admin 守门)"
+    ),
+)
+async def update_agent_model(
+    agent_id: int,
+    payload: AgentUpdateModel,
+    admin_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    # 1. 拿 agent,跨租户 admin 才能切(同 WxAccount purge 模式 — 见 lumen
+    #    _api/v1/auth.py:59 require_admin + lumen_services/wx_publisher.py
+    #    purge_account 不过 tenant_id 滤)。不传 tenant_id 走全局 query。
+    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
+
+    old_model_name = agent.model_name
+
+    # 2. 决定 target model_name + 校验目标 ModelConfig 健康
+    if payload.model_config_id is not None:
+        target_mc = (
+            db.query(ModelConfig)
+            .filter(ModelConfig.id == payload.model_config_id)
+            .first()
+        )
+        if not target_mc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"ModelConfig {payload.model_config_id} not found",
+            )
+        if not target_mc.is_active:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"ModelConfig {target_mc.id} ({target_mc.name}) "
+                    f"is_active=False,无法切到禁用配置"
+                ),
+            )
+        new_model_name = target_mc.model_name
+    else:
+        # payload.model_name 走 AgentService._get_model_config 反查,跟
+        # AgentService.chat 路径完全一致,保证「能解析到 active + base_url
+        # + api_key 完备」才允许切,避免切完立刻又 401。
+        mc = AgentService()._get_model_config(db, payload.model_name, agent.tenant_id)
+        if mc is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"model_name={payload.model_name!r} 在 model_configs 表中"
+                    f"找不到 active row(agent executor 也会同样 404)"
+                ),
+            )
+        if not mc.is_active:
+            raise HTTPException(
+                status_code=422,
+                detail=f"model_name={payload.model_name!r} 对应 ModelConfig 已禁用",
+            )
+        if not mc.base_url or not mc.api_key:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"model_name={payload.model_name!r} 对应 ModelConfig 缺少 "
+                    f"base_url 或 api_key,agent executor 也会报缺配置"
+                ),
+            )
+        new_model_name = mc.model_name
+
+    # 3. 写入 + commit,允许 reason 落到 audit_log(可选,本期不强制 audit 接入)
+    if old_model_name != new_model_name:
+        agent.model_name = new_model_name
+        db.commit()
+        db.refresh(agent)
+        logger.info(
+            "[admin=%s] agent.id=%s model_name: %s → %s (reason=%s)",
+            admin_user.username, agent_id, old_model_name, new_model_name,
+            payload.reason or "<none>",
+        )
+
+    # 4. 返完整 agent 详情 + 切换 delta,前端可以原地刷新列表,也能展示
+    #    「这次切到了哪个 model / 是否变了」用于确认 toast。
+    return SingleResponse(
+        data={
+            "agent": _to_agent_response(agent),
+            "old_model_name": old_model_name,
+            "new_model_name": agent.model_name,
+            "changed": old_model_name != agent.model_name,
+            "reason": payload.reason,
+        }
+    )
 
 
 @router.get("/count")
