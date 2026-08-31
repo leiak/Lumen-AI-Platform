@@ -74,6 +74,16 @@ from lumen_core.database import (
     ensure_document_folders_table,
     ensure_knowledge_bases_workspace_column,
     ensure_documents_folder_column,
+    # M38.4: multimodal embedding configs + image_assets + documents /
+    # document_chunks / knowledge_bases multimodal 列。Order matters —
+    # multimodal_embedding_configs 表先建,knowledge_bases.multimodal_config_id
+    # FK 才能解析;documents / document_chunks 列加完才能让 image_assets FK
+    # 解析。
+    ensure_multimodal_embedding_configs_table,
+    ensure_image_assets_table,
+    ensure_documents_multimodal_columns,
+    ensure_document_chunks_multimodal_columns,
+    ensure_knowledge_bases_multimodal_columns,
 )
 from lumen_core.notification_migration import ensure_notifications_table
 from lumen_api.v1 import router as v1_router
@@ -132,6 +142,8 @@ from lumen_models.embedding_call_log import EmbeddingCallLog  # M27: Embedding c
 from lumen_services.logging_service import AuditLog, OperationLog, QueryLog  # Logging models
 from lumen_models.workspace import Workspace, DocumentFolder  # M38.2: 注册 workspaces / document_folders 表到 Base.metadata,否则 knowledge_bases.workspace_id 和 documents.folder_id FK 无法解析(M38.2 ship 漏项,2026-08-27 回归补)
 from lumen_models.workspace_member_permission import WorkspaceMemberPermission  # M38.2.x v2: workspace RBAC grants
+from lumen_models.multimodal_embedding_config import MultimodalEmbeddingConfig  # M38.4: multimodal embedding configs 表注册
+from lumen_models.image_asset import ImageAsset  # M38.4: image_assets 表注册
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -217,6 +229,15 @@ async def startup_event():
     ensure_document_folders_table()
     ensure_knowledge_bases_workspace_column()
     ensure_documents_folder_column()
+    # M38.4: multimodal embedding configs + image_assets + documents /
+    # document_chunks / knowledge_bases multimodal 列。Order matters:
+    # multimodal_embedding_configs 表先建,knowledge_bases.multimodal_config_id
+    # FK 才能解析。
+    ensure_multimodal_embedding_configs_table()
+    ensure_image_assets_table()
+    ensure_documents_multimodal_columns()
+    ensure_document_chunks_multimodal_columns()
+    ensure_knowledge_bases_multimodal_columns()
     ensure_conversations_deleted_at()
     ensure_conversations_team_id()
     ensure_conversations_user_id_nullable()

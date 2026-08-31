@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, Integer, ForeignKey, JSON
+from sqlalchemy import Column, String, Text, Integer, ForeignKey, JSON, Index
 from sqlalchemy.orm import relationship
 from lumen_models.base import BaseModel
 
@@ -32,6 +32,31 @@ class KnowledgeBase(BaseModel):
         nullable=True,
         index=True,
         comment="Embedding ModelConfig id (locked after KB creation)",
+    )
+    # --- M38.4 multimodal embedding (cross-modal retrieval) ---
+    # When 0 (default), the KB uses ``embedding_model_config_id`` for text
+    # chunks and never produces image chunks. When 1, all chunks (text and
+    # image) are embedded with ``multimodal_config_id``, enabling
+    # cross-modal retrieval ("logo" → uploaded product image).
+    # Toggling this triggers a KB re-chunk (handled by the multimodal
+    # service layer; pre-M38.3 there is no audit trail, post-M38.3 it
+    # opens a new document revision).
+    multimodal_enabled = Column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="M38.4: 0 = text-only (use embedding_model_config_id); 1 = multimodal",
+    )
+    # FK to ``multimodal_embedding_configs.id``. NULL until the admin
+    # picks one. ON DELETE SET NULL so deleting the config (when no KB
+    # uses it) clears the FK rather than blocking the delete; the UI
+    # surfaces the orphan state.
+    multimodal_config_id = Column(
+        Integer,
+        ForeignKey("multimodal_embedding_configs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="M38.4: multimodal embedding config id (NULL until selected)",
     )
     status = Column(String(20), default="active")  # active, inactive
     # Field weights for hybrid search stored as JSON
@@ -69,6 +94,34 @@ class Document(BaseModel):
         nullable=True,
         default="local",
         comment="M38.1 backend that produced asset_storage_key: local / s3",
+    )
+    # --- M38.4 doc_type / shape metadata ---
+    # Coarse primary category used by the UI gallery / filter and the
+    # chunking layer to decide the parser. ``document`` is the legacy
+    # default for every existing row, so the migration is just an ALTER
+    # ADD COLUMN with DEFAULT 'document' — zero backfill cost. Other
+    # values: ``image`` (independent image upload), ``audio`` / ``video``
+    # (reserved for M38.4.x v2, the parsers don't exist yet).
+    doc_type = Column(
+        String(20),
+        nullable=False,
+        default="document",
+        comment="M38.4: document / image / audio / video; primary category for UI + chunking dispatch",
+    )
+    # Excel sheets: NULL = not an Excel doc. Populated by
+    # ExcelParser at ingest. Used by the UI gallery and the
+    # /documents/{id}/chunks?sheet=<name> filter.
+    sheet_count = Column(
+        Integer,
+        nullable=True,
+        comment="M38.4: Excel sheet count; NULL for non-Excel docs",
+    )
+    # PPT / PDF page count. NULL = non-paged. Populated by the
+    # parser at ingest.
+    page_count = Column(
+        Integer,
+        nullable=True,
+        comment="M38.4: PPT/PDF page count; NULL for unpaged docs",
     )
     content = Column(Text)
     doc_metadata = Column(JSON)
@@ -116,6 +169,46 @@ class DocumentChunk(BaseModel):
     vector_id = Column(String(100), index=True)  # FAISS vector ID
     chunk_metadata = Column(JSON)
     document_id = Column(Integer, ForeignKey("documents.id"), nullable=False, index=True)
+    # --- M38.4 multimodal chunk metadata ---
+    # ``text`` = the legacy default for every existing row (zero-backfill
+    # ALTER ADD COLUMN DEFAULT 'text'). ``image`` = an independent image
+    # upload or an image extracted from a PPT slide. The search layer
+    # filters on this column for cross-modal retrieval; KBs without
+    # ``multimodal_enabled`` only ever produce 'text' chunks so the filter
+    # is a no-op for them.
+    modality = Column(
+        String(20),
+        nullable=False,
+        default="text",
+        index=True,
+        comment="M38.4: text / image / audio / video; used for cross-modal retrieval",
+    )
+    # Excel-only. NULL for non-Excel chunks. Populated by
+    # ExcelParser from ``chunk_metadata['sheet_name']`` at chunk
+    # write time.
+    sheet_name = Column(
+        String(100),
+        nullable=True,
+        index=True,
+        comment="M38.4: Excel sheet name; NULL for non-Excel chunks",
+    )
+    # PPT / PDF page number. NULL for unpaged docs.
+    page_number = Column(
+        Integer,
+        nullable=True,
+        index=True,
+        comment="M38.4: PPT/PDF page number; NULL for unpaged docs",
+    )
+    # Multimodal caption for image chunks. NULL for text chunks.
+    # The vector store embeds this caption (via the multimodal embedder's
+    # text branch), so the caption text directly drives retrieval quality.
+    # M38.4 ships filename-derived captions; M38.4.x v2 will swap in
+    # LLM-generated captions for richer recall.
+    image_caption = Column(
+        Text,
+        nullable=True,
+        comment="M38.4: caption text used as the multimodal-embedder input for image chunks; NULL for text chunks",
+    )
     # 'ok' = embedded and added to the vector store.
     # 'failed' = the embedder raised; the chunk has a placeholder
     # vector_id (e.g. "error_<i>") and must not be returned by search.
@@ -124,6 +217,16 @@ class DocumentChunk(BaseModel):
     embedding_status = Column(String(20), default="ok", nullable=False, index=True)
 
     document = relationship("Document", back_populates="chunks")
+
+    __table_args__ = (
+        # Composite indexes added in M38.4 for the new ``sheet_name`` /
+        # ``page_number`` filter paths. Single-column indexes on those
+        # columns are already declared above; these composites keep the
+        # (document_id, sheet_name) lookup (Excel sheet detail page) and
+        # the (document_id, page_number) lookup (PPT page jump) O(log n).
+        Index("idx_doc_chunks_doc_sheet", "document_id", "sheet_name"),
+        Index("idx_doc_chunks_doc_page", "document_id", "page_number"),
+    )
 
 
 class FAQEntry(BaseModel):

@@ -2212,3 +2212,213 @@ def ensure_eval_runs_table() -> None:
     from lumen_models.eval_dataset import EvalDataset, EvalDatasetItem  # noqa: F401
     from lumen_models.eval_run import EvalRun, EvalRunResult  # noqa: F401
     Base.metadata.create_all(bind=engine)
+
+
+def ensure_multimodal_embedding_configs_table() -> None:
+    """M38.4: create ``multimodal_embedding_configs`` table if missing.
+
+    镜像 ``ensure_workspaces_table`` 的 ``tables=[...]`` 模式 —— 本表
+    不引用其他新建表的 FK(``tenant_id`` 没声明为 FK,只是普通 nullable
+    Integer 列,跟 ``ModelConfig.tenant_id`` 一样),所以 ``create_all``
+    不会撞到 ``NoReferencedTableError``。``Base.metadata.create_all``
+    已经会发出 ``__table_args__`` 里的 UNIQUE 索引
+    (``uq_mec_tenant_name``) 和组合索引 (``ix_mec_provider_enabled``),
+    所以这里不再额外手工加。
+
+    Spec: docs-internal/superpowers/specs/2026-08-26-kb-multimodal-parsing.md § 3.4
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from lumen_models.multimodal_embedding_config import MultimodalEmbeddingConfig  # noqa: F401
+        Base.metadata.create_all(
+            bind=engine,
+            tables=[MultimodalEmbeddingConfig.__table__],
+        )
+    except Exception:
+        logger.exception(
+            "ensure_multimodal_embedding_configs_table failed; will retry on next startup"
+        )
+
+
+def ensure_image_assets_table() -> None:
+    """M38.4: create ``image_assets`` table if missing.
+
+    与 ``multimodal_embedding_configs`` 不同:本表带两条 FK
+    (``document_id`` CASCADE, ``chunk_id`` SET NULL),所以 FK sort 阶段
+    需要父表已在 Base.metadata。``lumen_main.py` 在调用 ensure 之前
+    已经 ``from lumen_models.knowledge import Document, DocumentChunk``
+    注册好了父表,所以 ``tables=[ImageAsset.__table__]`` 能解析 FK。
+    ``Base.metadata.create_all`` 自动发出 ``__table_args__`` 里的
+    复合索引 ``idx_image_assets_doc_created``。
+
+    Spec: docs-internal/superpowers/specs/2026-08-26-kb-multimodal-parsing.md § 3.3
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from lumen_models.knowledge import Document, DocumentChunk  # noqa: F401
+        from lumen_models.image_asset import ImageAsset  # noqa: F401
+        Base.metadata.create_all(
+            bind=engine,
+            tables=[ImageAsset.__table__],
+        )
+    except Exception:
+        logger.exception(
+            "ensure_image_assets_table failed; will retry on next startup"
+        )
+
+
+def ensure_documents_multimodal_columns() -> None:
+    """M38.4: add ``doc_type`` / ``sheet_count`` / ``page_count`` to
+    ``documents`` if missing.
+
+    - ``doc_type``: 主类别 ``document / image / audio / video``(spec
+      §3.5)。``document`` 是 legacy 默认(每个旧 row ALTER 后自动拿到),
+      所以"零 backfill cost":旧文档 UI 上仍显示"文档"
+    - ``sheet_count``: Excel sheet 数,NULL = 非 Excel doc
+    - ``page_count``: PPT/PDF 页数,NULL = 非 paged doc
+
+    Idempotent:每列 ``_column_exists`` 守卫。安全在每个 uvicorn 启动
+    重跑。
+
+    Spec: docs-internal/superpowers/specs/2026-08-26-kb-multimodal-parsing.md § 3.5
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        with engine.begin() as conn:
+            if not _column_exists("documents", "doc_type"):
+                conn.execute(text(
+                    "ALTER TABLE documents "
+                    "ADD COLUMN doc_type VARCHAR(20) NOT NULL "
+                    "DEFAULT 'document' "
+                    "COMMENT 'M38.4: document / image / audio / video'"
+                ))
+            if not _column_exists("documents", "sheet_count"):
+                conn.execute(text(
+                    "ALTER TABLE documents "
+                    "ADD COLUMN sheet_count INT NULL "
+                    "COMMENT 'M38.4: Excel sheet count; NULL for non-Excel'"
+                ))
+            if not _column_exists("documents", "page_count"):
+                conn.execute(text(
+                    "ALTER TABLE documents "
+                    "ADD COLUMN page_count INT NULL "
+                    "COMMENT 'M38.4: PPT/PDF page count; NULL for unpaged'"
+                ))
+    except Exception:
+        logger.exception(
+            "ensure_documents_multimodal_columns failed; will retry on next startup"
+        )
+
+
+def ensure_document_chunks_multimodal_columns() -> None:
+    """M38.4: add ``modality`` / ``sheet_name`` / ``page_number`` /
+    ``image_caption`` to ``document_chunks`` if missing.
+
+    - ``modality``: text / image / audio / video(spec §3.6)。``text``
+      是 legacy 默认,所以旧 row ALTER 后自动得到,零 backfill
+    - ``sheet_name``: Excel chunk 关联的 sheet,NULL = 非 Excel
+    - ``page_number``: PPT/PDF chunk 关联的页码,NULL = 非 paged
+    - ``image_caption``: multimodal embedder 输入文本(``modality='image'``
+      时非空,``modality='text'`` 时 NULL)
+
+    ``modality`` / ``sheet_name`` / ``page_number`` 的单列索引在每个
+    ``Column(index=True)`` 上声明 → ``Base.metadata.create_all``
+    自动发出。复合索引 ``idx_doc_chunks_doc_sheet`` / ``idx_doc_chunks_doc_page``
+    在 ``DocumentChunk.__table_args__`` 声明 → 同上自动发。这里不重
+    复发。
+
+    Spec: docs-internal/superpowers/specs/2026-08-26-kb-multimodal-parsing.md § 3.6
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        with engine.begin() as conn:
+            if not _column_exists("document_chunks", "modality"):
+                conn.execute(text(
+                    "ALTER TABLE document_chunks "
+                    "ADD COLUMN modality VARCHAR(20) NOT NULL "
+                    "DEFAULT 'text' "
+                    "COMMENT 'M38.4: text / image / audio / video'"
+                ))
+            if not _column_exists("document_chunks", "sheet_name"):
+                conn.execute(text(
+                    "ALTER TABLE document_chunks "
+                    "ADD COLUMN sheet_name VARCHAR(100) NULL "
+                    "COMMENT 'M38.4: Excel sheet name; NULL for non-Excel'"
+                ))
+            if not _column_exists("document_chunks", "page_number"):
+                conn.execute(text(
+                    "ALTER TABLE document_chunks "
+                    "ADD COLUMN page_number INT NULL "
+                    "COMMENT 'M38.4: PPT/PDF page number; NULL for unpaged'"
+                ))
+            if not _column_exists("document_chunks", "image_caption"):
+                conn.execute(text(
+                    "ALTER TABLE document_chunks "
+                    "ADD COLUMN image_caption TEXT NULL "
+                    "COMMENT 'M38.4: caption used as multimodal embedder input'"
+                ))
+    except Exception:
+        logger.exception(
+            "ensure_document_chunks_multimodal_columns failed; will retry on next startup"
+        )
+
+
+def ensure_knowledge_bases_multimodal_columns() -> None:
+    """M38.4: add ``multimodal_enabled`` / ``multimodal_config_id`` to
+    ``knowledge_bases`` if missing.
+
+    - ``multimodal_enabled``: 0 = text-only(走原 nomic-embed-text),
+      1 = multimodal(走 ``multimodal_config_id`` 引用的 embedder)
+    - ``multimodal_config_id``: FK to ``multimodal_embedding_configs.id``
+      ON DELETE SET NULL —— 删 config 时清掉 FK 而不是 cascade KB
+      (spec §3.5 引用保护)
+
+    Idempotent. 安全在每个 uvicorn 启动重跑。
+
+    Spec: docs-internal/superpowers/specs/2026-08-26-kb-multimodal-parsing.md § 3.5
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        with engine.begin() as conn:
+            if not _column_exists("knowledge_bases", "multimodal_enabled"):
+                conn.execute(text(
+                    "ALTER TABLE knowledge_bases "
+                    "ADD COLUMN multimodal_enabled INT NOT NULL "
+                    "DEFAULT 0 "
+                    "COMMENT 'M38.4: 0 = text-only; 1 = multimodal'"
+                ))
+            if not _column_exists("knowledge_bases", "multimodal_config_id"):
+                conn.execute(text(
+                    "ALTER TABLE knowledge_bases "
+                    "ADD COLUMN multimodal_config_id INT NULL "
+                    "COMMENT 'M38.4: multimodal embedding config id; NULL until selected'"
+                ))
+            if not _index_exists("knowledge_bases", "idx_kb_multimodal_config"):
+                conn.execute(text(
+                    "CREATE INDEX idx_kb_multimodal_config "
+                    "ON knowledge_bases (multimodal_config_id)"
+                ))
+            # FK constraint;information_schema 查询防 1052 Duplicate
+            fk_exists = conn.execute(text(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS "
+                "WHERE TABLE_SCHEMA = DATABASE() "
+                "AND TABLE_NAME = 'knowledge_bases' "
+                "AND CONSTRAINT_NAME = 'fk_kb_multimodal_config'"
+            )).scalar()
+            if not fk_exists:
+                conn.execute(text(
+                    "ALTER TABLE knowledge_bases "
+                    "ADD CONSTRAINT fk_kb_multimodal_config "
+                    "FOREIGN KEY (multimodal_config_id) "
+                    "REFERENCES multimodal_embedding_configs(id) "
+                    "ON DELETE SET NULL"
+                ))
+    except Exception:
+        logger.exception(
+            "ensure_knowledge_bases_multimodal_columns failed; will retry on next startup"
+        )
