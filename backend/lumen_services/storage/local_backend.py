@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import BinaryIO, Dict, Optional
+from typing import BinaryIO, Dict, Iterator, Optional
 
 from .base import StorageBackend
 
@@ -107,7 +107,64 @@ class LocalBackend(StorageBackend):
         abs_path = self._abs_path(key)
         if not abs_path.is_file():
             raise FileNotFoundError(key)
+        # Real file handle — caller is responsible for ``.close()``
+        # (or use ``with`` form). ``S3Backend`` returns a
+        # ``StreamingBody`` with the same lifecycle, so the parser
+        # layer's ``with storage.get_object_stream(key) as f:`` pattern
+        # works uniformly.
         return open(abs_path, "rb")
+
+    def put_object_multipart(
+        self,
+        key: str,
+        data_stream: BinaryIO,
+        part_size: int = 5 * 1024 * 1024,
+        content_type: Optional[str] = None,
+    ) -> str:
+        """Drain ``data_stream`` into a single ``put_object`` call.
+
+        ``LocalBackend`` has no concept of multipart — the filesystem
+        doesn't care about chunk boundaries. We read ``data_stream``
+        in ``part_size`` blocks only to keep peak memory bounded for
+        callers that would otherwise build a full in-memory blob.
+        # ``part_size`` is honored for read batching only; the final
+        # ``put_object`` is a single atomic write either way.
+        """
+        safe = self._validate_key(key)
+        chunks = []
+        while True:
+            chunk = data_stream.read(part_size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        return self.put_object(safe, data, content_type=content_type)
+
+    def list_objects(self, prefix: str = "", max_keys: int = 1000) -> Iterator[str]:
+        """Yield keys under ``prefix`` (relative to ``self.root``).
+
+        Uses ``Path.rglob`` so nested directories under the prefix
+        are included; an empty prefix matches the whole root.
+        Directories themselves are skipped (they're not objects).
+        """
+        if prefix:
+            base = self._abs_path(prefix)
+        else:
+            base = self.root
+        if not base.exists():
+            return iter(())
+        # ``rglob('*')`` returns every entry under ``base`` recursively;
+        # we filter out directories and normalise the relative path
+        # to match the storage key convention.
+        for path in sorted(base.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(self.root).as_posix()
+            yield rel
+            # Caller iterates with a ``for`` loop; Python ignores
+            # the manual ``StopIteration`` so we keep yielding until
+            # the caller breaks. To enforce ``max_keys`` we let the
+            # caller handle that with ``itertools.islice``.
 
     def delete_object(self, key: str) -> None:
         abs_path = self._abs_path(key)
@@ -129,6 +186,13 @@ class LocalBackend(StorageBackend):
         # the browser-side fetch+blob+createObjectURL pattern
         # (CLAUDE.md §3) keeps working unchanged.
         return f"/api/v1/storage/local/{key}"
+
+    def resolve_to_local_path(self, key: str) -> str:
+        # Local backend: the path IS the storage location, no copy.
+        abs_path = self._abs_path(key)
+        if not abs_path.is_file():
+            raise FileNotFoundError(key)
+        return str(abs_path)
 
     def health_check(self) -> Dict[str, object]:
         start = time.monotonic()

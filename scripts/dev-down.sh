@@ -73,7 +73,7 @@ fi
 # Config
 # ---------------------------------------------------------------------------
 CELERY_CONTAINER="lumen-platform-celery"
-BASE_CONTAINERS=(lumen-platform-mysql lumen-platform-redis lumen-platform-ollama lumen-platform-es)
+BASE_CONTAINERS=(lumen-platform-mysql lumen-platform-redis lumen-platform-ollama lumen-platform-es lumen-platform-minio)
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }

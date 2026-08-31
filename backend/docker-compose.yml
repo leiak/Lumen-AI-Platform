@@ -69,6 +69,30 @@ services:
       retries: 10
       start_period: 30s
 
+  minio:
+    # M38.1 follow-up (2026-08-31): MinIO 自托管,S3-compatible dev 替代。
+    # 端口 19000/19001 被同机 IntelliEngine-minio 占用,改为 29000/29001。
+    image: minio/minio:latest
+    container_name: lumen-platform-minio
+    command: server /data --console-address ":29001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "29000:9000"
+      - "29001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      # minio 镜像里有 curl,直接探活端点;``/minio/health/live`` 是 liveness probe,
+      # ``/minio/health/ready`` 要更严,启动期会 false。
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    mem_limit: 1g  # 防 dev OOM
+
   celery_worker:
     build:
       context: .
@@ -114,3 +138,4 @@ volumes:
   es_data:
   redis_data:
   ollama_data:
+  minio_data:

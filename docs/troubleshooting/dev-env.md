@@ -168,7 +168,110 @@ cd widget && npm install && npm run build
 
 ---
 
+## 10. MinIO (M38.1 follow-up, 2026-08-31)
+
+### 10.1 一键起 MinIO
+
+```bash
+bash scripts/dev-up.sh   # 自动包含 lumen-platform-minio (端口 29000/29001)
+```
+
+验证:`docker ps --filter "name=lumen-platform-minio"` → `Up (healthy)`。
+
+MinIO console:浏览器打开 http://localhost:29001,默认 `minioadmin` / `minioadmin` 登录。
+
+> 端口 19000/19001 被同机 `IntelliEngine-minio` 占用,本项目用 29000/29001 避开。
+> 详见 `backend/docker-compose.yml:78` 注释。
+
+### 10.2 切后端到 S3 模式
+
+```bash
+# 1. 启 MinIO + 建 bucket(一次性)
+docker exec lumen-platform-minio mc alias set local http://localhost:9000 minioadmin minioadmin
+docker exec lumen-platform-minio mc mb local/lumen-dev
+
+# 2. 把 env 写入 backend/.env(参考 backend/storage.example.env 模板)
+cat >> backend/.env <<'EOF'
+STORAGE_BACKEND=s3
+S3_ENDPOINT=http://localhost:29000
+S3_BUCKET=lumen-dev
+S3_ACCESS_KEY=minioadmin
+S3_SECRET_KEY=minioadmin
+S3_USE_SSL=false
+S3_PATH_STYLE=true
+S3_REGION=us-east-1
+EOF
+
+# 3. 重启 uvicorn(singleton 启动时读 env,改完必须重启才生效)
+powershell -NoProfile -Command "Stop-Process -Name python -ErrorAction SilentlyContinue"
+cd backend && python -u -m uvicorn lumen_main:app --host 0.0.0.0 --port 11335
+
+# 4. 验证
+curl http://localhost:11335/api/v1/storage/health
+# 期望: {"code":200,"data":{"backend":"s3","ok":true,...}}
+```
+
+### 10.3 跑 live integration test
+
+```bash
+cd backend && pytest tests/integration/test_storage_minio_live.py -v
+```
+
+session-scope fixture 探测 `localhost:29000`,**连不上自动 pytest.skip**,CI 没起 MinIO 也不会 fail。期望 5-8 passed(health / multipart / list_objects / streaming / tenant-isolation)。
+
+### 10.4 跑压测 baseline
+
+```bash
+cd backend && python -m scripts.bench_minio \
+    --doc-size 100KB --tenant-count 5 --docs-per-tenant 50 \
+    --concurrency 10 --output-json /tmp/minio_bench_100kb.json
+```
+
+输出 JSON:
+```json
+{
+  "config": {"doc_size_bytes": 102400, "tenant_count": 5, "docs_per_tenant": 50, "concurrency": 10},
+  "put": {
+    "single_sequential": {"p50_ms": 12.3, "p95_ms": 18.7, "p99_ms": 24.1, "ops_per_s": 81.3},
+    "multi_concurrent": {"p50_ms": 45.2, "p95_ms": 89.1, "p99_ms": 120.5, "ops_per_s": 221.0}
+  },
+  "get": {...},
+  "list": {...}
+}
+```
+
+**解读**:
+- `p50` = 中位数,日常操作体验
+- `p95` = 95% 的操作比这个快(关注这行)
+- `p99` = 长尾,异常场景
+- `ops_per_s` = 吞吐量(每秒操作数)
+
+Multipart 路径要 `doc_size >= 5 MiB` 才触发(自动路由阈值,见 `lumen_services/storage/s3_backend.py:25-29`):
+```bash
+python -m scripts.bench_minio --doc-size 10MB --docs-per-tenant 20 --concurrency 4
+# 报告里多了 put.multipart 段,P95 通常在 200-500ms
+```
+
+### 10.5 常见问题
+
+| 症状 | 修法 |
+|------|------|
+| `lumen-platform-minio` 容器起不来 | 看 `docker logs lumen-platform-minio`;多半是端口 29000/29001 被占,改 docker-compose.yml 端口映射 |
+| `health` 返 `backend=local` 不是 `s3` | 没重启 uvicorn,singleton 缓存了之前的 backend;重启 11335 |
+| `health` 返 `ok=false detail="error: 404"` | bucket 不存在,先去 MinIO console 建 `lumen-dev` |
+| multipart 上传卡住 | 检查 `MINIO_BROWSER_REDIRECT_URL` 没冲突;容器内存限制 `mem_limit: 1g` 见 docker-compose |
+| 端到端 KB 上传 PDF 失败 | 看后端 log:大概率 parsers 还在 `open(file_path)` 走本地路径,见 [architecture/storage.md §Parsers 适配](../explanation/storage.md#parsers-适配) |
+
+### 10.6 注意事项
+
+- **默认凭据 `minioadmin/minioadmin` 只用于 dev**。生产必须改 + 启用 MinIO KMS。
+- **`STORAGE_BACKEND` 运行时切换** 不支持(工厂是 singleton,改 env 必须重启 uvicorn)。
+- **`boto3` Windows registry proxy bypass** 未处理(参考 `httpx-proxy-bypass-2026-08-31.md`,production Linux `HTTPS_PROXY` 出去代理需要 follow-up)。
+
+---
+
 **相关文档**
 - [常见错误速查(运行中错误)](common-errors.md)
 - [Uvicorn zombie 排错(Windows 深度)](uvicorn-zombie.md)
 - [开发环境搭建](../how-to/dev-env.md)
+- [Storage 架构 + 选型决策](../explanation/storage.md)

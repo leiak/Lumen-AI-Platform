@@ -18,9 +18,16 @@ from __future__ import annotations
 import os
 import time
 from io import BytesIO
-from typing import BinaryIO, Dict, Optional
+from pathlib import Path
+from typing import BinaryIO, Dict, Iterator, Optional
 
 from .base import StorageBackend
+
+# M38.1 follow-up (2026-08-31): 单次 PUT / multipart 自动分流的阈值(5 MiB)。
+# 与 S3 单次 PUT 上限 5 GB 的安全距离充足;5 MiB 也是 multipart part_size
+# 的常用起点(下游 lazy-load、流式解析时刚好一个网络往返)。
+_MULTIPART_THRESHOLD_BYTES = 5 * 1024 * 1024
+_DEFAULT_PART_SIZE_BYTES = 5 * 1024 * 1024
 
 
 class S3BackendError(RuntimeError):
@@ -105,10 +112,100 @@ class S3Backend(StorageBackend):
         content_type: Optional[str] = None,
     ) -> str:
         safe = self._validate_key(key)
+        # Auto-route: large payloads (≥ 5 MiB) go through multipart so
+        # we don't hit boto3's single-PUT 5 GB limit and we keep memory
+        # bounded. Smaller payloads stay on the single-shot path (one
+        # HTTP call, no multipart overhead).
+        if isinstance(data, (bytes, bytearray)) and len(data) >= _MULTIPART_THRESHOLD_BYTES:
+            return self.put_object_multipart(
+                safe, BytesIO(bytes(data)), content_type=content_type,
+            )
         kwargs: Dict[str, object] = {"Bucket": self.bucket, "Key": safe, "Body": data}
         if content_type:
             kwargs["ContentType"] = content_type
         self.client.put_object(**kwargs)
+        return f"s3://{self.bucket}/{safe}"
+
+    def put_object_multipart(
+        self,
+        key: str,
+        data_stream: BinaryIO,
+        part_size: int = _DEFAULT_PART_SIZE_BYTES,
+        content_type: Optional[str] = None,
+    ) -> str:
+        """Stream-upload ``data_stream`` via S3 multipart upload.
+
+        Sequence:
+        1. ``create_multipart_upload`` to obtain an ``UploadId``.
+        2. Loop ``data_stream.read(part_size)`` until EOF, calling
+           ``upload_part`` per chunk and recording each ``ETag``.
+        3. ``complete_multipart_upload`` with all parts in order.
+        4. On any failure inside the loop, ``abort_multipart_upload``
+           releases server-side resources (incomplete multipart
+           uploads accumulate storage cost on MinIO until expiry).
+
+        Caller owns ``data_stream`` (we read, do not close).
+        ``part_size`` defaults to 5 MiB, matching S3's recommended
+        minimum and our auto-routing threshold.
+        """
+        safe = self._validate_key(key)
+        # An empty stream collapses to a 0-byte object via the
+        # single-shot ``put_object`` path. S3's
+        # ``CompleteMultipartUpload`` requires at least one part and
+        # raises ``MalformedXML`` otherwise — so we'd waste an
+        # Init / Abort round-trip for nothing. Branching here keeps
+        # the multipart path strictly "non-empty payload".
+        if data_stream.peek(1) if hasattr(data_stream, "peek") else data_stream.read(1):
+            # ``peek``/``read(1)`` consumed 1 byte — rewind so the
+            # multipart loop sees the same bytes the caller streamed.
+            if hasattr(data_stream, "seek"):
+                data_stream.seek(-1, 1)
+        else:
+            return self.put_object(safe, b"", content_type=content_type)
+        create_kwargs: Dict[str, object] = {"Bucket": self.bucket, "Key": safe}
+        if content_type:
+            create_kwargs["ContentType"] = content_type
+        create_resp = self.client.create_multipart_upload(**create_kwargs)
+        upload_id = create_resp["UploadId"]
+        parts: list = []
+        try:
+            part_number = 1
+            while True:
+                chunk = data_stream.read(part_size)
+                if not chunk:
+                    break
+                part_resp = self.client.upload_part(
+                    Bucket=self.bucket,
+                    Key=safe,
+                    PartNumber=part_number,
+                    UploadId=upload_id,
+                    Body=chunk,
+                )
+                parts.append({"PartNumber": part_number, "ETag": part_resp["ETag"]})
+                part_number += 1
+            self.client.complete_multipart_upload(
+                Bucket=self.bucket,
+                Key=safe,
+                UploadId=upload_id,
+                MultipartUpload={"Parts": parts},
+            )
+        except Exception:
+            # Best-effort cleanup; abort errors themselves don't
+            # mask the original cause. The ``raise`` at the end
+            # propagates the upload error to the caller.
+            try:
+                self.client.abort_multipart_upload(
+                    Bucket=self.bucket, Key=safe, UploadId=upload_id,
+                )
+            except Exception as abort_exc:  # pragma: no cover - defensive
+                # Don't lose the abort error completely — log so an
+                # operator can manually clean up dangling uploads.
+                import logging
+                logging.getLogger(__name__).warning(
+                    "abort_multipart_upload failed for %s (upload_id=%s): %s",
+                    safe, upload_id, abort_exc,
+                )
+            raise
         return f"s3://{self.bucket}/{safe}"
 
     def get_object(self, key: str) -> bytes:
@@ -131,16 +228,49 @@ class S3Backend(StorageBackend):
             if code in {"NoSuchKey", "404", "NotFound"}:
                 raise FileNotFoundError(safe) from exc
             raise
-        body = resp["Body"]
-        # Wrap boto3's StreamingBody in a thin BytesIO so callers can
-        # treat it like a regular file (boto3's StreamingBody already
-        # supports .read() / .close() but lacks a few stdlib methods
-        # some parsers use). For files <5MB we read straight into
-        # memory; above that the caller is expected to use
-        # get_object_stream which yields the StreamingBody as-is.
-        data = body.read()
-        body.close()
-        return BytesIO(data)
+        # Real streaming: hand boto3's StreamingBody back to the caller
+        # so large files don't buffer into RAM. ``StreamingBody``
+        # already implements ``.read()`` / ``.close()`` so the parser
+        # layer's ``with storage.get_object_stream(key) as f:`` pattern
+        # works without wrapping. ``base.py`` docstring warns callers
+        # to close.
+        return resp["Body"]
+
+    def list_objects(self, prefix: str = "", max_keys: int = 1000) -> Iterator[str]:
+        """Yield keys under ``prefix``, paginating with ``ContinuationToken``.
+
+        S3 returns at most 1000 keys per ``list_objects_v2`` call; we
+        loop until ``IsTruncated=False`` or ``max_keys`` is reached.
+        ``MaxKeys`` is set to ``min(max_keys, 1000)`` to honour S3's
+        hard page limit while letting callers iterate without
+        thinking about pagination.
+        """
+        # ``MaxKeys`` is bounded by S3's hard limit (1000). We cap
+        # ``max_keys`` at 1000 internally and let the caller slice
+        # with ``itertools.islice`` if they want fewer.
+        page_size = min(max_keys, 1000) if max_keys > 0 else 1000
+        continuation_token: Optional[str] = None
+        yielded = 0
+        while True:
+            kwargs: Dict[str, object] = {
+                "Bucket": self.bucket,
+                "MaxKeys": page_size,
+            }
+            if prefix:
+                kwargs["Prefix"] = prefix
+            if continuation_token:
+                kwargs["ContinuationToken"] = continuation_token
+            resp = self.client.list_objects_v2(**kwargs)
+            for obj in resp.get("Contents", []) or []:
+                key = obj.get("Key")
+                if key:
+                    yield key
+                    yielded += 1
+                    if max_keys and yielded >= max_keys:
+                        return
+            if not resp.get("IsTruncated"):
+                return
+            continuation_token = resp.get("NextContinuationToken")
 
     def delete_object(self, key: str) -> None:
         safe = self._validate_key(key)
@@ -164,6 +294,47 @@ class S3Backend(StorageBackend):
             Params={"Bucket": self.bucket, "Key": safe},
             ExpiresIn=expiry or self.presigned_expiry,
         )
+
+    def resolve_to_local_path(self, key: str) -> str:
+        """Download the object into a NamedTemporaryFile and return
+        its path.
+
+        Used by the parser layer when the underlying library
+        (pdfplumber / python-docx / docling) requires a real
+        filesystem path. The temp file is created in the system
+        default temp directory and persists until the caller deletes
+        it (``finally: Path(p).unlink(missing_ok=True)``) — we do
+        NOT auto-cleanup because some parsers cache the path and
+        re-open after this method returns.
+        """
+        import tempfile
+        safe = self._validate_key(key)
+        # ``delete=False`` so the caller controls cleanup. ``suffix``
+        # is empty because some parsers dispatch on extension; if
+        # we knew the extension we could set it here.
+        tmp = tempfile.NamedTemporaryFile(prefix="lumen-storage-", delete=False)
+        try:
+            # Stream the download — get_object_stream yields a
+            # StreamingBody which we close after the copy.
+            stream = self.get_object_stream(safe)
+            try:
+                while True:
+                    chunk = stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    tmp.write(chunk)
+            finally:
+                stream.close()
+            tmp.flush()
+            tmp.close()
+        except Exception:
+            # Clean up the half-written temp file on failure.
+            try:
+                Path(tmp.name).unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        return tmp.name
 
     def health_check(self) -> Dict[str, object]:
         start = time.monotonic()

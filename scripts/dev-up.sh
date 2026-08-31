@@ -69,6 +69,7 @@ BASE_SERVICES=(
   "lumen-platform-redis|docker.m.daocloud.io/redis:7-alpine|redis"
   "lumen-platform-ollama|docker.m.daocloud.io/ollama/ollama:latest|ollama"
   "lumen-platform-es|docker.elastic.co/elasticsearch/elasticsearch:8.12.0|elasticsearch"
+  "lumen-platform-minio|docker.m.daocloud.io/minio/minio:latest|minio"
 )
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
@@ -108,7 +109,7 @@ is_in_network() {
 # create it because the original `docker run` flags (volumes, network mode,
 # extra env) may differ from what the compose spec implies.
 # ---------------------------------------------------------------------------
-step "Step 1/5 — base containers (mysql / redis / ollama / elasticsearch)"
+step "Step 1/5 — base containers (mysql / redis / ollama / elasticsearch / minio)"
 
 missing_base=0
 for spec in "${BASE_SERVICES[@]}"; do
@@ -149,6 +150,14 @@ for spec in "${BASE_SERVICES[@]}"; do
           echo "        -e 'ES_JAVA_OPTS=-Xms1g -Xmx1g' \\"
           echo "        -v es_data:/usr/share/elasticsearch/data \\"
           echo "        $image"
+          ;;
+        lumen-platform-minio)
+          # 端口 19000/19001 已被同机 IntelliEngine-minio 占用,避开 → 29000/29001
+          echo "      docker run -d --name lumen-platform-minio -p 29000:9000 -p 29001:9001 \\"
+          echo "        -e MINIO_ROOT_USER=minioadmin \\"
+          echo "        -e MINIO_ROOT_PASSWORD=minioadmin \\"
+          echo "        -v minio_data:/data \\"
+          echo "        $image server /data --console-address ':29001'"
           ;;
       esac
       missing_base=1
@@ -317,7 +326,8 @@ echo "=== quick health check ==="
 # third field empty and we just check reachability.
 for entry in \
   "es|http://localhost:9200/_cluster/health|green yellow" \
-  "ollama|http://localhost:11434/api/tags|"; do
+  "ollama|http://localhost:11434/api/tags|" \
+  "minio|http://localhost:29000/minio/health/live|"; do
   IFS='|' read -r label url expected <<<"$entry"
   body="$(curl -sf --max-time 3 "$url" 2>/dev/null || true)"
   if [ -z "$body" ]; then

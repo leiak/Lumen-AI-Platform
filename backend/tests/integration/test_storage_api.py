@@ -442,6 +442,18 @@ def test_migrate_to_s3_writes_rows_and_calls_put(app_with_overrides, monkeypatch
         def object_exists(self, key): return True
         def get_presigned_url(self, key, expiry=None): return f"s3://{key}"
         def health_check(self): return {"backend": "s3", "ok": True, "detail": "", "latency_ms": 0}
+        # M38.1 follow-up (2026-08-31): ABC added ``list_objects`` and
+        # ``put_object_multipart`` — the migration test stubs must
+        # implement them or the abstract check rejects instantiation.
+        def list_objects(self, prefix="", max_keys=1000):
+            return iter(())
+        def put_object_multipart(self, key, data_stream, part_size=5*1024*1024, content_type=None):
+            return self.put_object(key, data_stream.read(), content_type=content_type)
+        def resolve_to_local_path(self, key):
+            abs_path = storage_test_root / key
+            if not abs_path.is_file():
+                raise FileNotFoundError(key)
+            return str(abs_path)
 
     monkeypatch.setattr(
         "lumen_services.storage.get_storage_backend", lambda: _StubS3()
@@ -493,6 +505,13 @@ def test_migrate_to_s3_skips_rows_without_legacy_path(app_with_overrides, monkey
         def object_exists(self, key): return True
         def get_presigned_url(self, key, expiry=None): return key
         def health_check(self): return {"backend": "s3", "ok": True, "detail": "", "latency_ms": 0}
+        # M38.1 follow-up (2026-08-31): see _StubS3 in test_migrate_to_s3_writes_rows_and_calls_put above.
+        def list_objects(self, prefix="", max_keys=1000):
+            return iter(())
+        def put_object_multipart(self, key, data_stream, part_size=5*1024*1024, content_type=None):
+            return self.put_object(key, data_stream.read(), content_type=content_type)
+        def resolve_to_local_path(self, key):
+            raise FileNotFoundError(key)
 
     monkeypatch.setattr(
         "lumen_services.storage.get_storage_backend", lambda: _StubS3()

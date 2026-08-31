@@ -26,6 +26,13 @@ data/uploads/*
 data/faiss/*.index
 data/faiss/*.meta
 data/faiss/*.pkl
+# M38.4 multimodal embedding prototype 测试样本(runtime 生成,不入 git)
+data/m38-4-prototype/*
+!data/m38-4-prototype/.gitkeep
+# M38.1 follow-up: MinIO dev 数据(volume bind mount / 本地 dev 调试,
+# runtime 生成,不入 git — docker compose 容器里自带 /data 持久卷)
+data/minio/*
+!data/minio/.gitkeep
 
 # Logs
 *.log
