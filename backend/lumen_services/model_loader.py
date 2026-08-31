@@ -4,6 +4,8 @@ import logging
 import time
 from datetime import datetime
 
+import httpx
+
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama
@@ -29,6 +31,28 @@ from lumen_models.llm_call_log import LLMCallLog
 # provider-specific `base_url`. Single source of truth lives in
 # `app.core.model_providers`.
 OPENAI_COMPATIBLE_PROVIDERS: tuple[str, ...] = get_openai_compatible_providers()
+
+
+def _bypass_proxy_client_kwargs() -> dict:
+    """Bypass Windows registry proxy for httpx clients (2026-08-31 fix).
+
+    httpx with ``trust_env=True`` (the default) reads ``HKCU\\Software\\Microsoft\\
+    Windows\\CurrentVersion\\Internet Settings\\ProxyServer`` and routes all
+    outbound traffic through it. That proxy returns 502 Bad Gateway for
+    localhost-bound requests (ollama on 11434) because httpx doesn't honor
+    ``ProxyOverride``'s ``<local>`` token. curl isn't affected (it doesn't read
+    the registry), so a healthy ``curl`` masks the underlying broken path.
+
+    Workflow 1148 incident (2026-08-30): dev's system proxy was
+    ``127.0.0.1:10793``; agent executor's ChatOllama got 502 while direct curl
+    returned 200. Injecting ``proxy=None`` + ``trust_env=False`` forces httpx to
+    connect directly. Same fix is applied to the OpenAI-compatible branch so
+    that future M-series don't trip the same hidden bug.
+
+    Returns a dict suitable for ``httpx.Client(**kwargs)`` /
+    ``httpx.AsyncClient(**kwargs)`` and for ChatOllama's ``client_kwargs`` arg.
+    """
+    return {"proxy": None, "trust_env": False}
 
 
 def _normalize_messages(messages: Any) -> List[BaseMessage]:
@@ -541,6 +565,7 @@ def create_chat_model(
             base_url=resolved_base_url,
             temperature=temperature,
             timeout=timeout,
+            client_kwargs=_bypass_proxy_client_kwargs(),
         )
     elif model_type in OPENAI_COMPATIBLE_PROVIDERS:
         if not base_url:
@@ -548,12 +573,19 @@ def create_chat_model(
         if not api_key:
             raise ValueError(f"api_key is required for {model_type}")
 
+        # Bypass Windows registry proxy (see _bypass_proxy_client_kwargs).
+        # Both sync + async clients must get the bypass — openai SDK uses
+        # sync for ``invoke`` and async for ``ainvoke``; missing one would
+        # leave the other half exposed to the registry proxy.
+        _bypass = _bypass_proxy_client_kwargs()
         inner = ChatOpenAI(
             model=model_name,
             base_url=base_url,
             api_key=api_key,
             temperature=temperature,
             timeout=timeout,
+            http_client=httpx.Client(**_bypass),
+            http_async_client=httpx.AsyncClient(**_bypass),
             **kwargs
         )
         # Force HTTP/1.1 on Windows: after the client is built, replace its
@@ -561,7 +593,6 @@ def create_chat_model(
         # This avoids the ALPN handshake hang that httpx's default HTTP/2-first
         # negotiation causes on some Windows network configurations.
         try:
-            import httpx
             inner._client._transport = httpx.AsyncHTTPTransport(http2=False)
         except Exception:
             pass
