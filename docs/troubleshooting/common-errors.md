@@ -20,6 +20,7 @@
 | 多媒体 | ffmpeg 报错 / 视频黑屏 | [§8 多媒体](#8-多媒体) |
 | Docker | 端口冲突 / volume 不生效 | [§9-docker](#9-docker) |
 | 测试 | 测试污染 dev DB / 断言数字对不上 | [§10 测试](#10-测试) |
+| 启动阶段 | 后端 11335 占 / 前端 11334 占 / Celery 启不来 / Ollama 模型没拉 / Widget dist 缺失 | [dev-env.md](dev-env.md) |
 
 ---
 

@@ -459,129 +459,15 @@ export const agentApi = {
 
 ---
 
-## 开发环境排错
+## 排错
 
-### 症状:Uvicorn 11335 端口被占,新进程启动后接口返空
+排错内容**不在 README**,统一在 [`docs/troubleshooting/`](docs/troubleshooting/) 下:
 
-详见下方 [Uvicorn zombie 排错](#uvicorn-zombie-排错)。
-
-**快速处理**:
-1. `netstat -ano | grep :11335 | grep LISTENING` 看 PID
-2. `powershell -NoProfile -Command "Stop-Process -Id <pid>"` 杀旧 worker
-3. `cd backend && nohup uvicorn lumen_main:app --port 11335 > /tmp/uv.log 2>&1 & disown`
-4. `curl http://localhost:11335/` 确认 `{"message":"Lumen AI Platform API",...}`
-
-### 症状:Docker 容器重启后 mysql / redis / ollama 没起来
-
-```bash
-bash scripts/dev-up.sh   # 拉起 5 个 lumen-platform-* 容器,等 ES green/yellow,等 celery ready
-bash scripts/dev-down.sh [--keep-base]   # 停服
-```
-
-### 症状:Celery worker 启动后 ImportError "partially initialized module"
-
-根因:`celery_app.py` 模块级 import `document_tasks` 形成循环。
-
-**修法**:`Celery(..., include=["lumen_tasks.document_tasks"])` 让 Celery worker 启动时再 import 任务模块。
-
-### 症状:Ollama 模型没拉,Knowledge Base ingest 失败
-
-```bash
-docker exec lumen-platform-ollama ollama pull nomic-embed-text
-docker exec lumen-platform-ollama ollama pull qwen2.5:7b
-```
-
-### 症状:前端 `11334` 起不来,报端口占用
-
-```bash
-netstat -ano | grep :11334 | grep LISTENING
-powershell -NoProfile -Command "Stop-Process -Id <pid>"
-```
-
-Next.js dev 不会留 zombie,直接 Ctrl+C 重启即可。
-
-### 症状:pytest 跑不通,MySQL 报错 "Table doesn't exist"
-
-```bash
-cd backend && python scripts/init_dev_db.py
-```
-
-会跑 18 个 `ensure_*()` 函数 + seed 默认 model configs / 默认 tenant / 默认 admin 用户 / 默认 MCP demo。
-
-### 症状:某个 endpoint 405 Method Not Allowed
-
-先看 `curl http://localhost:11335/openapi.json | python -c "import sys,json; d=json.load(sys.stdin); [print(m,p) for p in d['paths'] for m in d['paths'][p]]"` 确认路由真的注册了。
-
-如果 openapi 里没有 = 后端没加载新代码 = uvicorn 没 reload,通常是 zombie 或忘记 `--reload`。
-
-### 症状:Widget 构建失败 / dist 不存在
-
-```bash
-cd widget && npm install && npm run build
-# 输出 dist/lumen-chat.js (IIFE) + dist/lumen-chat.esm.js
-```
-
-后端 FastAPI 会 mount `widget/dist/` 到 `/static/widget/`(见 `lumen_main.py` 的 `_widget_dir` 逻辑)。
-
-### 症状:LangSmith tracing 不工作
-
-`backend/.env` 设 `LANGSMITH_API_KEY=...` + `LANGSMITH_TRACING=true`。项目所有 LLM 调用都过 LangChain,会自动 trace。
-
-### 进一步
-
-- 真不行 → 跑 `bash scripts/dev-down.sh && bash scripts/dev-up.sh` 全栈重启
-
----
-
-## Uvicorn zombie 排错
-
-> **问题类型**:Windows 开发环境
-> **症状**:后端改完代码无法重启,`taskkill` 也杀不掉,端口一直被占着
-
-### 症状
-
-- `taskkill /F /PID <pid>` 提示"已终止"
-- `Get-NetTCPConnection -LocalPort <port>` 显示端口仍被 LISTENING
-- `Get-Process -Id <pid>` 查不到这个 PID
-- `python -m uvicorn ... --port <port>` 启动报 `address already in use`
-
-### 根因
-
-Windows 上 `uvicorn --reload`(用 `StatReload`)偶尔会出这个 bug:
-
-1. uvicorn 启动两个进程:父 reloader + 子 worker
-2. `StatReload` 检测代码改动,**子 worker 先重启**
-3. 子 worker 偶尔卡住或异常退出,父 reloader 收不到信号
-4. 父 reloader 自己死掉,但 Windows 内核仍把 LISTENING socket 算在它头上
-5. 孤儿 worker 子进程还在,但已经不服务请求
-
-### 排查步骤
-
-```bash
-# 1. 找到占着端口的 PID(zombie 父 reloader)
-netstat -ano | findstr ":11335.*LISTENING"
-
-# 2. 用 CIM 找这个 PID 的子进程(孤儿 worker)
-powershell -Command "(Get-CimInstance Win32_Process -Filter 'Name = \"python.exe\"') | Format-Table ProcessId, CommandLine -AutoSize -Wrap"
-# 看 CommandLine 里 parent_pid 等于 zombie PID 的那行
-
-# 3. 杀 worker 子进程(不是 zombie 父进程,taskkill 找不到父进程)
-powershell -NoProfile -Command "Stop-Process -Id <worker-pid>"
-
-# 4. 验证端口释放
-netstat -ano | findstr ":11335.*LISTENING"
-# 应该没有输出
-
-# 5. 重新启动
-cd backend && python -m uvicorn lumen_main:app --host 0.0.0.0 --port 11335 --reload
-```
-
-### 备选方案
-
-如果 zombie 实在清不掉:
-- 重启电脑(最暴力有效)
-- `netsh winsock reset` 然后重启(需管理员,会清网络配置)
-- 临时换端口启动(hack,但能继续开发)
+- [dev-env.md](docs/troubleshooting/dev-env.md) — 启动阶段(端口 / 容器 / Celery / Ollama / Widget / LangSmith / 兜底全栈重启)
+- [uvicorn-zombie.md](docs/troubleshooting/uvicorn-zombie.md) — Windows 专属 uvicorn `--reload` 深度排错(诊断 SQL + 进程结构 + MySQL MDL 孤儿连接)
+- [common-errors.md](docs/troubleshooting/common-errors.md) — 运行中错误速查(前端 / 鉴权 / 数据库 / 模型 / KB / 工作流 / Celery / 多媒体 / Docker / 测试)
+- [performance-tuning.md](docs/troubleshooting/performance-tuning.md) — 性能调优
+- [data-recovery.md](docs/troubleshooting/data-recovery.md) — 数据恢复 / fixture 污染清理
 
 ---
 
