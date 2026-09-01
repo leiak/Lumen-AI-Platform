@@ -39,6 +39,31 @@ def sanitize_filename(filename: str) -> str:
     return filename or 'unnamed_file'
 
 
+def _document_source_available(doc) -> bool:
+    """Check whether a document's source bytes are reachable.
+
+    M38.1 follow-up: post-MinIO switch the doc row's ``file_path``
+    is a logical placeholder (``data/uploads/<tenant>/<kb>/<file>``)
+    even when the actual bytes live in S3 / MinIO. ``os.path.exists``
+    alone would 400 every retry / rechunk of an S3-backed doc. Try
+    the legacy local path first (covers pre-M38.1 docs and the
+    LocalBackend path post-M38.1) then fall back to the storage
+    backend's ``object_exists`` on ``asset_storage_key``.
+    """
+    if doc.file_path and os.path.exists(doc.file_path):
+        return True
+    if doc.asset_storage_key:
+        try:
+            from lumen_services.storage import get_storage_backend
+            return get_storage_backend().object_exists(doc.asset_storage_key)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "object_exists check failed for doc %s key=%s: %s",
+                doc.id, doc.asset_storage_key, exc,
+            )
+    return False
+
+
 @router.get("/", response_model=PaginatedResponse[KnowledgeBaseResponse])
 async def list_knowledge_bases(
     page: int = 1,
@@ -367,6 +392,13 @@ async def upload_document(
             "chunking_params": params,
             "doc_type": doc_type,
             "user_id": current_user.id,
+            # M38.1 follow-up: pass asset_storage_key so the worker
+            # can route through ``storage.resolve_to_local_path`` when
+            # running in S3/MinIO mode. ``file_path`` is kept for
+            # back-compat with pre-M38.1 workers and the legacy
+            # LocalBackend path.
+            "asset_storage_key": asset_storage_key,
+            "storage_backend": storage.backend_name,
         }
         task = process_document_task.delay(task_params)
         doc.status = "queued"
@@ -629,7 +661,7 @@ async def retry_document(
             detail=f"文档状态为 '{doc.status}'，不支持重试。请删除后重新上传。"
         )
 
-    if not doc.file_path or not os.path.exists(doc.file_path):
+    if not _document_source_available(doc):
         raise HTTPException(
             status_code=400,
             detail="原始文件已丢失，无法重试。请删除后重新上传。"
@@ -687,6 +719,9 @@ async def retry_document(
         "kb_id": doc.knowledge_base_id,
         "chunking_strategy": "fixed",
         "chunking_params": chunking_params,
+        # M38.1 follow-up: see upload endpoint above.
+        "asset_storage_key": doc.asset_storage_key,
+        "storage_backend": doc.storage_backend,
         "doc_type": doc_type,
         "user_id": current_user.id,
     }
@@ -767,7 +802,7 @@ async def rechunk_document(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    if not doc.file_path or not os.path.exists(doc.file_path):
+    if not _document_source_available(doc):
         raise HTTPException(
             status_code=400,
             detail="原始文件已丢失，无法重新分块。请删除后重新上传。"
@@ -826,6 +861,11 @@ async def rechunk_document(
         },
         "doc_type": doc_type,
         "user_id": current_user.id,
+        # M38.1 follow-up: see upload endpoint above. Carries the
+        # storage key so the worker can resolve to a local path in
+        # S3/MinIO mode instead of opening the legacy placeholder.
+        "asset_storage_key": doc.asset_storage_key,
+        "storage_backend": doc.storage_backend,
     }
     process_document_task.delay(task_params)
     doc.status = "queued"

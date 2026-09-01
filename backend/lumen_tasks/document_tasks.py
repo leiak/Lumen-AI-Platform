@@ -122,6 +122,18 @@ def process_document_task(self, task_params: Dict[str, Any]) -> Dict[str, Any]:
     from lumen_models.embedding_call_log import EmbeddingCallLog  # noqa: F401  # self + WorkflowRun.embedding_call_logs
     from lumen_models.workflow import Workflow, WorkflowRun  # noqa: F401  # M30a: .workflow_id / .workflow_run_id
     from lumen_models.workflow import WorkflowNodeRun  # noqa: F401  # WorkflowRun.node_runs relationship
+    # M38.2 (2026-08-26): Workspace + DocumentFolder are FK targets of
+    # ``documents.folder_id`` / ``workspaces.owner_id`` etc. The
+    # Document row's ``knowledge_base`` relationship lazy-loads its
+    # related rows, and SQLAlchemy will refuse to configure the mapper
+    # if a referenced table hasn't been registered. Result if you
+    # skip this import: ``Foreign key associated with column
+    # 'documents.folder_id' could not find table 'document_folders'``
+    # raised inside ``doc.knowledge_base`` access — exactly what
+    # happened to doc 939 after M38.2 shipped (2026-08-31 incident:
+    # upload returned "queued" but doc stuck in pending because the
+    # celery worker raised before any status update).
+    from lumen_models.workspace import DocumentFolder, Workspace  # noqa: F401  # M38.2: documents.folder_id / workspaces.owner_id
     from lumen_services.document_parser import DocumentParser
     from lumen_services.knowledge_service import KnowledgeService
     from lumen_tools.vector_store_factory import VectorStoreFactory
@@ -192,7 +204,20 @@ def process_document_task(self, task_params: Dict[str, Any]) -> Dict[str, Any]:
         # Parse document using new multi-parser
         logger.info(f"[Task {task_id}] Parsing document: {file_path} (type: {doc_type or 'auto-detect'})")
         parser = DocumentParser()
-        parse_result = parser.parse(file_path, file_content_type, doc_type=doc_type)
+        # M38.1 follow-up: when the originating endpoint set
+        # ``asset_storage_key`` (post-MinIO switch this is every
+        # doc), forward it as ``storage_key`` so the parser routes
+        # through ``storage.resolve_to_local_path``. Without this,
+        # S3-backed docs would hit FileNotFoundError when parsers
+        # try to ``open(file_path)`` against the local disk. Falls
+        # back to ``file_path`` when ``storage_key`` is missing /
+        # fails to resolve, so pre-M38.1 docs keep working.
+        parse_result = parser.parse(
+            file_path,
+            file_content_type,
+            doc_type=doc_type,
+            storage_key=task_params.get("asset_storage_key"),
+        )
         text_content = parse_result.get("text", "")
         parse_error = (parse_result.get("metadata") or {}).get("parse_error")
 
