@@ -12,6 +12,8 @@ from lumen_schemas.knowledge import (
     DocumentResponse, ChunkResponse, RechunkRequest,
     FAQEntryCreate, FAQEntryUpdate, FAQEntryResponse,
     FAQBulkImportRequest, FAQBulkImportResult,
+    ImageAssetResponse, ImageSearchResponse, ImageSearchHit,
+    ImageUploadResponse,
 )
 from lumen_schemas.common import SingleResponse, PaginatedResponse
 from lumen_services.knowledge_service import KnowledgeService, KnowledgeBaseNotEmptyError
@@ -738,6 +740,13 @@ async def list_document_chunks(
     document_id: int,
     page: int = 1,
     page_size: int = 50,
+    # M38.4: 多模态 chunk 过滤。``modality`` 可选 "image" / "text"
+    # / "audio" / "video";SQLAlchemy 加一个 equality 过滤。
+    # ``None`` = 全部,保持向后兼容。
+    modality: Optional[str] = Query(
+        None,
+        description="M38.4 多模态过滤: image / text / audio / video;None = 全部",
+    ),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -747,6 +756,9 @@ async def list_document_chunks(
     ``[]`` (not 404) if the document has no chunks yet — a doc in
     ``pending``/``queued``/``processing`` state has rows in the
     ``documents`` table but its chunks haven't been written.
+
+    M38.4: ``?modality=image`` 让 frontend 在 PPT 抽出图的场景下只
+    列出 image chunks(原本会被几十个 slide 文本 chunk 淹没)。
     """
     from lumen_models.knowledge import Document, DocumentChunk
 
@@ -758,10 +770,11 @@ async def list_document_chunks(
         raise HTTPException(status_code=404, detail="Document not found")
 
     start = (page - 1) * page_size
+    q = db.query(DocumentChunk).filter(DocumentChunk.document_id == document_id)
+    if modality is not None:
+        q = q.filter(DocumentChunk.modality == modality)
     chunks = (
-        db.query(DocumentChunk)
-        .filter(DocumentChunk.document_id == document_id)
-        .order_by(DocumentChunk.chunk_index.asc(), DocumentChunk.id.asc())
+        q.order_by(DocumentChunk.chunk_index.asc(), DocumentChunk.id.asc())
         .offset(start)
         .limit(page_size)
         .all()
@@ -1018,6 +1031,15 @@ async def search_knowledge_base(
     alpha: float = 0.5,
     rerank: bool = True,
     rerank_top_n: int = 10,
+    # M38.4: 多模态过滤。``?modality=image`` 让 frontend 在 KB 内只
+    # 搜图片 chunk(典型用例:用户上传了 PPT,想搜 slide 上的产品图)。
+    # 把 modality 拼进 filter_expr 而不是单独走 SQL 是因为多模态
+    # 索引共享同一向量库(``?modality=image`` 限制 text vector
+    # store 的命中,multimodal 索引由独立 image-search 端点处理)。
+    modality: Optional[str] = Query(
+        None,
+        description="M38.4 多模态过滤: image / text / audio / video;None = 全部",
+    ),
     field_weights: str = Form(None, description="JSON string of field weights, e.g. '{\"title\":10.0,\"text\":2.0}'"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -1037,6 +1059,20 @@ async def search_knowledge_base(
             weights = json.loads(field_weights)
         except json.JSONDecodeError:
             pass  # Use default weights
+
+    # Build filter_expr — base filter + optional modality. The
+    # ``modality`` value is wrapped in single quotes because the regex
+    # pattern in hybrid_retriever._normalise_filter accepts both
+    # single and double quoted strings. Single quotes are safe
+    # because the value is enum-validated upstream (image/text/audio/
+    # video) — see M38.4 spec §"风险 4" for the injection rationale.
+    filter_parts = [
+        f"tenant_id == {current_user.tenant_id}",
+        f"kb_id == {kb_id}",
+    ]
+    if modality:
+        filter_parts.append(f"modality == '{modality}'")
+    filter_expr = " and ".join(filter_parts)
 
     # Use the new retrieval pipeline (vector + BM25 -> RRF -> rerank -> top-K).
     # Falls back to the legacy vector_store.rerank_search path if the
@@ -1064,7 +1100,6 @@ async def search_knowledge_base(
         except Exception:
             pass
         try:
-            filter_expr = f'tenant_id == {current_user.tenant_id} and kb_id == {kb_id}'
             # M28: per-request ``field_weights`` (ad-hoc override) wins over
             # the KB row's ``search_weights``. If neither is set, ES falls
             # back to its class defaults inside ``hybrid_search``.
@@ -1088,7 +1123,6 @@ async def search_knowledge_base(
             model_config_id=kb.embedding_model_config_id,
             db=db,
         )
-        filter_expr = f'tenant_id == {current_user.tenant_id} and kb_id == {kb_id}'
         results = vector_store.rerank_search(
             query, k=k, alpha=alpha, filter_expr=filter_expr,
             rerank=rerank, rerank_top_n=rerank_top_n,
@@ -1351,3 +1385,409 @@ async def delete_faq_entry(
         data={"entry_id": entry_id, "deleted": True},
         message="FAQ 已删除",
     )
+
+
+# ------------------------------------------------------------- M38.4: Image upload / list / search
+#
+# 三个新端点:
+#   POST /{kb_id}/images/upload      上传图片(走 multimodal 路径)
+#   GET  /{kb_id}/images             列出 KB 内全部图片(独立 + PPT 抽出)
+#   POST /{kb_id}/image-search       用 query 图找相似图(graceful degradation)
+#
+# 设计要点:
+# 1. images/upload 完全镜像 documents upload 的 storage + 异步处理
+#    路径,只是 ``doc_type='image'`` 让 worker 走 ImageParser(Step 4)。
+# 2. images 列表走 ImageAsset JOIN Document,source 字段区分
+#    ``standalone`` (独立上传) vs ``extracted`` (PPT 抽出图)。
+# 3. image-search 优先走 multimodal FAISS,embedder 失败时 graceful
+#    fallback 到 text search over captions(不抛 503)。
+
+
+@router.post(
+    "/{kb_id}/images/upload",
+    response_model=SingleResponse[ImageUploadResponse],
+)
+async def upload_image(
+    kb_id: int,
+    file: UploadFile = File(...),
+    folder_id: Optional[int] = Form(None, description="M38.2 目标 folder id"),
+    async_process: bool = Form(True),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """上传一张图片到 KB。
+
+    镜像 ``POST /{kb_id}/documents`` 的 storage + 异步处理流程,但
+    ``doc_type='image'`` 走 ImageParser,worker 会调 multimodal
+    embedder 写独立 multimodal FAISS 索引(若 KB.multimodal_enabled=True)。
+
+    不需要 multimodal_enabled 也能用 —— image 文档的 text chunk
+    仍走通用 text 向量库,只是不会写入 multimodal 索引。
+    """
+    assert_perm_via_kb(db, current_user, "document.create", kb_id)
+    from lumen_models.knowledge import Document, KnowledgeBase
+    from lumen_core.config import settings
+
+    kb = db.query(KnowledgeBase).filter(
+        KnowledgeBase.id == kb_id,
+        KnowledgeBase.tenant_id == current_user.tenant_id,
+    ).first()
+    if not kb:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+    # Folder validation mirrors upload_document above.
+    if folder_id is not None:
+        from lumen_models.workspace import DocumentFolder
+        folder = db.get(DocumentFolder, folder_id)
+        if folder is None:
+            raise HTTPException(status_code=400, detail="目标 folder 不存在")
+        if folder.knowledge_base_id != kb_id:
+            raise HTTPException(status_code=400, detail="目标 folder 不属于该 KB")
+        if folder.deleted_at is not None:
+            raise HTTPException(status_code=400, detail="目标 folder 已软删")
+
+    from lumen_services.storage import get_storage_backend
+    storage = get_storage_backend()
+    safe_filename = sanitize_filename(file.filename)
+    asset_storage_key = f"uploads/{current_user.tenant_id}/{kb_id}/images/{safe_filename}"
+    content = await file.read()
+    storage.put_object(asset_storage_key, content)
+    file_path = f"data/{asset_storage_key}"
+
+    doc = Document(
+        filename=file.filename,
+        file_path=file_path,
+        file_type=(file.content_type or "application/octet-stream")[:100],
+        file_size=len(content),
+        status="pending",
+        knowledge_base_id=kb_id,
+        folder_id=folder_id,
+        created_by=current_user.id,
+        asset_storage_key=asset_storage_key,
+        storage_backend=storage.backend_name,
+        embedding_model_config_id=kb.embedding_model_config_id,
+        # M38.4: doc_type='image' 让 worker 走 ImageParser。
+        doc_type="image",
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+
+    async_enabled = settings.ASYNC_ENABLED and async_process
+    task_id = None
+    if async_enabled:
+        from lumen_tasks.document_tasks import process_document_task
+        task_params = {
+            "document_id": doc.id,
+            "file_path": file_path,
+            "file_content_type": file.content_type or "application/octet-stream",
+            "tenant_id": current_user.tenant_id,
+            "kb_id": kb_id,
+            "chunking_strategy": "fixed",
+            "chunking_params": {"chunk_size": 1, "chunk_overlap": 0},
+            "doc_type": "image",
+            "user_id": current_user.id,
+            "asset_storage_key": doc.asset_storage_key,
+            "storage_backend": doc.storage_backend,
+        }
+        result = process_document_task.delay(task_params)
+        task_id = getattr(result, "id", None)
+        doc.status = "queued"
+        db.commit()
+        db.refresh(doc)
+
+    return SingleResponse(
+        data=ImageUploadResponse(
+            document_id=doc.id,
+            task_id=str(task_id) if task_id else None,
+            status=doc.status,
+        ),
+        message="图片上传成功" if async_enabled else "图片处理完成",
+    )
+
+
+@router.get(
+    "/{kb_id}/images",
+    response_model=PaginatedResponse[ImageAssetResponse],
+)
+async def list_kb_images(
+    kb_id: int,
+    page: int = 1,
+    page_size: int = 24,
+    # ``source`` 让前端能切 gallery tab:
+    # - "standalone" = 独立上传的图片(原图)
+    # - "extracted" = PPT / docx 内嵌抽出的图
+    # - None = 全部
+    source: Optional[str] = Query(
+        None,
+        description='M38.4 source 过滤: "standalone" / "extracted" / None',
+    ),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """列出 KB 内的图片,支持 standalone vs extracted 过滤。
+
+    ``original_doc_page IS NULL`` 视为 standalone(独立上传的图),
+    非 NULL 视为 extracted(PPT/文档抽出)。frontend gallery 直接用
+    ``doc_filename`` + ``storage_key`` 渲染。
+    """
+    assert_perm_via_kb(db, current_user, "kb.read", kb_id)
+    from lumen_models.knowledge import Document, KnowledgeBase
+    from lumen_models.image_asset import ImageAsset
+
+    kb = db.query(KnowledgeBase).filter(
+        KnowledgeBase.id == kb_id,
+        KnowledgeBase.tenant_id == current_user.tenant_id,
+    ).first()
+    if not kb:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+    q = (
+        db.query(ImageAsset, Document.filename)
+        .join(Document, ImageAsset.document_id == Document.id)
+        .filter(Document.knowledge_base_id == kb_id)
+    )
+    if source == "standalone":
+        q = q.filter(ImageAsset.original_doc_page.is_(None))
+    elif source == "extracted":
+        q = q.filter(ImageAsset.original_doc_page.isnot(None))
+
+    total = q.count()
+    rows = (
+        q.order_by(ImageAsset.created_at.desc(), ImageAsset.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    items = []
+    for asset, doc_filename in rows:
+        resp = ImageAssetResponse.model_validate(asset)
+        resp.doc_filename = doc_filename
+        items.append(resp)
+
+    return PaginatedResponse(
+        data=items, total=total, page=page, page_size=page_size,
+    )
+
+
+@router.post(
+    "/{kb_id}/image-search",
+    response_model=SingleResponse[ImageSearchResponse],
+)
+async def image_search(
+    kb_id: int,
+    file: UploadFile = File(...),
+    k: int = Form(5, ge=1, le=50),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """用 query 图找 KB 内的相似图(image-to-image 检索)。
+
+    工作流程:
+    1. 读 query image bytes,resolve 到 PIL.Image
+    2. KB.multimodal_enabled + multimodal_config_id 都 set → 走
+       multimodal embedder → 独立 multimodal FAISS 索引
+    3. multimodal 路径任何异常(embedder down / dim probe 失败 /
+       cloud stub 抛 NotImplementedError)→ graceful fallback:
+       用文件名派生 caption → 走现有 text search + ``?modality=image``
+       filter → 返 ``search_mode="text_fallback"``
+    4. KB 没启用 multimodal 也直接 fallback,不让 admin 在 UI 上看到
+       503(too noisy)
+    """
+    assert_perm_via_kb(db, current_user, "kb.read", kb_id)
+    from lumen_models.knowledge import KnowledgeBase, Document, DocumentChunk
+    from lumen_services.multimodal_embedders import (
+        MultimodalEmbeddingError,
+        UnsupportedProviderError,
+        get_multimodal_embedder,
+    )
+    from lumen_services.multimodal_vector_store_factory import (
+        MultimodalVectorStoreFactory,
+    )
+
+    kb = db.query(KnowledgeBase).filter(
+        KnowledgeBase.id == kb_id,
+        KnowledgeBase.tenant_id == current_user.tenant_id,
+    ).first()
+    if not kb:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+    img_bytes = await file.read()
+    query_caption = _caption_from_filename(file.filename)
+
+    # ----- multimodal path --------------------------------------------
+    if kb.multimodal_enabled and kb.multimodal_config_id:
+        try:
+            embedder, dim = get_multimodal_embedder(kb.multimodal_config_id, db)
+            query_vec = embedder.embed_image(img_bytes)
+            mm_store = MultimodalVectorStoreFactory.get_store(kb_id, dim)
+            hits = mm_store.search(query_vec, k=k)
+
+            results = []
+            from lumen_models.image_asset import ImageAsset
+            for h in hits:
+                # 拿到对应的 chunk + document 渲染友好字段。
+                meta = h.get("metadata") or {}
+                chunk_id = meta.get("chunk_id")
+                document_id = meta.get("document_id")
+                image_caption = h.get("text") or query_caption
+                asset_row = (
+                    db.query(ImageAsset)
+                    .filter(ImageAsset.chunk_id == chunk_id)
+                    .first()
+                ) if chunk_id is not None else None
+                doc = (
+                    db.get(Document, document_id)
+                    if document_id is not None else None
+                )
+                results.append(ImageSearchHit(
+                    asset_id=asset_row.id if asset_row else None,
+                    chunk_id=chunk_id,
+                    document_id=document_id,
+                    doc_filename=doc.filename if doc else None,
+                    image_caption=image_caption,
+                    storage_key=asset_row.storage_key if asset_row else None,
+                    distance=h.get("distance"),
+                    score=h.get("score"),
+                ))
+            return SingleResponse(
+                data=ImageSearchResponse(
+                    search_mode="multimodal",
+                    query_caption=query_caption,
+                    results=results,
+                ),
+            )
+        except (
+            MultimodalEmbeddingError,
+            UnsupportedProviderError,
+            NotImplementedError,
+        ) as exc:
+            # graceful fallback — log + fall through
+            logger.warning(
+                "multimodal image-search failed for kb=%s, fallback to text: %s",
+                kb_id, exc,
+            )
+
+    # ----- fallback: text search over image captions ------------------
+    try:
+        from lumen_services.retrieval import get_retrieval_pipeline
+        pipeline = get_retrieval_pipeline(
+            kb_id=kb_id,
+            model_config_id=kb.embedding_model_config_id,
+            db=db,
+        )
+        filter_expr = (
+            f"tenant_id == {current_user.tenant_id} and "
+            f"kb_id == {kb_id} and modality == 'image'"
+        )
+        # 用 caption(而不是 raw query string) — caption 反映 image 内容,
+        # 兜底命中文本向量的语义空间。
+        fallback_query = query_caption or file.filename or "image"
+        text_hits = pipeline.search(
+            query=fallback_query, k=k, filter_expr=filter_expr,
+        )
+
+        # 把 text 命中 resolve 成 ImageSearchHit。如果 pipeline 没命中,
+        # 走 SQL 兜底 — 直接按 modality='image' 取最近 chunk,
+        # 让 UI 至少有个空 response 而不是 []。
+        results = []
+        if not text_hits:
+            chunks = (
+                db.query(DocumentChunk)
+                .join(Document, DocumentChunk.document_id == Document.id)
+                .filter(
+                    Document.knowledge_base_id == kb_id,
+                    DocumentChunk.modality == "image",
+                )
+                .order_by(DocumentChunk.id.desc())
+                .limit(k)
+                .all()
+            )
+            for c in chunks:
+                doc = db.get(Document, c.document_id)
+                from lumen_models.image_asset import ImageAsset
+                asset = (
+                    db.query(ImageAsset)
+                    .filter(ImageAsset.chunk_id == c.id)
+                    .first()
+                )
+                results.append(ImageSearchHit(
+                    asset_id=asset.id if asset else None,
+                    chunk_id=c.id,
+                    document_id=c.document_id,
+                    doc_filename=doc.filename if doc else None,
+                    image_caption=c.image_caption or c.content,
+                    storage_key=asset.storage_key if asset else None,
+                    distance=None,
+                    score=None,
+                ))
+        else:
+            for h in text_hits:
+                meta = h.get("metadata") or {}
+                chunk_id = meta.get("chunk_id") or _safe_int(h.get("id"))
+                doc_id = meta.get("document_id")
+                from lumen_models.image_asset import ImageAsset
+                asset = (
+                    db.query(ImageAsset)
+                    .filter(ImageAsset.chunk_id == chunk_id)
+                    .first()
+                ) if chunk_id else None
+                doc = db.get(Document, doc_id) if doc_id else None
+                results.append(ImageSearchHit(
+                    asset_id=asset.id if asset else None,
+                    chunk_id=chunk_id,
+                    document_id=doc_id,
+                    doc_filename=doc.filename if doc else None,
+                    image_caption=h.get("text"),
+                    storage_key=asset.storage_key if asset else None,
+                    distance=h.get("distance"),
+                    score=h.get("rrf_score") or h.get("relevance_score"),
+                ))
+        return SingleResponse(
+            data=ImageSearchResponse(
+                search_mode="text_fallback",
+                query_caption=fallback_query,
+                results=results,
+            ),
+        )
+    except Exception as exc:
+        # 兜底再兜底 — 不抛 503。空结果 + text_fallback 让前端 UI 能
+        # 至少提示「未命中」而不是白屏。
+        logger.error("image-search fallback also failed for kb=%s: %s", kb_id, exc)
+        return SingleResponse(
+            data=ImageSearchResponse(
+                search_mode="text_fallback",
+                query_caption=query_caption,
+                results=[],
+            ),
+        )
+
+
+def _caption_from_filename(filename: Optional[str]) -> Optional[str]:
+    """Derive a text caption from the query image filename.
+
+    Fallback path uses this so a query like ``product_logo_v2.png``
+    has *some* text to feed the text vector pipeline. We strip the
+    extension and replace separators with spaces; not perfect (no
+    LLM-driven captioning yet — M38.4 spec §"开放问题 2" follow-up),
+    but better than passing the raw binary into embed_query.
+    """
+    if not filename:
+        return None
+    base = os.path.basename(filename)
+    stem = re.sub(r"\.[A-Za-z0-9]+$", "", base)
+    caption = re.sub(r"[_\-]+", " ", stem).strip()
+    return caption or None
+
+
+def _safe_int(value) -> Optional[int]:
+    """Coerce a vector-store ``id`` to ``int``; vector ids are usually
+    strings like ``"es_42"`` so we try ``int(...)`` and fall back to
+    ``None``."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

@@ -20,6 +20,17 @@ class KnowledgeBaseBase(BaseModel):
     default_parser: Optional[str] = "general"
     chunk_size: int = 500
     chunk_overlap: int = 50
+    # M38.4: 多模态开关。开启后,KB 内的 image 文档会同时写入独立的
+    # multimodal FAISS 索引(`data/multimodal/kb-{id}-mm.faiss`),并
+    # 支持 `POST /image-search`(image-to-image 检索)。
+    multimodal_enabled: bool = Field(
+        False,
+        description="M38.4 多模态开关: True 后 KB 内的图片 chunk 会走独立 multimodal 向量库",
+    )
+    multimodal_config_id: Optional[int] = Field(
+        None,
+        description="M38.4 绑定的 multimodal config id,multimodal_enabled=True 时必填",
+    )
 
 
 class KnowledgeBaseCreate(KnowledgeBaseBase):
@@ -39,6 +50,11 @@ class KnowledgeBaseUpdate(BaseModel):
     default_parser: Optional[str] = None
     chunk_size: Optional[int] = None
     chunk_overlap: Optional[int] = None
+    # M38.4: 多模态开关与绑定的 config id。两者互不影响 — 用户可
+    # 单开 multimodal_enabled 后再绑 config(开但没 config 时新上传
+    # image 文档不会被 multimodal 索引,gracefully degraded)。
+    multimodal_enabled: Optional[bool] = None
+    multimodal_config_id: Optional[int] = None
 
 
 class KnowledgeBaseResponse(KnowledgeBaseBase):
@@ -82,6 +98,14 @@ class ChunkResponse(BaseModel):
     # grey out rows that the embedder rejected. Frontend uses
     # string equality with the backend (currently 'ok' | 'failed').
     embedding_status: Optional[str] = None
+    # M38.4: 模态字段 —— text / image / audio / video。默认 'text'
+    # 让 legacy chunk 行为不变;Excel 走 'text' + sheet_name;PPT
+    # 抽出图走 'image' + page_number + image_caption。frontend 用
+    # modality 决定要不要走 image gallery 而不是 text diff view。
+    modality: str = "text"
+    sheet_name: Optional[str] = None
+    page_number: Optional[int] = None
+    image_caption: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -193,3 +217,64 @@ class FAQBulkImportResult(BaseModel):
         default_factory=list,
         description="Per-row validation errors: [{row_index, reason}, ...]",
     )
+
+
+# -------------------------------------------------------------- M38.4: Images
+
+
+class ImageAssetResponse(BaseModel):
+    """One image row for the gallery endpoint.
+
+    镜像 ``ImageAsset`` ORM 1:1 + ``doc_filename`` 通过 JOIN Document
+    填进来,前端 gallery 直接渲染。``embedding_status`` 让 UI 知道
+    「暂未索引」(multimodal embedder 失败时设 'failed')。
+    """
+    id: int
+    document_id: int
+    chunk_id: Optional[int] = None
+    # PPT 抽出图时存源页码(1-based);独立上传的图片为 NULL。
+    original_doc_page: Optional[int] = None
+    storage_key: str
+    width: Optional[int] = None
+    height: Optional[int] = None
+    mime_type: Optional[str] = None
+    file_size: Optional[int] = None
+    caption: Optional[str] = None
+    embedding_status: str = "pending"  # pending | ok | failed
+    doc_filename: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ImageSearchHit(BaseModel):
+    """One hit returned by ``POST /knowledge/{kb_id}/image-search``."""
+    asset_id: Optional[int] = None
+    chunk_id: Optional[int] = None
+    document_id: Optional[int] = None
+    doc_filename: Optional[str] = None
+    image_caption: Optional[str] = None
+    storage_key: Optional[str] = None
+    # 内积距离(FAISS IndexFlatIP)。score = -distance,值越大越相似。
+    distance: Optional[float] = None
+    score: Optional[float] = None
+
+
+class ImageSearchResponse(BaseModel):
+    """Body of ``POST /knowledge/{kb_id}/image-search``.
+
+    ``search_mode`` 区分走的是 multimodal embedding(真 image-to-image
+    检索)还是 text fallback —— fallback 时 admin UI 应提示用户「多模态
+    模型未就绪,已用文字描述匹配」,但不抛 503(graceful degradation)。
+    """
+    search_mode: str  # "multimodal" | "text_fallback"
+    query_caption: Optional[str] = None
+    results: List[ImageSearchHit] = Field(default_factory=list)
+
+
+class ImageUploadResponse(BaseModel):
+    """Body of ``POST /knowledge/{kb_id}/images/upload``."""
+    document_id: int
+    task_id: Optional[str] = None
+    status: str

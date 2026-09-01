@@ -1,7 +1,7 @@
 import logging
 import os
 import uuid
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from lumen_tasks.celery_app import celery_app
 from lumen_core.config import settings
@@ -34,6 +34,175 @@ import lumen_tools  # noqa: F401
 import lumen_tools.vector_store_factory  # noqa: F401
 
 logger = logging.getLogger(__name__)
+
+
+def _persist_ppt_image_assets(
+    db,
+    parse_result: Dict[str, Any],
+    document_id: int,
+    tenant_id: int,
+    kb_id: int,
+) -> List[int]:
+    """M38.4: 把 PPT/Image parser 抽出的图落到 image_assets 表 + storage。
+
+    每张抽出的图:
+    1. ``storage.put_object`` 写到 ``uploads/<tenant>/<kb>/images/<doc>/<slide_dedup_key>.<ext>``
+    2. 写 ``ImageAsset`` row,``chunk_id`` 暂时 NULL(worker 在 chunks 创建
+       之后会按 ``page_number`` 回填)
+    3. 返回 ``original_doc_page`` 列表(给 worker 后段 image chunks 配对用)
+
+    失败:storage 写不进去时整个 doc 不卡(已失败有其他原因兜底),但
+    ``ImageAsset`` row 会落 ``embedding_status='failed'`` + 留 storage_key
+    方便后续 retry。
+    """
+    metadata = parse_result.get("metadata") or {}
+    image_assets_meta = metadata.get("image_assets") or []
+    if not image_assets_meta:
+        return []
+
+    from lumen_models.image_asset import ImageAsset
+    from lumen_services.storage import get_storage_backend
+
+    storage = get_storage_backend()
+    pages: List[int] = []
+
+    for asset_meta in image_assets_meta:
+        try:
+            dedup_key = asset_meta.get("slide_dedup_key", "img")
+            ext = asset_meta.get("extension", "png")
+            storage_key = (
+                f"uploads/{tenant_id}/{kb_id}/images/{document_id}/"
+                f"{dedup_key}.{ext}"
+            )
+            image_bytes = asset_meta.get("bytes")
+            if not image_bytes:
+                logger.warning(
+                    "[doc %s] image asset %s missing bytes — skipping storage upload",
+                    document_id, dedup_key,
+                )
+                continue
+            storage.put_object(storage_key, image_bytes)
+
+            asset_row = ImageAsset(
+                document_id=document_id,
+                chunk_id=None,  # 后面 worker 用 page_number 回填
+                original_doc_page=asset_meta.get("page_number"),
+                storage_key=storage_key,
+                width=asset_meta.get("width"),
+                height=asset_meta.get("height"),
+                mime_type=asset_meta.get("mime"),
+                file_size=asset_meta.get("size_bytes"),
+                caption=dedup_key.replace("_", " "),
+                embedding_status="pending",
+            )
+            db.add(asset_row)
+            pages.append(asset_meta.get("page_number"))
+        except Exception as exc:
+            logger.warning(
+                "[doc %s] failed to persist PPT image asset: %s",
+                document_id, exc,
+            )
+            continue
+
+    try:
+        db.commit()
+    except Exception as exc:
+        logger.warning(
+            "[doc %s] image_assets commit failed (non-fatal): %s",
+            document_id, exc,
+        )
+        db.rollback()
+    return pages
+
+
+def _dispatch_multimodal_embeddings(
+    db,
+    image_chunks: List,
+    kb_id: int,
+    tenant_id: int,
+    document_id: int,
+    mm_config_id: int,
+) -> None:
+    """M38.4: 给 image chunks 跑 multimodal embedder,写到独立向量库。
+
+    失败语义:不影响 doc.status('completed' 仍保留);失败的 image
+    asset / chunk 的 ``embedding_status`` 翻 ``'failed'``,搜不到但
+    UI 仍能展示原图(spec §10 risk 3)。
+
+    caption 走 ``embed_text``(同向量空间;Step 3 ABC 确认 text + image
+    共享 dim)。这意味着 caption 质量决定搜索精度,v2 接 LLM 生成。
+    """
+    if not image_chunks:
+        return
+
+    from lumen_services.multimodal_embedders import (
+        get_multimodal_embedder,
+        MultimodalEmbeddingError,
+        UnsupportedProviderError,
+    )
+    from lumen_services.multimodal_vector_store_factory import (
+        MultimodalVectorStoreFactory,
+    )
+
+    try:
+        embedder, dim = get_multimodal_embedder(mm_config_id, db)
+    except (MultimodalEmbeddingError, UnsupportedProviderError, NotImplementedError) as exc:
+        logger.warning(
+            "[doc %s] multimodal embedder load failed: %s",
+            document_id, exc,
+        )
+        for c in image_chunks:
+            c.embedding_status = "failed"
+        db.commit()
+        return
+
+    captions = [c.image_caption or c.content or "" for c in image_chunks]
+    try:
+        vectors = [embedder.embed_text(cap) for cap in captions]
+    except Exception as exc:
+        logger.warning(
+            "[doc %s] multimodal embed_text failed: %s",
+            document_id, exc,
+        )
+        for c in image_chunks:
+            c.embedding_status = "failed"
+        db.commit()
+        return
+
+    try:
+        mm_store = MultimodalVectorStoreFactory.get_store(kb_id, dim)
+        metadatas = [
+            {
+                "chunk_id": c.id,
+                "document_id": document_id,
+                "tenant_id": tenant_id,
+                "kb_id": kb_id,
+                "modality": "image",
+            }
+            for c in image_chunks
+        ]
+        mm_store.add_texts(captions, metadatas, vectors=vectors)
+
+        # 落库 embedding_status='ok' + 同步 ImageAsset
+        from lumen_models.image_asset import ImageAsset
+        for c in image_chunks:
+            c.embedding_status = "ok"
+            asset = (
+                db.query(ImageAsset)
+                .filter(ImageAsset.chunk_id == c.id)
+                .first()
+            )
+            if asset:
+                asset.embedding_status = "ok"
+        db.commit()
+    except Exception as exc:
+        logger.warning(
+            "[doc %s] multimodal vector store write failed: %s",
+            document_id, exc,
+        )
+        for c in image_chunks:
+            c.embedding_status = "failed"
+        db.commit()
 
 
 def _emit_notification(db, task_params, doc, error: bool = False) -> None:
@@ -233,6 +402,24 @@ def process_document_task(self, task_params: Dict[str, Any]) -> Dict[str, Any]:
         text_content = parse_result.get("text", "")
         parse_error = (parse_result.get("metadata") or {}).get("parse_error")
 
+        # M38.4 (2026-09-01): PPT/Image parser 抽出的图先落 storage + image_assets。
+        # 必须在 chunk 创建之前跑,因为 image chunk 之后要按 page_number 回填
+        # asset.chunk_id。失败不阻塞 — doc 仍然能处理 text chunks。
+        if doc_type in ("ppt", "pptx") or doc_type == "image":
+            try:
+                _persist_ppt_image_assets(
+                    db=db,
+                    parse_result=parse_result,
+                    document_id=document_id,
+                    tenant_id=tenant_id,
+                    kb_id=kb_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[Task %s] image asset persistence failed (non-fatal): %s",
+                    task_id, exc,
+                )
+
         if not text_content or parse_error:
             # Docling fell back to a raw text read and either produced
             # nothing usable (e.g. binary PDF read as latin-1) or
@@ -370,6 +557,57 @@ def process_document_task(self, task_params: Dict[str, Any]) -> Dict[str, Any]:
                 pass
         except Exception as e:
             logger.warning(f"[Task {task_id}] BM25 index update failed (non-fatal): {e}")
+
+        # M38.4 (2026-09-01): image chunks 配对 image_assets + multimodal
+        # embedding dispatch。配对策略:image chunk 按 ``page_number`` 升
+        # 序,asset 列表也按 ``original_doc_page`` 升序,按 index 一一对应
+        # (PPT 抽出图在 parser 里按 (page, shape) 顺序产出,跟 chunks
+        # 顺序一致)。
+        image_chunks = [c for c in chunks if c.modality == "image"]
+        if image_chunks:
+            from lumen_models.image_asset import ImageAsset
+            assets = (
+                db.query(ImageAsset)
+                .filter(
+                    ImageAsset.document_id == document_id,
+                    ImageAsset.chunk_id.is_(None),
+                )
+                .order_by(ImageAsset.original_doc_page.asc(), ImageAsset.id.asc())
+                .all()
+            )
+            # 按 (page, id) 排好 image chunks,逐个回填
+            sorted_image_chunks = sorted(
+                image_chunks,
+                key=lambda c: (c.page_number or 0, c.id or 0),
+            )
+            for chunk, asset in zip(sorted_image_chunks, assets):
+                asset.chunk_id = chunk.id
+            try:
+                db.commit()
+            except Exception as exc:
+                logger.warning(
+                    "[Task %s] image_asset.chunk_id backfill failed: %s",
+                    task_id, exc,
+                )
+                db.rollback()
+
+            # multimodal dispatch(KB 启用了 multimodal 才跑)
+            kb_row = doc.knowledge_base
+            if kb_row and kb_row.multimodal_enabled and kb_row.multimodal_config_id:
+                try:
+                    _dispatch_multimodal_embeddings(
+                        db=db,
+                        image_chunks=sorted_image_chunks,
+                        kb_id=kb_id,
+                        tenant_id=tenant_id,
+                        document_id=document_id,
+                        mm_config_id=kb_row.multimodal_config_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[Task %s] multimodal dispatch failed (non-fatal): %s",
+                        task_id, exc,
+                    )
 
         # Update document status to completed — but don't clobber the
         # 'failed' status set above when embedding raised.

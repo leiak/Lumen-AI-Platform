@@ -124,3 +124,8 @@ router.include_router(folders.router)
 #   /api/v1/workspaces/{id}/transfer-ownership   (POST transfer)
 from . import workspace_members  # noqa: E402
 router.include_router(workspace_members.router)
+
+# M38.4: Multimodal embedding config CRUD
+#   /api/v1/multimodal-configs/*  (list / get / create / update / delete / test)
+from . import multimodal_configs  # noqa: E402
+router.include_router(multimodal_configs.router)

@@ -127,6 +127,33 @@ class PPTParser(BaseParser):
                         }
                     )
 
+        # M38.4 (2026-09-01): emit one ``image`` chunk per extracted
+        # picture so downstream search can filter ``modality == 'image'``
+        # and the multimodal embedder can index these alongside standalone
+        # image uploads. ``content`` carries the slide_dedup_key so the
+        # caption text reflects the source position — until the worker
+        # LLM-generates richer captions in v2 the dedup key ("slide 3
+        # image 2") is the only descriptive anchor we have.
+        for image_record in image_assets:
+            caption_anchor = image_record.get("slide_dedup_key", "").replace("_", " ")
+            chunk_records.append({
+                "content": caption_anchor,
+                "chunk_index": len(chunk_records),
+                "length": len(caption_anchor),
+                "strategy": "ppt_image",
+                "modality": "image",
+                "sheet_name": None,
+                "page_number": image_record.get("page_number"),
+                "image_caption": caption_anchor,
+                "chunk_metadata": {
+                    "kind": "ppt_image",
+                    "page_number": image_record.get("page_number"),
+                    "slide_dedup_key": image_record.get("slide_dedup_key"),
+                    "shape_index": image_record.get("shape_index"),
+                    "mime": image_record.get("mime"),
+                },
+            })
+
         joined_text = "\n\n".join(c["content"] for c in chunk_records)
         return {
             "text": joined_text,

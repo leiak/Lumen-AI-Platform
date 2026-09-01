@@ -113,6 +113,12 @@ class ElasticsearchVectorStore(VectorStoreBase):
                         "kb_id": {"type": "integer", "index": True},
                         "document_id": {"type": "integer", "index": True},
                         "chunk_id": {"type": "integer", "index": True},
+                        # M38.4: modality 字段 — keyword type 让 ES
+                        # ``term`` query 直接命中("image" / "text")。
+                        # 旧索引没这个字段时 ES term query 会返 0 hits
+                        # —— 这是正确的语义:modality filter 不应该
+                        # 把 pre-M38.4 chunks 拉进来。
+                        "modality": {"type": "keyword", "index": True},
                         "metadata": {"type": "object", "enabled": True}
                     }
                 }
@@ -149,6 +155,7 @@ class ElasticsearchVectorStore(VectorStoreBase):
         - kb_id == Y
         - document_id == Z
         - tenant_id == X and kb_id == Y
+        - modality == 'image'  (M38.4 — single or double quoted string)
         """
         if not filter_expr:
             return {}
@@ -173,6 +180,13 @@ class ElasticsearchVectorStore(VectorStoreBase):
             id_matches = re.findall(r'\d+', subquery)
             if id_matches:
                 must_clauses.append({"terms": {"document_id": [int(i) for i in id_matches]}})
+
+        # M38.4: modality is a quoted string. 'image' / "text" 等,
+        # term query 直接命中 keyword field。character class 不允许
+        # 嵌套引号,防注入 "image'); DROP"。
+        modality_match = re.search(r"""modality\s*==\s*['"]([^'"]+)['"]""", filter_expr)
+        if modality_match:
+            must_clauses.append({"term": {"modality": modality_match.group(1)}})
 
         if must_clauses:
             return {"bool": {"must": must_clauses}}
@@ -219,6 +233,11 @@ class ElasticsearchVectorStore(VectorStoreBase):
                     "kb_id": metadatas[i].get("kb_id"),
                     "document_id": metadatas[i].get("document_id"),
                     "chunk_id": metadatas[i].get("chunk_id"),
+                    # M38.4: 顶层 modality 字段让 ES term query 直接命中
+                    # ``?modality=image`` filter。legacy chunk 没这个
+                    # 字段时 ES 返 0 hits(modality filter 本就不该
+                    # 把 pre-M38.4 chunks 拉进来)。
+                    "modality": metadatas[i].get("modality", "text"),
                     "metadata": metadatas[i]
                 }
 

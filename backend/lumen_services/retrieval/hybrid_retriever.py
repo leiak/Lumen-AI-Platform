@@ -18,26 +18,59 @@ logger = logging.getLogger(__name__)
 DEFAULT_RRF_K = 60
 
 
-def _normalise_filter(filter_expr: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
-    """Parse the ``tenant_id == X and kb_id == Y`` filter expression."""
+def _normalise_filter(filter_expr: Optional[str]) -> Tuple[Optional[int], Optional[int], Optional[str]]:
+    """Parse the ``tenant_id == X and kb_id == Y and modality == 'image'`` filter expression.
+
+    Returns ``(tenant_id, kb_id, modality)``. ``modality`` is the string
+    value (e.g. ``"image"``, ``"text"``) — quoted with ``'...'`` or
+    ``"..."``. M38.4 added the third element so callers can filter
+    search results to a single modality (used by ``?modality=image``
+    on ``/search`` and the image-search text-fallback path).
+    """
     if not filter_expr:
-        return None, None
+        return None, None, None
     tenant_id: Optional[int] = None
     kb_id: Optional[int] = None
+    modality: Optional[str] = None
     tenant_match = re.search(r"tenant_id\s*==\s*(\d+)", filter_expr)
     kb_match = re.search(r"kb_id\s*==\s*(\d+)", filter_expr)
+    # Quoted modality — accept single or double quotes so callers can
+    # use whatever the URL feels natural with. The character class
+    # ``[^'"]+`` rejects nested quotes (no injection via "image');").
+    modality_match = re.search(r"""modality\s*==\s*['"]([^'"]+)['"]""", filter_expr)
     if tenant_match:
         tenant_id = int(tenant_match.group(1))
     if kb_match:
         kb_id = int(kb_match.group(1))
-    return tenant_id, kb_id
+    if modality_match:
+        modality = modality_match.group(1)
+    return tenant_id, kb_id, modality
 
 
-def _passes_filter(meta: Dict[str, Any], tenant_id: Optional[int], kb_id: Optional[int]) -> bool:
+def _passes_filter(
+    meta: Dict[str, Any],
+    tenant_id: Optional[int],
+    kb_id: Optional[int],
+    modality: Optional[str] = None,
+) -> bool:
+    """Check meta against tenant/kb/modality constraints.
+
+    M38.4: ``modality`` is an optional 3rd filter — when set, the
+    candidate must have ``meta["modality"] == modality``. Missing
+    ``modality`` key on a meta dict defaults to ``"text"`` (legacy
+    chunks pre-M38.4 don't carry the field) so callers without
+    modality filter still see all rows.
+    """
     if tenant_id is not None and meta.get("tenant_id") != tenant_id:
         return False
     if kb_id is not None and meta.get("kb_id") != kb_id:
         return False
+    if modality is not None:
+        # Default to "text" when key absent — legacy chunks have no
+        # modality field but Pydantic ORM defaults fill it on read.
+        meta_modality = meta.get("modality", "text")
+        if meta_modality != modality:
+            return False
     return True
 
 
@@ -101,6 +134,7 @@ class HybridRetriever:
         k: int,
         tenant_id: Optional[int],
         kb_id: Optional[int],
+        modality: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         if self.bm25_index is None or not getattr(self.bm25_index, "is_available", False):
             return []
@@ -111,7 +145,7 @@ class HybridRetriever:
             return []
         results: List[Dict[str, Any]] = []
         for doc_id, score, meta in raw:
-            if not _passes_filter(meta, tenant_id, kb_id):
+            if not _passes_filter(meta, tenant_id, kb_id, modality):
                 continue
             results.append({
                 "id": str(doc_id),
@@ -138,10 +172,10 @@ class HybridRetriever:
             return []
 
         fetch_k = max(k * candidate_multiplier, k)
-        tenant_id, kb_id = _normalise_filter(filter_expr)
+        tenant_id, kb_id, modality = _normalise_filter(filter_expr)
 
         vector_results = self._vector_search(query, fetch_k, filter_expr)
-        bm25_results = self._bm25_search(query, fetch_k, tenant_id, kb_id)
+        bm25_results = self._bm25_search(query, fetch_k, tenant_id, kb_id, modality)
 
         # If only one side returned, just return that side (truncated to k).
         if not vector_results and not bm25_results:

@@ -194,22 +194,30 @@ class FAISSVectorStore(VectorStoreBase):
                 }
 
                 # Apply client-side filtering if filter_expr is provided
-                # filter_expr format: "tenant_id == X and kb_id == Y"
+                # filter_expr format: "tenant_id == X and kb_id == Y and modality == 'image'"
                 if filter_expr:
                     meta = data['metadata']
                     # Parse tenant_id from filter_expr
                     tenant_match = re.search(r'tenant_id\s*==\s*(\d+)', filter_expr)
                     kb_match = re.search(r'kb_id\s*==\s*(\d+)', filter_expr)
+                    # M38.4: modality is a quoted string ('image' | "image").
+                    # Match either quote style so callers can write naturally.
+                    modality_match = re.search(r"""modality\s*==\s*['"]([^'"]+)['"]""", filter_expr)
 
                     tenant_ok = True
                     kb_ok = True
+                    modality_ok = True
 
                     if tenant_match:
                         tenant_ok = meta.get('tenant_id') == int(tenant_match.group(1))
                     if kb_match:
                         kb_ok = meta.get('kb_id') == int(kb_match.group(1))
+                    if modality_match:
+                        # Default missing 'modality' to 'text' (legacy chunks).
+                        meta_modality = meta.get('modality', 'text')
+                        modality_ok = meta_modality == modality_match.group(1)
 
-                    if tenant_ok and kb_ok:
+                    if tenant_ok and kb_ok and modality_ok:
                         results.append(result)
                 else:
                     results.append(result)

@@ -153,8 +153,12 @@ def test_ppt_parser_extracts_images_into_image_assets(tmp_path):
 
     result = PPTParser().parse(str(out))
 
-    # 3 slide chunks (Intro / image / Outro), no notes chunks, 1 image asset
-    assert len(result["chunks"]) == 3
+    # 3 slide chunks + 1 image chunk (one per extracted picture — M38.4
+    # follow-up so downstream search can filter ``modality == 'image'``);
+    # no notes chunks; 1 image asset.
+    assert len(result["chunks"]) == 4
+    image_chunks = [c for c in result["chunks"] if c.get("modality") == "image"]
+    assert len(image_chunks) == 1
     assert "image_assets" in result
     assert len(result["image_assets"]) == 1
 
