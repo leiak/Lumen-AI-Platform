@@ -1,5 +1,14 @@
 import os
 
+from dotenv import load_dotenv
+
+# 加载 backend/.env 到 os.environ,确保 lumen_services.storage 等用
+# os.getenv 直接读 STORAGE_BACKEND / S3_* / DATABASE_URL 等模块能拿到值
+# (Settings(BaseSettings, env_file=".env") 自己 parse .env 但不会 publish
+# 到 os.environ;不显式 load_dotenv 的话改 .env 必须手动 export 才能生效)。
+# 依赖 uvicorn 启动时 cwd 是 backend/(本仓库 dev 启动惯例)。
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from lumen_core.config import settings

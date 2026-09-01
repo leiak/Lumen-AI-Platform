@@ -541,6 +541,11 @@ def test_reset_storage_backend_re_reads_env(monkeypatch, tmp_path: Path):
     from lumen_services.storage import get_storage_backend, reset_storage_backend
     from lumen_services.storage.local_backend import LocalBackend
 
+    # conftest.py 强制 import lumen_main,会顺带触发我新加的 load_dotenv()
+    # 把 backend/.env 的 STORAGE_BACKEND=s3 写进 pytest 进程 OS env ——
+    # 不显式设 local 的话,下面 get_storage_backend() 拿到 S3Backend,
+    # S3Backend 没有 .root 属性,line 547 的 assert 直接 AttributeError。
+    monkeypatch.setenv("STORAGE_BACKEND", "local")
     monkeypatch.setenv("STORAGE_LOCAL_ROOT", str(tmp_path / "first"))
     reset_storage_backend()
     a = get_storage_backend()
