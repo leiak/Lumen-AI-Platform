@@ -14,6 +14,27 @@ class DocumentParser:
             '.md': 'markdown',
             '.html': 'html',
             '.htm': 'html',
+            # M38.4 (2026-09-01) — multimodal formats. The downstream
+            # dispatch (DocumentParserFactory.get_parser) maps these
+            # extensions to ``excel`` / ``ppt`` / ``image`` parser
+            # types. ``doc_format`` below is also passed to the parser
+            # via ``result["metadata"]["format"]`` so chunk_metadata
+            # can carry the MIME family alongside the parser's own
+            # ``type`` field (which is the *parser* type, e.g. "excel").
+            '.xlsx': 'xlsx',
+            '.xls': 'xls',
+            '.xlsm': 'xlsx',
+            '.pptx': 'pptx',
+            '.ppt': 'ppt',
+            '.pptm': 'pptx',
+            '.png': 'image',
+            '.jpg': 'image',
+            '.jpeg': 'image',
+            '.webp': 'image',
+            '.gif': 'image',
+            '.bmp': 'image',
+            '.tiff': 'image',
+            '.tif': 'image',
         }
 
     def parse(
@@ -71,8 +92,32 @@ class DocumentParser:
             if storage_key and storage_key_used:
                 result["metadata"]["storage_key"] = storage_key
 
-            # Extract chunks based on document type
-            result["chunks"] = self._create_chunks(result["text"], parser.get_type())
+            # Extract chunks based on document type — but only if the
+            # parser didn't already produce authoritative chunks.
+            # M38.4 multimodal parsers (Excel/PPT/Image) carry their
+            # own ``chunks`` + ``chunk_metadata`` lists with sheet /
+            # slide / modality hints that the secondary text-split
+            # pass would shred. ``preserves_chunks`` (BaseParser class
+            # attr, default False) signals trust the parser's output.
+            if getattr(parser, "preserves_chunks", False):
+                logger.debug(
+                    "parser %s marked preserves_chunks=True; skipping secondary split",
+                    parser.get_type(),
+                )
+                # Defensive: if the multimodal parser forgot to populate
+                # ``chunks`` (programmer error), fall back to the
+                # legacy path so we never commit zero chunks.
+                if not result.get("chunks"):
+                    logger.warning(
+                        "parser %s has preserves_chunks=True but returned no chunks; "
+                        "falling back to legacy text-split",
+                        parser.get_type(),
+                    )
+                    result["chunks"] = self._create_chunks(
+                        result["text"], parser.get_type()
+                    )
+            else:
+                result["chunks"] = self._create_chunks(result["text"], parser.get_type())
 
             return result
         except Exception as e:
@@ -164,6 +209,14 @@ class DocumentParser:
             "qa": "semantic",
             "table": "fixed",
             "general": "fixed",
+            # M38.4 (2026-09-01) — multimodal parsers carry their own
+            # chunks via ``preserves_chunks=True`` and never reach this
+            # path. Listed here as a no-op fallback so a future caller
+            # that bypasses the parser flag (e.g. unit tests) still
+            # gets a sensible default rather than ``fixed``.
+            "excel": "fixed",
+            "ppt": "fixed",
+            "image": "fixed",
         }
 
         strategy = strategy_map.get(doc_type, "fixed")

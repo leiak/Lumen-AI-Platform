@@ -134,6 +134,18 @@ def process_document_task(self, task_params: Dict[str, Any]) -> Dict[str, Any]:
     # upload returned "queued" but doc stuck in pending because the
     # celery worker raised before any status update).
     from lumen_models.workspace import DocumentFolder, Workspace  # noqa: F401  # M38.2: documents.folder_id / workspaces.owner_id
+    # M38.4 (2026-09-01): MultimodalEmbeddingConfig is a FK target of
+    # ``knowledge_bases.multimodal_config_id`` and ImageAsset holds
+    # ``document_id`` / ``chunk_id`` FKs to documents/document_chunks.
+    # Without these imports the KB's multimodal relationship lookup
+    # (during parser dispatch for PPT-extracted images) raises
+    # ``InvalidRequestError: Mapper 'mapped class ImageAsset' has no
+    # property 'document'`` at mapper-configure time. Extend this
+    # block whenever a new FK or relationship on multimodal models
+    # is added — the M38.2 incident with ``DocumentFolder`` is the
+    # cautionary tale (forgotten import → queued-but-stuck doc).
+    from lumen_models.multimodal_embedding_config import MultimodalEmbeddingConfig  # noqa: F401  # M38.4: KB.multimodal_config_id
+    from lumen_models.image_asset import ImageAsset  # noqa: F401  # M38.4: image_assets.document_id / .chunk_id
     from lumen_services.document_parser import DocumentParser
     from lumen_services.knowledge_service import KnowledgeService
     from lumen_tools.vector_store_factory import VectorStoreFactory
@@ -251,6 +263,19 @@ def process_document_task(self, task_params: Dict[str, Any]) -> Dict[str, Any]:
                     content=chunk_info["content"],
                     chunk_index=chunk_info["chunk_index"],
                     document_id=document_id,
+                    # M38.4 (2026-09-01) — multimodal chunk fields. The
+                    # legacy 6 parsers (general/paper/qa/table/manual/laws)
+                    # never set these so ``.get(..., default)`` leaves
+                    # them at the SQLAlchemy column defaults (text / NULL /
+                    # NULL / NULL) — which matches pre-M38.4 row shape
+                    # exactly. The 3 new parsers (excel/ppt/image) pass
+                    # modality / sheet_name / page_number / image_caption
+                    # through ``chunk_info`` directly so cross-modal search
+                    # and the Excel/PPT detail pages can filter on these.
+                    modality=chunk_info.get("modality", "text"),
+                    sheet_name=chunk_info.get("sheet_name"),
+                    page_number=chunk_info.get("page_number"),
+                    image_caption=chunk_info.get("image_caption"),
                     chunk_metadata={
                         "tenant_id": tenant_id,
                         "strategy": chunk_info.get("strategy", "parser"),

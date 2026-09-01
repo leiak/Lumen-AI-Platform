@@ -6,9 +6,31 @@ from typing import List, Dict, Any, Optional
 import os
 import re
 
+# M38.4 (2026-09-01) — multimodal parsers. The three imports below are
+# deferred to the BOTTOM of this file because each parser file does
+# ``from . import BaseParser`` for class inheritance, and BaseParser
+# isn't defined until later in this module. Importing the parser files
+# at the top would cause a circular import: ``excel_parser`` imports
+# ``BaseParser`` from ``lumen_services.parsers``, but at that point the
+# ``__init__`` is mid-execution and ``BaseParser`` doesn't exist yet in
+# the module namespace. Moved to the end → when the deferred import
+# runs, ``BaseParser`` is already defined.
+
 
 class BaseParser(ABC):
     """解析器基类"""
+
+    #: M38.4 (2026-09-01) — multimodal parsers (Excel / PPT / Image) return
+    #: their own ``chunks`` + ``chunk_metadata`` list from ``parse()``
+    #: because the per-sheet / per-slide / per-image boundary IS the
+    #: right chunk boundary; the secondary text-split pass in
+    #: ``DocumentParser._create_chunks`` would shred those boundaries
+    #: (e.g. Excel preview rows merged across sheets, PPT slide text
+    #: joined mid-paragraph). Set this on a parser to tell
+    #: ``DocumentParser.parse()`` to skip the secondary split and trust
+    #: the parser's output verbatim. Default False preserves the legacy
+    #: text → chunking pipeline behaviour for the original 6 parsers.
+    preserves_chunks: bool = False
 
     @abstractmethod
     def parse(self, file_path: str) -> Dict[str, Any]:
@@ -628,6 +650,19 @@ class LawsParser(BaseParser):
         return articles[:100]
 
 
+# M38.4 (2026-09-01) — deferred imports. Each parser file does
+# ``from . import BaseParser`` for class inheritance, and ``BaseParser``
+# is defined ABOVE these imports. Importing the parser modules here
+# (rather than at the top of the file) breaks the would-be circular
+# dependency. The ``DocumentParserFactory`` class lives AFTER these
+# imports so its ``PARSERS`` dict can name the parser classes
+# directly without ``"module:Class"`` string indirection. See the
+# comment near the top of this file for the full rationale.
+from .excel_parser import ExcelParser  # noqa: E402,F401
+from .ppt_parser import PPTParser  # noqa: E402,F401
+from .image_parser import ImageParser  # noqa: E402,F401
+
+
 class DocumentParserFactory:
     """文档解析器工厂"""
 
@@ -638,6 +673,13 @@ class DocumentParserFactory:
         "table": TableParser,
         "manual": ManualParser,
         "laws": LawsParser,
+        # M38.4 (2026-09-01) — multimodal parsers. All three set
+        # ``preserves_chunks=True`` so the secondary text-split in
+        # ``DocumentParser._create_chunks`` doesn't shred their
+        # per-sheet / per-slide / per-image boundaries.
+        "excel": ExcelParser,
+        "ppt": PPTParser,
+        "image": ImageParser,
     }
 
     # 文件名模式到解析器类型的映射
@@ -665,6 +707,27 @@ class DocumentParserFactory:
         "laws": [
             r"law", r" Laws", r"legal", r"contract", r"agreement",
             r"法律", r"法规", r"条款", r"合同", r"协议"
+        ],
+        # M38.4 (2026-09-01) — multimodal parser routing. We route by
+        # filename because ``DocumentParserFactory.detect_doc_type``
+        # is filename-only (content sniffing makes no sense for binary
+        # Excel / PPT / image files). The filename patterns here are
+        # *intentionally* simple — the upstream ``DocumentParser`` also
+        # dispatches by extension (``supported_formats``) before
+        # auto-detect runs, so a file with no ``xlsx`` extension is
+        # rejected before this table is consulted.
+        "excel": [
+            r"\.xlsx$", r"\.xls$", r"\.xlsm$",
+            r"excel", r"spreadsheet", r"数据表", r"报价",
+        ],
+        "ppt": [
+            r"\.pptx$", r"\.ppt$", r"\.pptm$",
+            r"slides?", r"deck", r"演示", r"汇报",
+        ],
+        "image": [
+            r"\.png$", r"\.jpe?g$", r"\.webp$", r"\.gif$",
+            r"\.bmp$", r"\.tiff?$",
+            r"image", r"图片", r"截图", r"logo", r"海报",
         ],
     }
 
@@ -807,4 +870,11 @@ class DocumentParserFactory:
             {"type": "table", "label": "表格文档", "description": "保留表格结构，提取表格内容"},
             {"type": "manual", "label": "用户手册", "description": "提取操作步骤和警告信息"},
             {"type": "laws", "label": "法律文档", "description": "保留条款结构，提取法律条款"},
+            # M38.4 (2026-09-01) — multimodal types. Frontend renders
+            # ``image`` with a "📊" tag (per spec §4.4) and the
+            # chunking_service routes these via ``preserves_chunks``
+            # so per-sheet / per-slide / per-image boundaries survive.
+            {"type": "excel", "label": "Excel 表格", "description": "每个 sheet 一个 chunk;header + 前 50 行摘要"},
+            {"type": "ppt", "label": "PPT 演示", "description": "每页一个 chunk;speaker_notes 单独 chunk;图片抽出"},
+            {"type": "image", "label": "图片", "description": "单图片 → 1 个 image chunk;caption 走文件名占位 (v2 接 LLM)"},
         ]

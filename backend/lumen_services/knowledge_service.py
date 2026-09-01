@@ -232,10 +232,21 @@ class KnowledgeService:
 
         chunk_records = []
         for chunk_info in chunk_results:
+            # M38.4 (2026-09-01) — multimodal chunk fields. The legacy
+            # ``fixed`` / ``semantic`` / ``document_structure`` chunking
+            # strategies never populate ``modality`` / ``sheet_name`` /
+            # ``page_number`` / ``image_caption``, so the ``.get(..., default)``
+            # pattern keeps the legacy path unchanged while letting a
+            # future caller hand us parser-produced chunks directly
+            # (e.g. through ``KnowledgeService.index_chunks``).
             chunk = DocumentChunk(
                 content=chunk_info["content"],
                 chunk_index=chunk_info["chunk_index"],
                 document_id=document_id,
+                modality=chunk_info.get("modality", "text"),
+                sheet_name=chunk_info.get("sheet_name"),
+                page_number=chunk_info.get("page_number"),
+                image_caption=chunk_info.get("image_caption"),
                 chunk_metadata={
                     "tenant_id": tenant_id,
                     "strategy": chunk_info["strategy"],

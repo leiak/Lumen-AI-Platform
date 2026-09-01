@@ -33,6 +33,15 @@ docling==2.24.0
 # Used by parsers/__init__.py:_parse_with_docx_fallback Level 2.
 python-docx==1.2.0
 
+# M38.4: multimodal parsers (Excel / PPT / Image) — Pillow is shared with
+# Step 3 multimodal embedders (PIL image input). openpyxl + python-pptx
+# previously came in transitively via docling; we pin them explicitly now
+# so dev / prod don't rely on transitive resolution and can ``pip install``
+# just the new parser stack on a stripped image.
+Pillow>=10.0.0,<12.0
+openpyxl>=3.1.0,<4.0
+python-pptx>=1.0.0,<2.0
+
 # Vector Database
 pymilvus==2.4.8
 elasticsearch>=8.0.0,<9.0.0
