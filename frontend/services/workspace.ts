@@ -14,7 +14,7 @@ import type {
 } from "@/types/workspace";
 import type { ApiResponse, PaginatedResponse } from "@/types/api";
 
-const BASE = "/api/v1/workspaces";
+const BASE = "/workspaces";
 
 export interface ListWorkspacesParams {
   page?: number;

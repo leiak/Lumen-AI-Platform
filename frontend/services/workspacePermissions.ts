@@ -46,7 +46,7 @@ export async function listMembers(
   workspaceId: number,
 ): Promise<WorkspaceMembersResponse> {
   return unwrap<WorkspaceMembersResponse>(
-    api.get(`/api/v1${WORKSPACE_BASE(workspaceId)}`),
+    api.get(`${WORKSPACE_BASE(workspaceId)}`),
   );
 }
 
@@ -55,7 +55,7 @@ export async function inviteMember(
   payload: MemberInvitePayload,
 ): Promise<WorkspaceMember> {
   return unwrap<WorkspaceMember>(
-    api.post(`/api/v1${WORKSPACE_BASE(workspaceId)}`, payload),
+    api.post(`${WORKSPACE_BASE(workspaceId)}`, payload),
   );
 }
 
@@ -65,7 +65,7 @@ export async function updateMember(
   payload: MemberUpdatePayload,
 ): Promise<WorkspaceMember> {
   return unwrap<WorkspaceMember>(
-    api.put(`/api/v1${WORKSPACE_BASE(workspaceId)}/${userId}`, payload),
+    api.put(`${WORKSPACE_BASE(workspaceId)}/${userId}`, payload),
   );
 }
 
@@ -74,7 +74,7 @@ export async function removeMember(
   userId: number,
 ): Promise<{ removed: boolean }> {
   return unwrap<{ removed: boolean }>(
-    api.delete(`/api/v1${WORKSPACE_BASE(workspaceId)}/${userId}`),
+    api.delete(`${WORKSPACE_BASE(workspaceId)}/${userId}`),
   );
 }
 
@@ -83,12 +83,12 @@ export async function transferOwnership(
   payload: TransferOwnershipPayload,
 ): Promise<{ workspace_id: number; owner_id: number }> {
   return unwrap<{ workspace_id: number; owner_id: number }>(
-    api.post(`/api/v1/workspaces/${workspaceId}/transfer-ownership`, payload),
+    api.post(`/workspaces/${workspaceId}/transfer-ownership`, payload),
   );
 }
 
 export async function fetchMyWorkspacePermissions(): Promise<WorkspaceMyPermissionsResponse> {
-  return unwrap<WorkspaceMyPermissionsResponse>(api.get(`/api/v1${ME_WORKSPACES}`));
+  return unwrap<WorkspaceMyPermissionsResponse>(api.get(ME_WORKSPACES));
 }
 
 /** 在 client 侧展开 implication 链(与后端 _PERM_IMPLIES 镜像)。 */

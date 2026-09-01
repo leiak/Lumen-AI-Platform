@@ -65,7 +65,7 @@ describe("workspacePermissions service — endpoint envelope 解析", () => {
     const out = await listMembers(10);
     expect(out.members).toHaveLength(1);
     expect(out.members[0].is_owner).toBe(true);
-    expect(hoisted.getMock).toHaveBeenCalledWith("/api/v1/workspaces/10/members");
+    expect(hoisted.getMock).toHaveBeenCalledWith("/workspaces/10/members");
   });
 
   it("inviteMember POST 走 /workspaces/{id}/members 整组 payload", async () => {
@@ -86,7 +86,7 @@ describe("workspacePermissions service — endpoint envelope 解析", () => {
       permissions: ["workspace.read", "kb.read"],
     });
     expect(hoisted.postMock).toHaveBeenCalledWith(
-      "/api/v1/workspaces/10/members",
+      "/workspaces/10/members",
       expect.objectContaining({ user_id: 7 }),
     );
   });
@@ -106,7 +106,7 @@ describe("workspacePermissions service — endpoint envelope 解析", () => {
     });
     await updateMember(10, 7, { permissions: ["kb.update"] });
     expect(hoisted.putMock).toHaveBeenCalledWith(
-      "/api/v1/workspaces/10/members/7",
+      "/workspaces/10/members/7",
       { permissions: ["kb.update"] },
     );
   });
@@ -118,7 +118,7 @@ describe("workspacePermissions service — endpoint envelope 解析", () => {
     const out = await removeMember(10, 7);
     expect(out.removed).toBe(true);
     expect(hoisted.deleteMock).toHaveBeenCalledWith(
-      "/api/v1/workspaces/10/members/7",
+      "/workspaces/10/members/7",
     );
   });
 
@@ -129,7 +129,7 @@ describe("workspacePermissions service — endpoint envelope 解析", () => {
     const out = await transferOwnership(10, { new_owner_id: 8 });
     expect(out.owner_id).toBe(8);
     expect(hoisted.postMock).toHaveBeenCalledWith(
-      "/api/v1/workspaces/10/transfer-ownership",
+      "/workspaces/10/transfer-ownership",
       { new_owner_id: 8 },
     );
   });
@@ -146,7 +146,7 @@ describe("workspacePermissions service — endpoint envelope 解析", () => {
     });
     const out = await fetchMyWorkspacePermissions();
     expect(out.workspaces[0].workspace_id).toBe(10);
-    expect(hoisted.getMock).toHaveBeenCalledWith("/api/v1/auth/me/workspaces");
+    expect(hoisted.getMock).toHaveBeenCalledWith("/auth/me/workspaces");
   });
 
   it("4xx detail 是 string → reject 时 Error.message 是 detail", async () => {
