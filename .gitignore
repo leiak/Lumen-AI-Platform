@@ -52,7 +52,7 @@ backend/storage/generated_images/**/*.jpeg
 backend/storage/generated_images/**/*.webp
 backend/storage/generated_images/**/*.gif
 
-# Root storage/ — dev helper scripts (run_mcp.ps1 / run_test.ps1 / test_sse.sh / uvicorn_restart.log) tracked;
+# Root storage/ — dev helper scripts 已删(2026-09-02 1.0 cleanup)。
 # 运行时生成内容(_tmp/ + 音视频 / 图像素材子目录 + stock music)不进 git
 storage/_tmp/
 storage/generated_audios/
@@ -107,9 +107,9 @@ logs/
 # 1.0 release cleanup — dev-time artifacts NOT shipped to GitHub
 # ============================================================================
 
-# Canonical database schema is tracked at scripts/sql/schema.sql (no data,
-# pure DDL from SHOW CREATE TABLE). Old local full-dump location backend/sql/
-# removed 2026-08-07 in favor of this tracked schema-only file.
+# Canonical database schema: 1.0 cleanup 后不再 tracked,需要时用
+# scripts/dump_dev_db.py 重新生成纯 DDL。Old local full-dump location
+# backend/sql/ removed 2026-08-07,scripts/sql/ removed 2026-09-02。
 # ============================================================================
 # 1.0 release cleanup — dev-time artifacts NOT shipped to GitHub
 # ============================================================================
@@ -166,3 +166,4 @@ backend/run512_results.json
 # Dev debug Playwright/curl 一次性诊断脚本(不是真测试,只是诊断)
 /frontend/e2e/diag-*.cjs
 
+/.run-logs

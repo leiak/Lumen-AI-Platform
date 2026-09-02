@@ -72,9 +72,11 @@ services:
   minio:
     # M38.1 follow-up (2026-08-31): MinIO 自托管,S3-compatible dev 替代。
     # 端口 19000/19001 被同机 IntelliEngine-minio 占用,改为 29000/29001。
+    # 注意:--console-address 必须是容器内部端口(默认 9001),不是 host 端口。
+    # 早期写 ":29001" 是 bug,容器内 console 在 29001 但 host 29001 只 expose 容器 9001,console 不通。
     image: minio/minio:latest
     container_name: lumen-platform-minio
-    command: server /data --console-address ":29001"
+    command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin

@@ -1,6 +1,6 @@
 # Lumen AI Platform
 
-流明企业级 AI Agent 平台,完整自托管:**知识库 RAG**、**AI Agent 对话与团队协作**、**可视化工作流编排**、**MCP 协议集成**、**模型训练**、**Electron 桌面端**、**可嵌入 Chat Widget**、**图片生成**、**TTS 语音合成**、**SRT 字幕生成**、**Playbook 风格系统**、**LLM 调用级可观测性**、**公众号助手**、**智能问数 (Text2SQL)**。
+企业级 AI Agent 平台,完整自托管:**知识库 RAG**、**AI Agent 对话与团队协作**、**可视化工作流编排**、**MCP 协议集成**、**模型训练**、**Electron 桌面端**、**可嵌入 Chat Widget**、**图片生成**、**TTS 语音合成**、**SRT 字幕生成**、**Playbook 风格系统**、**LLM 调用级可观测性**、**公众号助手**、**智能问数 (Text2SQL)**。
 
 ---
 
@@ -37,6 +37,7 @@
 - **LLM 调用级可观测性** — `LoggingChatModel` 代理 5 模块插桩、`llm_call_logs` 表、trace_id 串联、`/dashboard/logs` UI
 - **Embedding 调用可观测性** — `LoggingEmbeddings` 代理 → `embedding_call_logs` 表
 - **Storage 抽象 (M38.1)** — `lumen_services/storage/` 本地 backend + S3 backend 工厂、STORAGE_BACKEND 切换、admin-only migrate-to-s3 endpoint
+- **MinIO 自托管 + Multipart (M38.1.x)** — `lumen-platform-minio` dev 容器(端口 29000/29001,避开同机 IntelliEngine-minio)+ S3Backend multipart upload(阈值 5MB,`create_multipart_upload + upload_part + complete`,异常 abort)+ 真 streaming `get_object_stream`(`StreamingBody` 不缓冲)+ `list_objects` pagination + parsers 适配走 `document_parser.parse(storage_key=...)` 入口(`storage.resolve_to_local_path` 内部下 temp file + finally cleanup,local zero-copy)+ live integration test + 压测基线
 - **多模态 Embedding 选型 (M38.4)** — `jina-clip-v2` 1024 dim(HuggingFace transformers 本地)为主、`clip_base_32` 兜底;`multimodal_embedding_configs` + `image_assets` 表 + KB multimodal_enabled 开关
 - **技能 (Skills)** — 类型化抽象(Prompt / Script / Http / Tool / Knowledge Retrieval / Workflow / Composite)、市场 + 已安装管理、Tool Calling
 - **Embedding 模型管理** — ModelConfig 用途标志、`/models/import-from-ollama` 批量导入、per-KB 工厂;`tenant_id=NULL` 全局 builtin 对所有租户可见
@@ -62,11 +63,12 @@
 | 后端 (uvicorn) | **11335** | `cd backend && uvicorn lumen_main:app --port 11335` |
 | Ollama | **11434** | embedding(`nomic-embed-text`) + chat(`qwen2.5:7b`) |
 | 本地 MCP demo | 8765 | `cd backend && python run_mcp_server.py` |
+| **MinIO (M38.1.x)** | **29000**(S3 API)/ **29001**(Web Console)| `cd backend && docker compose up -d minio`,默认凭据 `minioadmin/minioadmin` |
 
 ### 首次启动步骤
 
 ```bash
-# 1. 启动依赖服务 (5 个 lumen-platform-* 容器)
+# 1. 启动依赖服务 (6 个 lumen-platform-* 容器: mysql + redis + ollama + es + celery + minio)
 cd backend && docker compose up -d
 
 # 2. 拉 Ollama 模型
@@ -75,13 +77,17 @@ ollama pull nomic-embed-text && ollama pull qwen2.5:7b
 # 3. 初始化 dev 数据库 (schema + 18 ensure_* + demo 数据)
 cd backend && python scripts/init_dev_db.py
 
-# 4. 启动后端
+# 4. (可选) 建 MinIO dev bucket 一次性
+docker exec lumen-platform-minio mc alias set local http://localhost:9000 minioadmin minioadmin
+docker exec lumen-platform-minio mc mb local/lumen-dev
+
+# 5. 启动后端
 cd backend && uvicorn lumen_main:app --port 11335
 
-# 5. 启动前端
+# 6. 启动前端
 cd frontend && npm run dev
 
-# 6. (可选) 启动本地 MCP demo server
+# 7. (可选) 启动本地 MCP demo server
 cd backend && python run_mcp_server.py
 ```
 
@@ -114,7 +120,7 @@ Lumen AI Platform 是单体仓库(monorepo),4 个子项目 + 1 个共享后端�
    └─────────────────────────────────────┘
             │
             ▼
-   MySQL 8 · Redis · Elasticsearch 8 · Ollama · Celery
+   MySQL 8 · Redis · Elasticsearch 8 · Ollama · Celery · **MinIO (M38.1.x,可切 S3 backend)**
 ```
 
 ### 典型请求数据流(以 chat 为例)
@@ -340,7 +346,7 @@ PaginatedResponse[T] # {"code": 200, "data": {items: [...], total, page, ...}}
 | **RAG 评测 (M37)** | `/api/v1/eval/datasets` · `/runs` · `/runs/{id}` · `/runs/{id}/watch` | `/dashboard/eval` + `/runs` | EvalDataset + Celery Runner + Judge LLM 评分 + 实时刷新看板 |
 | **KB Workspace + Folder (M38.2)** | `/api/v1/workspaces` · `/folders` · `/api/v1/knowledge/workspaces` | `/dashboard/knowledge` 三层侧边栏 | `workspace → KB → folder → document` 树状组织 |
 | **Workspace RBAC (M38.2.x)** | `/api/v1/workspaces/{id}/members` · `/permissions` · `/transfer-ownership` | WorkspaceMembersModal + TransferOwnershipModal | 19 项 ACL + 4 预设 + 30s 倒计时所有权转让 |
-| **Storage 抽象 (M38.1)** | `/api/v1/storage/{health,local/<key>,migrate-to-s3}` | (admin-only) | LocalBackend + S3Backend 工厂,`STORAGE_BACKEND` 切换 |
+| **Storage 抽象 (M38.1 + M38.1.x)** | `/api/v1/storage/{health,local/<key>,migrate-to-s3}` | (admin-only) | LocalBackend + S3Backend 工厂,`STORAGE_BACKEND` 切换;multipart ≥ 5MB 自动走 `create_multipart_upload`;parsers 适配走 `document_parser.parse(storage_key=...)` 入口,KB 上传端到端在 S3 模式 production-ready |
 | **多模态 Embedding (M38.4)** | `/api/v1/multimodal-embedding-configs` | `/dashboard/knowledge` KB multimodal toggle | `jina-clip-v2` 1024 dim 本地为主,`clip_base_32` 兜底 |
 | **智能问数 (M33)** | `/api/v1/text2sql/data-sources` · `/queries` | `/dashboard/text2sql` | Text2SQL + SQLGuard 静态校验 + 试执行 |
 | **客户管理** | `/api/v1/customers` · `/field-definitions` · `/follow-ups` | `/dashboard/customer` | owner UserSelect + 自定义字段 + 跟进记录 |
@@ -374,6 +380,19 @@ ACCESS_TOKEN_EXPIRE_MINUTES=30
 
 # Ollama (用于 embedding 和 chat 模型)
 OLLAMA_API_BASE=http://localhost:11434
+
+# ===== Storage backend (M38.1, M38.1.x MinIO 默认 local) =====
+# 默认 local,无需配。切 MinIO / S3 时改下方(M38.1.x):
+# 模板见 backend/storage.example.env,粘贴到 .env 末尾即可
+# STORAGE_BACKEND=s3
+# S3_ENDPOINT=http://localhost:29000
+# S3_BUCKET=lumen-dev
+# S3_ACCESS_KEY=minioadmin
+# S3_SECRET_KEY=minioadmin
+# S3_USE_SSL=false
+# S3_PATH_STYLE=true     # REQUIRED for MinIO
+# S3_REGION=us-east-1
+# S3_PRESIGNED_URL_EXPIRY=3600
 ```
 
 ### 前端环境变量
@@ -404,7 +423,7 @@ FAISS 索引文件存于 `backend/data/faiss/`(`knowledge_base.index` + `.meta`)
 ### Docker 启动(推荐)
 
 ```bash
-# 启动所有服务 (5 个 lumen-platform-* 容器)
+# 启动所有服务 (6 个 lumen-platform-* 容器: mysql + redis + ollama + es + celery + minio)
 cd backend && docker compose up -d
 
 # 查看服务状态
@@ -412,6 +431,9 @@ docker ps --filter "name=lumen-platform-"
 
 # 停止服务
 bash scripts/dev-down.sh
+
+# 验证 MinIO 健康
+curl -s http://localhost:29000/minio/health/live
 ```
 
 ---
@@ -534,16 +556,16 @@ class TestExample:
         assert result is not None
 ```
 
-### 测试基线(M37.1,2026-08-07)
+### 测试基线(M38.1.x,2026-08-31)
 
 | 套件 | 基线 | 备注 |
 |------|------|------|
-| 后端 pytest | **1502 passed / 8 skipped / 1 xfailed / 0 failed** | 321s(5min21s);含 M37 3 个 wx_account admin purge 测试 |
-| 前端 vitest | **492 passed / 1 failed** | 530s(8min50s),1 个 pre-existing fail(`llm-node-skill-picker` placeholder 不匹配,**与 M37 无关**) |
+| 后端 pytest | **1547 passed / 2 skipped / 1 xfailed / 1 pre-existing failed** | 161s(2min40s);含 M38.1.x 新增 storage 50 unit + 12 integration storage API + 7 live MinIO + 4 parsers storage |
+| 前端 vitest | **555 passed / 1 failed** | M38.2.x 后基线;1 个 pre-existing fail(`llm-node-skill-picker` placeholder 不匹配,**与 M38.1.x 无关**) |
 | 后端 mypy | 0 error(新文件) | `lumen_core/__init__.py` + `lumen_models/base.py` 共 5 个 pre-existing error 与新文件无关 |
 | 前端 tsc | 0 error | `frontend` + `widget` 双 `tsc --noEmit` |
 
-> 详见 `CLAUDE.md §8 测试`。测试代码风格参考 `backend/tests/unit/` + `frontend/__tests__/`,新写 fixture 必带 teardown(参 `test_agent_team_logs_call.py`)。
+> 详见 `CLAUDE.md §8 测试`。测试代码风格参考 `backend/tests/unit/` + `frontend/__tests__/`,新写 fixture 必带 teardown(参 `test_agent_team_logs_call.py`)。Pre-existing fail:`test_trace_endpoint_combines_llm_and_embedding`(apscheduler + asyncio event loop 错配,master 一致 fail,与本改动无关)。
 
 ---
 
@@ -558,8 +580,13 @@ class TestExample:
 | 后端类型检查 | `cd backend && mypy lumen_api/ lumen_services/ lumen_models/ lumen_core/` |
 | 前端类型检查 | `cd frontend && npx tsc --noEmit` |
 | 重置 dev 数据库 | `cd backend && python scripts/init_dev_db.py` |
-| 启动 dev 容器 | `bash scripts/dev-up.sh` |
+| 启动 dev 容器(含 MinIO) | `bash scripts/dev-up.sh` |
 | 停止 dev 容器 | `bash scripts/dev-down.sh` |
+| 验证 MinIO health | `curl http://localhost:29000/minio/health/live` |
+| MinIO 控制台 | 浏览器打开 <http://localhost:29001>,默认 `minioadmin/minioadmin` 登录 |
+| MinIO 压测(M38.1.x) | `cd backend && python -m scripts.bench_minio --doc-size 100KB --tenant-count 5 --docs-per-tenant 50 --concurrency 10 --output-json /tmp/minio_bench.json` |
+| Live MinIO 集成测试 | `cd backend && pytest tests/integration/test_storage_minio_live.py -v`(MinIO 没起自动 skip)|
+| 验证 storage backend mode | `curl http://localhost:11335/api/v1/storage/health`(`{backend:"local"\|"s3", ok:true, ...}`)|
 
 ---
 
@@ -609,7 +636,7 @@ curl http://localhost:11335/api/v1/agents/{id} -H "Authorization: Bearer $T1_TOK
   - 新人入门: [docs/tutorials/getting-started.md](docs/tutorials/getting-started.md) · [docs/tutorials/first-7-days.md](docs/tutorials/first-7-days.md)
   - 操作指南: [docs/how-to/dev-env.md](docs/how-to/dev-env.md) · [docs/how-to/e2e-screenshots.md](docs/how-to/e2e-screenshots.md) · [docs/how-to/add-new-skill.md](docs/how-to/add-new-skill.md) · [docs/how-to/add-new-workflow-node.md](docs/how-to/add-new-workflow-node.md) · [docs/how-to/deploy.md](docs/how-to/deploy.md) · [docs/how-to/faq.md](docs/how-to/faq.md)
   - 参考: [docs/reference/api.md](docs/reference/api.md) · [docs/reference/database-schema.md](docs/reference/database-schema.md) · [docs/reference/environment-config.md](docs/reference/environment-config.md)
-  - 架构: [docs/explanation/chat-sse-streaming.md](docs/explanation/chat-sse-streaming.md) · [docs/explanation/embedding-pipeline.md](docs/explanation/embedding-pipeline.md) · [docs/explanation/error-retry-timeout.md](docs/explanation/error-retry-timeout.md) · [docs/explanation/observability.md](docs/explanation/observability.md) · [docs/explanation/response-envelope.md](docs/explanation/response-envelope.md) · [docs/explanation/tool-calling.md](docs/explanation/tool-calling.md) · [docs/explanation/workflow-execution.md](docs/explanation/workflow-execution.md)
+  - 架构: [docs/explanation/chat-sse-streaming.md](docs/explanation/chat-sse-streaming.md) · [docs/explanation/embedding-pipeline.md](docs/explanation/embedding-pipeline.md) · [docs/explanation/error-retry-timeout.md](docs/explanation/error-retry-timeout.md) · [docs/explanation/observability.md](docs/explanation/observability.md) · [docs/explanation/response-envelope.md](docs/explanation/response-envelope.md) · [docs/explanation/storage.md](docs/explanation/storage.md)(M38.1.x MinIO 架构) · [docs/explanation/tool-calling.md](docs/explanation/tool-calling.md) · [docs/explanation/workflow-execution.md](docs/explanation/workflow-execution.md)
   - 排错: [docs/troubleshooting/uvicorn-zombie.md](docs/troubleshooting/uvicorn-zombie.md) · [docs/troubleshooting/common-errors.md](docs/troubleshooting/common-errors.md) · [docs/troubleshooting/data-recovery.md](docs/troubleshooting/data-recovery.md) · [docs/troubleshooting/performance-tuning.md](docs/troubleshooting/performance-tuning.md)
 - Widget: [`widget/README.md`](widget/README.md)
 - 内部归档: `docs-internal/` (本地保留,GitHub 不上传) — 含历史 spec / plan / follow-up review / 抓取的 LangGraph + Agents-Flex 参考
@@ -626,3 +653,5 @@ curl http://localhost:11335/api/v1/agents/{id} -H "Authorization: Bearer $T1_TOK
 - [SQLAlchemy 文档](https://docs.sqlalchemy.org/)
 - [FAISS 文档](https://github.com/facebookresearch/faiss)
 - [Ollama 文档](https://github.com/ollama/ollama)
+- [MinIO 文档](https://min.io/docs/minio/linux/index.html)(M38.1.x S3-compatible dev 容器)
+- [boto3 文档](https://boto3.amazonaws.com/v1/documentation/api/latest/index.html)(M38.1.x S3Backend client)
