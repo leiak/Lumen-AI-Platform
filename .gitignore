@@ -108,8 +108,10 @@ logs/
 # ============================================================================
 
 # Canonical database schema: 1.0 cleanup 后不再 tracked,需要时用
-# scripts/dump_dev_db.py 重新生成纯 DDL。Old local full-dump location
-# backend/sql/ removed 2026-08-07,scripts/sql/ removed 2026-09-02。
+# scripts/dump_schema_ddl.py 重新生成纯 DDL(75 张 BASE TABLE,无数据)。
+# scripts/dump_dev_db.py 是 schema+data 的全量 dump(dev DB 备份用)。
+# Old local full-dump location backend/sql/ removed 2026-08-07,
+# scripts/sql/ removed 2026-09-02。
 # ============================================================================
 # 1.0 release cleanup — dev-time artifacts NOT shipped to GitHub
 # ============================================================================
@@ -123,8 +125,9 @@ docs-internal/
 .gitback/
 
 # Root-level dev snapshots (类似 backend/sql/*.sql:dev DB dump + dev OpenAPI spec dump)
-# 这些都 dev-only,需用 scripts/dump_dev_db.py 或 curl /openapi.json 重新生成
-/ai_platform.sql
+# 这些都 dev-only,需用 scripts/dump_schema_ddl.py 或 scripts/dump_dev_db.py 重新生成。
+# /*.sql 通配兜底掉所有 root 临时 SQL dump(lumen_schema_*.sql / ai_platform.sql 等)
+/*.sql
 /openapi.json
 /Modelfile.fix
 
