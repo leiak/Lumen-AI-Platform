@@ -181,3 +181,8 @@ backend/data/easyocr/model/*.pth
 
 /.run-logs
 backend/chunks_1089.json
+
+# 2026-09-02 临时诊断脚本(一次性 debug 用,不入仓)。
+# diag_eval_*.py / diag_schema.py / diag_teams.py / verify_cleanup.py 全是 ad-hoc 跑过即弃。
+# 需要时可重新写,不入 git。
+backend/scripts/diag/
