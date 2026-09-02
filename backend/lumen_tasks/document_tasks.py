@@ -484,7 +484,15 @@ def process_document_task(self, task_params: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 db.add(chunk)
                 chunks.append(chunk)
-            db.commit()
+            # 用 flush 而不是 commit:INSERT 立即执行并把 AUTO_INCREMENT
+            # 主键写回 ``chunk.id``,但不提交事务、不触发 SQLAlchemy
+            # ``expire_on_commit``。原先用 commit 会在 chunk.vector_id
+            # 那一轮触发 SELECT refresh,在 worker 长事务里偶尔拿到
+            # ``chunk.id=None`` → metadatas 里 chunk_id 是 None → 后续
+            # ``chunk.vector_id = vid; db.commit()`` 翻成 UPDATE WHERE
+            # id=NULL → 0 rows matched。同时整段 task 现在走单一事务
+            # (最后 line 626 doc.status 才 commit),原子性更好。
+            db.flush()
         else:
             # Fallback to manual chunking
             logger.info(f"[Task {task_id}] Chunking document manually")
