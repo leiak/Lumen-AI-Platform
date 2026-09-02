@@ -36,10 +36,12 @@ backend/__pycache__/
 backend/*.pyc
 backend/.env
 backend/.env.local
+backend/data/*
 backend/data/uploads/*
 backend/data/faiss/*.index
 backend/data/faiss/*.meta
 backend/*.log
+backend/.run-logs
 # Image generation storage (M22) — runtime files, .gitkeep tracks the dirs
 backend/storage/*
 !backend/storage/.gitkeep
@@ -169,6 +171,8 @@ backend/run512_results.json
 # Dev debug Playwright/curl 一次性诊断脚本(不是真测试,只是诊断)
 /frontend/e2e/diag-*.cjs
 
+/frontend-overview/node_modules/*
+
 # EasyOCR 模型文件 — bind mount 到 docker 容器 /root/.EasyOCR,不进 git。
 # 历史曾误 commit 80MB craft_mlt_25k.pth + 15MB latin_g2.pth,
 # 已 filter-branch + force push 清理(v1.0.0 tag 重建为 lightweight)。
@@ -176,3 +180,4 @@ backend/run512_results.json
 backend/data/easyocr/model/*.pth
 
 /.run-logs
+backend/chunks_1089.json
