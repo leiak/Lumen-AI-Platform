@@ -169,4 +169,10 @@ backend/run512_results.json
 # Dev debug Playwright/curl 一次性诊断脚本(不是真测试,只是诊断)
 /frontend/e2e/diag-*.cjs
 
+# EasyOCR 模型文件 — bind mount 到 docker 容器 /root/.EasyOCR,不进 git。
+# 历史曾误 commit 80MB craft_mlt_25k.pth + 15MB latin_g2.pth,
+# 已 filter-branch + force push 清理(v1.0.0 tag 重建为 lightweight)。
+# 2026-09-02:删 95MB blob,.git 从 92MB → 4.7MB。
+backend/data/easyocr/model/*.pth
+
 /.run-logs
