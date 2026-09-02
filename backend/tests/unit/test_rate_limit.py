@@ -1,11 +1,12 @@
-"""M30 P1-4: tests for services/rate_limit.py.
+"""M30 P1-4 + Phase 0 Unit 3 (2026-09-02):tests for services/rate_limit.py.
 
 Covers:
 - RedisRateLimiter sliding window correctness (allow up to limit,
   reject beyond, sliding window expires old entries)
-- ``build_default_limiter`` falls back to in-memory when Redis is
-  unreachable so the endpoint doesn't 500 in dev
-- The fallback path still rate-limits (per-process, best-effort)
+- ``build_default_limiter`` uses Redis when reachable
+- ``build_default_limiter`` FAIL-CLOSES when Redis is unreachable
+  (Phase 0 改:in-memory fallback removed, returns degraded=True
+  with allowed=False so callers map to 503, not 429)
 """
 import os
 import sys
@@ -145,37 +146,108 @@ def test_redis_limiter_different_identities_independent():
     assert not limiter.check("alice").allowed
 
 
-def test_build_default_limiter_falls_back_to_inmemory_when_redis_unreachable(monkeypatch):
-    """When the redis probe fails, the limiter uses an in-memory dict.
-    The fallback still rate-limits (per-process, best-effort)."""
+def test_build_default_limiter_failcloses_when_redis_unreachable_at_init(monkeypatch):
+    """Phase 0 Unit 3 (2026-09-02):Redis init ping fails → fail-closed.
+
+    Old behavior (pre-Phase 0) was to fall back to an in-memory dict that
+    per-worker doesn't share state, allowing a malicious client to bypass
+    the limit by hitting different workers. New behavior: ALL calls
+    return ``RateLimitResult(allowed=False, degraded=True)`` so callers
+    map to HTTP 503 (not 429). admin endpoint sees 503 + Retry-After.
+    """
     from lumen_services import rate_limit
-    from lumen_core import config
 
     class _DeadRedis:
         def ping(self):
             raise ConnectionError("redis is down")
 
     # Inject a connection-FAILING redis by patching the redis.Redis
-    # constructor (our build_default_limiter probes it). We don't have
-    # a clean way to swap the connection target, so instead we patch
-    # ``redis.Redis`` to return _DeadRedis.
+    # constructor (our build_default_limiter probes it).
     import redis
     monkeypatch.setattr(redis, "Redis", lambda **kwargs: _DeadRedis())
 
     limiter = rate_limit.build_default_limiter(limit=2, window_seconds=60)
-    # 3 calls — only 2 should pass (in-memory fallback enforces the
-    # same limit; the 3rd is rejected).
-    r1 = limiter("alice")
-    r2 = limiter("alice")
+    assert limiter.init_failed is True
+
+    # All 3 calls reject (fail-closed, NOT 2 allowed + 1 rejected)
+    for i in range(3):
+        r = limiter("alice")
+        assert not r.allowed, f"call {i}: expected allowed=False, got {r}"
+        assert r.degraded, f"call {i}: expected degraded=True (fail-closed), got {r}"
+        assert r.remaining == 0
+        assert r.retry_after_seconds == 0.0
+
+
+def test_build_default_limiter_failcloses_when_redis_fails_on_call(monkeypatch):
+    """Init ping 成功但 per-call Redis 抛 → 同样 fail-closed。
+
+    模拟 Redis 中途挂:init OK,然后 pipeline.execute() 抛。
+    """
+    from lumen_services import rate_limit
+
+    class _HalfDeadRedis:
+        """Init OK 但 pipeline 调用挂的 redis。"""
+
+        def __init__(self):
+            self._pipeline_calls = 0
+            self._fail_calls = 2  # 前 2 次 pipeline 抛
+
+        def ping(self):
+            return True
+
+        def pipeline(self):
+            outer = self
+
+            class _P:
+                def zremrangebyscore(self, *a, **kw): return self
+                def zcard(self, *a, **kw): return self
+                def zadd(self, *a, **kw): return self
+                def expire(self, *a, **kw): return self
+                def execute(self_inner):
+                    outer._pipeline_calls += 1
+                    if outer._pipeline_calls <= outer._fail_calls:
+                        raise ConnectionError("redis went down mid-call")
+                    # 第三次 OK — 给后续 test 一个 clean recovery path 用
+                    return [0, 0]
+
+            return _P()
+
+    fake = _HalfDeadRedis()
+    import redis
+    monkeypatch.setattr(redis, "Redis", lambda **kwargs: fake)
+
+    limiter = rate_limit.build_default_limiter(limit=2, window_seconds=60)
+    assert limiter.init_failed is False  # init OK
+
+    # 前 2 次 fail-closed
+    for i in range(2):
+        r = limiter("alice")
+        assert not r.allowed and r.degraded, f"call {i}: expected fail-closed, got {r}"
+
+    # 第 3 次 Redis 恢复 → 应返回正常 RateLimitResult(degraded=False)
+    # 注:fake 不返回正确的 zadd 结果,所以走的不是 happy path,
+    # 但应该不再 degraded=True。
     r3 = limiter("alice")
-    assert r1.allowed and r1.degraded
-    assert r2.allowed and r2.degraded
-    assert not r3.allowed and r3.degraded
-    # The detail hint is "in-memory fallback — Redis unavailable" so
-    # ops sees it in dev. We also confirm the Repr includes the
-    # degraded flag.
-    r3_repr = repr(r3)
-    assert "in-memory fallback" in r3_repr or r3.degraded
+    assert not r3.degraded, f"Redis recovered后不应再 degraded: {r3}"
+
+
+def test_build_default_limiter_returns_init_failed_attr(monkeypatch):
+    """Phase 0:limiter_fn 上挂 init_failed 属性,便于 monitoring / debug。"""
+    from lumen_services import rate_limit
+
+    class _DeadRedis:
+        def ping(self):
+            raise ConnectionError("down")
+
+    import redis
+    monkeypatch.setattr(redis, "Redis", lambda **kwargs: _DeadRedis())
+
+    limiter = rate_limit.build_default_limiter(limit=10, window_seconds=60)
+    assert hasattr(limiter, "init_failed")
+    assert limiter.init_failed is True
+    # Don't test "init_failed=False" here — dev Redis 在 pytest 里可达性
+    # 不确定(macOS / Linux / Windows / dev DB 状态都可能变)。
+    # 只验证属性存在 + DeadRedis 路径下 = True,正面 case 由真集成覆盖。
 
 
 def test_build_default_limiter_uses_redis_when_reachable():

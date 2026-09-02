@@ -20,10 +20,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/skills", tags=["admin-skills"])
 
 
-# M30 P1-4: distributed sliding-window rate limiter backed by Redis
-# (with in-memory fallback when Redis is unreachable — same algorithm,
-# per-process dict, degraded to the M17 behavior). Cross-worker
-# effective because the Redis ZSET is shared.
+# M30 P1-4 + Phase 0 Unit 3 (2026-09-02):distributed sliding-window rate
+# limiter backed by Redis. Phase 0 改 fail-closed:Redis 挂时返回 503
+# (限流组件异常),不是 in-memory fallback 返 200。理由:in-process dict
+# 不跨 worker 共享,恶意流量可穿透。详见 lumen_services.rate_limit。
 #
 # Config: 10 calls per 5 minutes per user, same as the M17 in-memory
 # defaults so test behavior is unchanged for clients.
@@ -33,10 +33,16 @@ _skill_test_run_limiter = build_default_limiter(limit=10, window_seconds=300)
 def _check_rate_limit(user_id: int) -> None:
     result = _skill_test_run_limiter(str(user_id))
     if not result.allowed:
-        detail = "Test run rate limit: 10 calls / 5min"
+        # Phase 0 Unit 3:degraded=True 时返 503(限流组件异常,让客户端
+        # 重试);degraded=False 时返 429(真被限流)。两类信号不同,前端
+        # 应该分别处理 — 429 是"等几分钟再来",503 是"现在不行,稍后"。
         if result.degraded:
-            detail += " (in-memory fallback — Redis unavailable)"
-        raise HTTPException(status_code=429, detail=detail)
+            raise HTTPException(
+                status_code=503,
+                detail="限流组件异常,请稍后重试 (rate limiter degraded; Redis unavailable)",
+                headers={"Retry-After": "30"},
+            )
+        raise HTTPException(status_code=429, detail="Test run rate limit: 10 calls / 5min")
 
 
 def _require_admin(user: User) -> None:
