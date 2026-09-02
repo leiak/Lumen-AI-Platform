@@ -29,6 +29,16 @@ langchain-community>=0.3.27,<1.0
 
 # Document Processing
 docling==2.24.0
+# M38.4 Bug C (2026-09-02): docling 2.24.0 声明 docling-core>=2.19.0,<3.0.0,
+# 但 2.84.0 删了 ``docling_core.types.legacy_doc.document.BaseText``,
+# 触发 ``ImportError: cannot import name 'BaseText'`` → DocumentConverter 直接抛
+# → 旧 docx parser 走 fallback raw read 拿到 ~1205 chars 伪文本 → 不管 chunk_size
+# 设多大都只切 2-3 段(用户复现的"chunk_size=200 仅 3 chunks")。
+# host 用 docling-core 2.74.0 OK,这里 pin 到 host 版本防 celery 镜像下次
+# rebuild 拉到 broken 2.84.x。
+docling-core==2.74.0
+docling-parse==3.4.0
+docling-ibm-models>=3.4.0,<4.0.0
 # M29.2 (2026-06-15): docx parser fallback chain when Docling drops numPr paragraphs.
 # Used by parsers/__init__.py:_parse_with_docx_fallback Level 2.
 python-docx==1.2.0
