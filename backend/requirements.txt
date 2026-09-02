@@ -104,3 +104,9 @@ boto3>=1.34.0,<2.0
 # without a live MinIO endpoint. ``moto`` is installed only in the
 # test environment via ``pip install -e .[test]`` or directly.
 moto[s3]>=5.0.0,<6.0
+
+# M38.4 Step 5: multimodal vector store (FAISS IndexFlatIP, per-KB index
+# file at ``data/multimodal/kb-{id}-mm.faiss``). Only invoked when a KB
+# has ``multimodal_enabled=True``; pinning here so a freshly-built
+# celery image can handle multimodal KBs without a follow-up pip install.
+faiss-cpu>=1.7.0,<2.0
