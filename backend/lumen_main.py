@@ -161,6 +161,13 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+# Phase 0 Unit 2 (2026-09-02):启动期标志。
+# K8s readiness / startup probe 用,/startup 返 503 表示 uvicorn 进程在
+# 跑但 startup_event 还没跑完(40+ ensure_* 迁移 + scheduler 启动),
+# 等所有 migration 完成才 flip True。Phase 0 dev 用不上,但跟
+# /live / /ready 一起 ship 免得后续 K8s 迁移再补。
+_startup_complete: bool = False
+
 # Refuse to boot if EXTERNAL_JWT_SECRET is still the dev placeholder.
 # Mirrors the well-known dev-only-default check pattern from production
 # frameworks; protects against deploying a build where the external
@@ -334,6 +341,11 @@ async def startup_event():
     # at 02:17 (hard) and 02:27 (soft) per the M27 spec.
     from lumen_services.retention_scheduler import register_retention_jobs
     register_retention_jobs()
+    # Phase 0 Unit 2 (2026-09-02):标记 startup_event 跑完。
+    # 必须在所有 ensure_* / scheduler 启动之后才 flip,否则 readiness
+    # probe 提前 200 但 DB 还没就绪 → K8s 派流量来挂首请求。
+    global _startup_complete
+    _startup_complete = True
 
 
 @app.on_event("shutdown")
@@ -341,6 +353,15 @@ async def shutdown_event():
     from lumen_services.workflow_scheduler import get_scheduler_service
     scheduler_service = get_scheduler_service()
     scheduler_service.stop()
+    # 关闭 SQLAlchemy 连接池,避免 taskkill / SIGTERM 后 MySQL 留 Sleep
+    # 连接持 MDL 导致下个 uvicorn 启动时 ensure_* ALTER 卡 MDL 等候链
+    # (2026-06-08 第 5 次重启时踩到,KILL 孤儿连接后才恢复)。
+    # Redis 客户端走 closure-based 模式(rate_limit.build_default_limiter),
+    # 未维护全局 registry,Phase 0 不强行关;Phase 1 引入分布式锁后会
+    # 跟 dist_lock 一起建全局 registry。
+    # S3 (boto3) 不需要显式 close,内部 connection pool 随 GC 释放。
+    from lumen_core.database import engine
+    engine.dispose()
 
 
 # Include routers
@@ -372,3 +393,98 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
+
+
+# Phase 0 Unit 2 (2026-09-02):K8s 三态 health probe。
+# 跟原 /health(裸 200,前端无引用但兼容旧部署)并存,逐步切到三态模型。
+#
+# - /live   → 进程活着,只要 uvicorn 在 serve 就 200。K8s livenessProbe
+#             用,挂了才需要重启;**不**查依赖,免得 DB 抖动误杀 pod。
+# - /ready  → 依赖全可用(Phase 0 查 MySQL + Redis;ES / MinIO / Ollama
+#             走 SPOF 容灾 Phase 1 再补)。任一不通返 503。
+#             K8s readinessProbe 用,从 service 摘流量。
+# - /startup→ uvicorn 进程在跑但 startup_event(40+ ensure_* 迁移 +
+#             scheduler reload)还没跑完时返 503;跑完后返 200。
+#             K8s startupProbe 用,迁移没完不接 readinessProbe。
+#
+# 设计参考:roadmap §2 1.4 / Spring Boot Actuator 三态模型。
+# Phase 1 计划:加 ES cluster.health / MinIO HeadBucket / Ollama /api/tags
+# 进入 readiness 探活;Phase 1.3 后才接入 K8s 集群。
+#
+# 注意:不依赖 auth,部署 ingress 上做白名单限制(K8s pod 内网可达即可)。
+
+
+@app.get("/live", include_in_schema=False)
+async def live():
+    """Liveness probe: process is alive. Always 200 unless dying."""
+    return {"status": "alive"}
+
+
+@app.get("/startup", include_in_schema=False)
+async def startup():
+    """Startup probe: in-progress while migrations run, 200 when complete."""
+    if _startup_complete:
+        return {"status": "ready"}
+    # 503 让 K8s 知道"还在启动",不要急着 readinessProbe
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=503,
+        content={"status": "starting", "migrations_complete": False},
+    )
+
+
+@app.get("/ready", include_in_schema=False)
+async def ready():
+    """Readiness probe: dependencies available. 200 if all OK, 503 otherwise."""
+    from fastapi.responses import JSONResponse
+
+    # 未启动完直接 503(让 startupProbe 先决,不要 readinessProbe 提前 200)
+    if not _startup_complete:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "starting", "checks": {}},
+        )
+
+    checks: dict = {}
+
+    # MySQL:走 SQLAlchemy engine,跟 rate_limit / storage health 同源。
+    # SELECT 1 是工业标准探活,不动业务数据,InnoDB 共享锁。
+    try:
+        from sqlalchemy import text
+        from lumen_core.database import engine
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        checks["mysql"] = {"ok": True}
+    except Exception as e:  # noqa: BLE001
+        checks["mysql"] = {"ok": False, "error": str(e)[:120]}
+
+    # Redis:probe 一个临时 client(走 .env 的 REDIS_HOST/PORT,跟
+    # rate_limit 一致)。短超时防止 probe 自己卡死 readinessProbe。
+    # 不复用 rate_limit 内的 closure client(它们 scope 局部,且不一定
+    # 已建连);Phase 1 分布式锁起来再统一管理全局 registry。
+    try:
+        import redis as redis_lib  # local: keep top-level import lean
+        from lumen_core.config import settings
+        probe_client = redis_lib.Redis(
+            host=settings.REDIS_HOST,
+            port=settings.REDIS_PORT,
+            db=settings.REDIS_DB,
+            socket_connect_timeout=1,  # readiness 必须快
+            socket_timeout=1,
+            decode_responses=True,
+        )
+        probe_client.ping()
+        probe_client.close()
+        checks["redis"] = {"ok": True}
+    except Exception as e:  # noqa: BLE001
+        checks["redis"] = {"ok": False, "error": str(e)[:120]}
+
+    overall_ok = all(c["ok"] for c in checks.values())
+    payload = {
+        "status": "ready" if overall_ok else "degraded",
+        "checks": checks,
+    }
+    return JSONResponse(
+        status_code=200 if overall_ok else 503,
+        content=payload,
+    )
