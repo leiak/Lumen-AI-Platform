@@ -1,0 +1,92 @@
+# Pre-commit hooks — Lumen AI Platform
+#
+# Install:
+#   pip install pre-commit
+#   pre-commit install
+#   pre-commit install --hook-type pre-push
+#
+# Run all hooks on all files:
+#   pre-commit run --all-files
+#
+# Run a single hook manually:
+#   pre-commit run ruff --all-files
+#
+# Skip hooks (e.g. WIP commit):
+#   git commit --no-verify
+#
+# 说明:本仓库约定**不要**用 `--no-verify` 绕过 hooks(见 CLAUDE.md §10);
+# 确实需要跳过请在 commit message 里说明 reason。
+#
+# Hook 选型策略:
+# - 标准 hygiene(yaml/eof/whitespace/merge/large/secret)在每次 commit 跑
+# - ruff 替代 flake8+isort+black(2026-09 Phase 0 Unit 1 引入)
+# - mypy 走 pre-push(完整跑 lumen_api/services/models/core 耗时较长,放 commit 不友好)
+# - TypeScript / Frontend 暂不挂 eslint,等前端团队补 ESLint config 后再加
+#
+# 行尾:.gitattributes 已强制 LF,不再额外加 mixed-line-ending 钩子。
+
+default_language_version:
+  python: python3.11
+
+repos:
+  # ---------- 标准 hygiene:每次 commit ----------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-yaml
+        # allow multi-document yaml (k8s manifests 偶尔需要)
+        args: [--allow-multiple-documents]
+        exclude: ^backend/openapi\.json$  # 自动生成,不需要校验
+      - id: check-json
+        exclude: ^backend/openapi\.json$
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        # EasyOCR 历史教训:.pth 模型 80MB 误 commit 后 filter-branch 才清掉
+        # 默认 500KB,二进制资源(S3 / MinIO 没法上 git)走 .gitignore 兜底
+        args: [--maxkb=500]
+      - id: check-case-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        # 中文 markdown 表格里常见行尾空格做对齐,豁免
+        args: [--markdown-linebreak-ext=md]
+      - id: detect-private-key
+      # Windows 上文件权限钩子不可靠,跳过:
+      # - check-executables-have-shebangs
+      # - check-shebang-scripts-are-executable
+
+  # ---------- Python: ruff lint + format(commit 时跑) ----------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        # 自动修复可修项(E401/F401/E711...),不可修项让 commit fail
+        args: [--fix, --exit-non-zero-on-fix]
+        # 项目 Python 全部在 backend/ 下,.claude/ 是 Claude Code hooks 跳过
+        files: ^backend/.*\.py$
+        exclude: ^backend/data/.*  # fixture / sql dump
+      - id: ruff-format
+        files: ^backend/.*\.py$
+        exclude: ^backend/data/.*
+
+  # ---------- Backend mypy:pre-push 才跑(避免 commit 卡顿) ----------
+  - repo: local
+    hooks:
+      - id: mypy-backend
+        name: mypy backend (pre-push)
+        # 跟 CLAUDE.md §8 命令一致,失败非零阻止 push
+        entry: bash -c 'cd backend && mypy lumen_api/ lumen_services/ lumen_models/ lumen_core/'
+        language: system
+        pass_filenames: false
+        # 仅在 backend 文件变更时跑(节省时间)
+        files: ^backend/(lumen_api|lumen_services|lumen_models|lumen_core)/.*\.py$
+        stages: [pre-push]
+
+  # ---------- Frontend:暂不挂钩,等团队补 ESLint config ----------
+  # 后续 Phase 1 / Phase 2 视情况加 eslint + tsc --noEmit
+
+# CI 上跑更严格的全量检查:
+# - pre-commit run --all-files --hook-stage pre-push
+# - pytest tests/unit/ -x --tb=short
+# - mypy backend/lumen_api lumen_services lumen_models lumen_core
+# - npx tsc --noEmit (frontend + widget)
