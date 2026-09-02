@@ -404,7 +404,17 @@ async def upload_document(
         }
         task = process_document_task.delay(task_params)
         doc.status = "queued"
-        doc.doc_metadata = {"doc_type": doc_type} if doc_type else {}
+        # 把 chunking_strategy / chunking_params 也写进 doc.doc_metadata,
+        # 这样 retry / rechunk 时可以读回原值,避免下次切到默认 fixed 策略
+        # 产生不同的 chunk 数(参见 Bug A)。
+        doc.doc_metadata = {
+            "doc_type": doc_type,
+            "chunking_strategy": chunking_strategy,
+            "chunking_params": params,
+        } if doc_type else {
+            "chunking_strategy": chunking_strategy,
+            "chunking_params": params,
+        }
         db.commit()
 
         return SingleResponse(data={
@@ -697,20 +707,28 @@ async def retry_document(
             logger.warning("failed to delete stale vectors for doc %s: %s", doc.id, e)
 
     # Reset doc state and re-enqueue. The original upload's chunking
-    # strategy isn't persisted on the doc row, so we fall back to the
-    # KB's chunk_size/chunk_overlap with a fixed strategy.
+    # strategy IS now persisted on the doc row (see ``upload_document``
+    # below) — read it back so a retry reproduces the original run's
+    # chunk count, not the post-M38.4 default ``fixed`` strategy which
+    # for docx files typically produces fewer / coarser chunks than
+    # ``document_structure``. Falls back to KB chunk_size/chunk_overlap
+    # with ``fixed`` for legacy rows where the metadata wasn't
+    # captured.
     doc.status = "pending"
     doc.error_message = None
     doc.chunk_count = None
     db.commit()
     db.refresh(doc)
 
-    doc_type = (doc.doc_metadata or {}).get("doc_type")
+    doc_metadata = doc.doc_metadata or {}
+    doc_type = doc_metadata.get("doc_type")
+    chunking_strategy = doc_metadata.get("chunking_strategy") or "fixed"
+    persisted_params = doc_metadata.get("chunking_params") or {}
     kb = doc.knowledge_base
-    chunking_params: dict = {}
-    if kb and kb.chunk_size:
+    chunking_params: dict = dict(persisted_params)
+    if kb and kb.chunk_size and "chunk_size" not in chunking_params:
         chunking_params["chunk_size"] = kb.chunk_size
-    if kb and kb.chunk_overlap is not None:
+    if kb and kb.chunk_overlap is not None and "chunk_overlap" not in chunking_params:
         chunking_params["chunk_overlap"] = kb.chunk_overlap
 
     task_params = {
@@ -719,7 +737,7 @@ async def retry_document(
         "file_content_type": doc.file_type or "application/octet-stream",
         "tenant_id": current_user.tenant_id,
         "kb_id": doc.knowledge_base_id,
-        "chunking_strategy": "fixed",
+        "chunking_strategy": chunking_strategy,
         "chunking_params": chunking_params,
         # M38.1 follow-up: see upload endpoint above.
         "asset_storage_key": doc.asset_storage_key,
@@ -842,22 +860,53 @@ async def rechunk_document(
         except Exception as e:
             logger.warning("failed to delete stale vectors for doc %s: %s", doc.id, e)
 
-    # Resolve final chunking settings: body overrides > KB defaults.
+    # Resolve final chunking settings: body overrides > doc.doc_metadata
+    # history > KB defaults. Persisting chunking_strategy on the doc
+    # row at upload time (see ``upload_document`` below) lets a rechunk
+    # with no body overrides reproduce the original chunk count
+    # instead of silently falling back to ``fixed`` (Bug A — this is
+    # what made doc 969's retry produce 7 chunks vs the original
+    # ``document_structure`` run's 27).
+    doc_metadata = doc.doc_metadata or {}
     kb = doc.knowledge_base
-    chunk_size = body.chunk_size if body.chunk_size is not None else (kb.chunk_size if kb else 500)
-    chunk_overlap = body.chunk_overlap if body.chunk_overlap is not None else (kb.chunk_overlap if kb else 50)
-    chunking_strategy = body.chunking_strategy or "fixed"
-    doc_type = body.doc_type if body.doc_type is not None else (doc.doc_metadata or {}).get("doc_type")
+    chunk_size = (
+        body.chunk_size
+        if body.chunk_size is not None
+        else doc_metadata.get("chunking_params", {}).get("chunk_size")
+        if doc_metadata.get("chunking_params", {}).get("chunk_size") is not None
+        else (kb.chunk_size if kb else 500)
+    )
+    chunk_overlap = (
+        body.chunk_overlap
+        if body.chunk_overlap is not None
+        else doc_metadata.get("chunking_params", {}).get("chunk_overlap")
+        if doc_metadata.get("chunking_params", {}).get("chunk_overlap") is not None
+        else (kb.chunk_overlap if kb else 50)
+    )
+    chunking_strategy = (
+        body.chunking_strategy
+        or doc_metadata.get("chunking_strategy")
+        or "fixed"
+    )
+    doc_type = body.doc_type if body.doc_type is not None else doc_metadata.get("doc_type")
 
     # Reset doc state.
     doc.status = "pending"
     doc.error_message = None
     doc.chunk_count = None
-    # Persist the new doc_type so future retries don't lose it.
+    # Persist the new doc_type + chunking_strategy so future retries
+    # don't lose them. Empty dicts only persist the keys we actually
+    # resolved to non-None values to keep the JSON tidy.
+    existing_meta = dict(doc_metadata)
     if doc_type is not None:
-        existing_meta = dict(doc.doc_metadata or {})
         existing_meta["doc_type"] = doc_type
-        doc.doc_metadata = existing_meta
+    if chunking_strategy:
+        existing_meta["chunking_strategy"] = chunking_strategy
+    existing_meta["chunking_params"] = {
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+    }
+    doc.doc_metadata = existing_meta
     db.commit()
     db.refresh(doc)
 
