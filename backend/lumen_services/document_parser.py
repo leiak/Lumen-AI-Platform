@@ -43,6 +43,8 @@ class DocumentParser:
         file_type: str = None,
         doc_type: str = None,
         storage_key: str = None,
+        chunking_strategy: Optional[str] = None,
+        chunking_params: Optional[dict] = None,
     ) -> Dict[str, Any]:
         """
         Parse document and extract text content.
@@ -59,6 +61,19 @@ class DocumentParser:
                 docling which require a real filesystem path. Falls
                 back to ``file_path`` if ``storage_key`` is missing
                 or fails to resolve.
+            chunking_strategy: Caller-supplied strategy override
+                (``fixed`` / ``semantic`` / ``document_structure``).
+                Forwarded by ``document_tasks.process_document_task``
+                from ``task_params["chunking_strategy"]``. When None,
+                ``_create_chunks`` falls back to the doc_type default
+                (general→fixed, paper/manual/laws→document_structure).
+            chunking_params: Caller-supplied kwargs for the strategy
+                (e.g. ``{"chunk_size": 200, "chunk_overlap": 20}``).
+                Forwarded by ``document_tasks.process_document_task``
+                from ``task_params["chunking_params"]``. When None,
+                ``ChunkingService.get_strategy`` falls back to the
+                strategy defaults (fixed→500/50, semantic→200/800,
+                document_structure→800/50).
 
         Returns:
             Dict with keys: text (str), metadata (dict), chunks (list)
@@ -114,10 +129,16 @@ class DocumentParser:
                         parser.get_type(),
                     )
                     result["chunks"] = self._create_chunks(
-                        result["text"], parser.get_type()
+                        result["text"], parser.get_type(),
+                        chunking_strategy=chunking_strategy,
+                        chunking_params=chunking_params,
                     )
             else:
-                result["chunks"] = self._create_chunks(result["text"], parser.get_type())
+                result["chunks"] = self._create_chunks(
+                    result["text"], parser.get_type(),
+                    chunking_strategy=chunking_strategy,
+                    chunking_params=chunking_params,
+                )
 
             return result
         except Exception as e:
@@ -195,8 +216,23 @@ class DocumentParser:
             "chunks": self._create_chunks(text, "general")
         }
 
-    def _create_chunks(self, text: str, doc_type: str) -> List[Dict[str, Any]]:
-        """Create chunks based on document type"""
+    def _create_chunks(
+        self,
+        text: str,
+        doc_type: str,
+        chunking_strategy: Optional[str] = None,
+        chunking_params: Optional[dict] = None,
+    ) -> List[Dict[str, Any]]:
+        """Create chunks based on document type.
+
+        ``chunking_strategy`` overrides the doc_type default (used by
+        ``/rechunk`` endpoint to force a strategy). ``chunking_params``
+        are passed straight to ``ChunkingService.get_strategy`` so
+        ``chunk_size`` / ``chunk_overlap`` (and semantic / structure
+        variants) reach the splitter — previously these were silently
+        dropped here, so a request like ``POST /rechunk {chunk_size:200}``
+        ignored the value entirely.
+        """
         from lumen_services.chunking_service import get_chunking_service
 
         service = get_chunking_service()
@@ -219,9 +255,13 @@ class DocumentParser:
             "image": "fixed",
         }
 
-        strategy = strategy_map.get(doc_type, "fixed")
+        strategy = chunking_strategy or strategy_map.get(doc_type, "fixed")
 
-        return service.split_with_metadata(text, strategy_name=strategy)
+        return service.split_with_metadata(
+            text,
+            strategy_name=strategy,
+            **(chunking_params or {}),
+        )
 
     def _parse_pdf(self, file_path: str) -> str:
         """Parse PDF using Docling"""

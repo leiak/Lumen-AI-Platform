@@ -393,11 +393,18 @@ def process_document_task(self, task_params: Dict[str, Any]) -> Dict[str, Any]:
         # try to ``open(file_path)`` against the local disk. Falls
         # back to ``file_path`` when ``storage_key`` is missing /
         # fails to resolve, so pre-M38.1 docs keep working.
+        # M38.4 follow-up (2026-09-02): forward chunking_strategy
+        # and chunking_params too — these used to be dropped on the
+        # floor at ``DocumentParser._create_chunks``, so a /rechunk
+        # request with ``{"chunk_size": 200}`` was silently ignored
+        # and the doc was chunked at fixed/500. See commit message.
         parse_result = parser.parse(
             file_path,
             file_content_type,
             doc_type=doc_type,
             storage_key=task_params.get("asset_storage_key"),
+            chunking_strategy=chunking_strategy,
+            chunking_params=chunking_params,
         )
         text_content = parse_result.get("text", "")
         parse_error = (parse_result.get("metadata") or {}).get("parse_error")
