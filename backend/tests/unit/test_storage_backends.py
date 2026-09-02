@@ -428,6 +428,42 @@ def test_s3_backend_resolve_to_local_path_creates_temp(s3_backend):
         os.unlink(tmp_path)
 
 
+def test_s3_backend_resolve_to_local_path_preserves_extension(s3_backend):
+    """S3Backend: ``resolve_to_local_path`` carries the storage key's
+    suffix onto the temp file so parser libraries that dispatch on
+    file extension — docling, python-docx, openpyxl — route correctly.
+
+    M38.4 follow-up: without the suffix, a .docx file ends up at
+    ``/tmp/lumen-storage-XXXXXXXX`` (no extension), docling falls
+    back to the PDF backend (pypdfium2), and parsing fails with
+    ``PdfiumError: Failed to load document``. This regression test
+    pins the suffix-preserving behaviour."""
+    backend = s3_backend
+    cases = [
+        ("uploads/1/a.docx", ".docx"),
+        ("uploads/1/b.pdf", ".pdf"),
+        ("uploads/1/c.pptx", ".pptx"),
+        ("uploads/1/d.xlsx", ".xlsx"),
+        # No-extension key stays extension-less (parses as unknown).
+        ("uploads/1/e.bin", ".bin"),
+    ]
+    for key, expected_suffix in cases:
+        backend.put_object(key, b"x")
+        tmp_path = backend.resolve_to_local_path(key)
+        try:
+            assert os.path.exists(tmp_path), f"temp missing for {key}"
+            assert tmp_path.endswith(expected_suffix), (
+                f"temp for {key} should end with {expected_suffix!r}, "
+                f"got {tmp_path!r}"
+            )
+            # Temp path still starts with the original prefix so a
+            # stale-process cleanup pattern (rm /tmp/lumen-storage-*)
+            # continues to find it.
+            assert os.path.basename(tmp_path).startswith("lumen-storage-")
+        finally:
+            os.unlink(tmp_path)
+
+
 # --- 7. get_object_stream real streaming (M38.1 follow-up) ----------------
 
 

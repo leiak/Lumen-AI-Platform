@@ -309,10 +309,18 @@ class S3Backend(StorageBackend):
         """
         import tempfile
         safe = self._validate_key(key)
-        # ``delete=False`` so the caller controls cleanup. ``suffix``
-        # is empty because some parsers dispatch on extension; if
-        # we knew the extension we could set it here.
-        tmp = tempfile.NamedTemporaryFile(prefix="lumen-storage-", delete=False)
+        # ``delete=False`` so the caller controls cleanup. Carry the
+        # original suffix from the storage key (e.g. ``.docx``, ``.pdf``,
+        # ``.pptx``) so parser libraries that dispatch on file extension
+        # — docling, python-docx, openpyxl — route correctly. Without
+        # this suffix the temp file has no extension, docling falls back
+        # to the PDF backend (pypdfium2) on .docx inputs, and parsing
+        # fails with ``PdfiumError: Failed to load document``.
+        tmp = tempfile.NamedTemporaryFile(
+            prefix="lumen-storage-",
+            suffix=Path(safe).suffix,
+            delete=False,
+        )
         try:
             # Stream the download — get_object_stream yields a
             # StreamingBody which we close after the copy.
