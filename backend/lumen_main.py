@@ -13,6 +13,8 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from lumen_core.config import settings
 from lumen_core.dynamic_cors import DynamicCORSMiddleware
+from lumen_api.middleware.trace_id import TraceIdMiddleware  # Phase 0 Unit 5 4.2
+from lumen_api.middleware.prometheus import PrometheusMiddleware  # Phase 0 Unit 5 4.3
 from lumen_core.database import (
     create_tables,
     ensure_workflow_runs_trigger_source,
@@ -220,10 +222,40 @@ app.add_middleware(
     ],
     cache_ttl_seconds=60,
 )
+# Phase 0 Unit 5 4.2 (2026-09-02):trace_id 全链路贯通。
+# 必须**最外层**(最后 add_middleware,FIFO),让所有下游 middleware / endpoint
+# / log / httpx 调用 / DB writer 都能从 contextvar 读到 trace_id。
+# 优先级低于 CORS(放 CORS 后) — 因为浏览器 OPTIONS 预检没 trace_id,
+# CORS 失败不应该挡 trace_id 注入。
+app.add_middleware(
+    TraceIdMiddleware,
+)
+# Phase 0 Unit 5 4.3 (2026-09-02):Prometheus HTTP metrics 中间件。
+# 紧贴 TraceIdMiddleware(同 contextvar 上下文),记录每个请求的
+# counter + duration histogram。/metrics 端点本身**也被**记录(spec 注释
+# 明确:不 skip —— 否则 scrape 自身不计入总请求数,debug 时困惑)。
+# path label 用 route template(/users/{user_id})而非实际 URL,防
+# cardinality 爆炸。
+app.add_middleware(
+    PrometheusMiddleware,
+)
 
 # Create tables on startup
 @app.on_event("startup")
 async def startup_event():
+    # Phase 0 Unit 5 4.1 (2026-09-02):结构化 JSON 日志。
+    # 必须在 ensure_* 迁移之前调,让迁移期间的 logger.error 也能 JSON 化。
+    # LOG_FORMAT=json (生产 / ELK)  或 dev (中文 string, dev 友好);
+    # 通过 LOG_LEVEL 控制全局级别。
+    from lumen_core.logging_config import setup_default_logging, setup_json_logging
+    fmt = settings.LOG_FORMAT.lower()
+    if fmt == "json":
+        setup_json_logging(level=settings.LOG_LEVEL)
+    elif fmt == "dev":
+        setup_default_logging(level=settings.LOG_LEVEL)
+    else:
+        # 未知值兜底走 json,避免 typo 静默走默认中文
+        setup_json_logging(level=settings.LOG_LEVEL)
     create_tables()
     # Idempotent column migrations for tables that predate their current
     # schema. `Base.metadata.create_all` only creates missing tables, not
@@ -418,6 +450,21 @@ async def health():
 async def live():
     """Liveness probe: process is alive. Always 200 unless dying."""
     return {"status": "alive"}
+
+
+# Phase 0 Unit 5 4.3 (2026-09-02):Prometheus scrape 端点。
+# Prometheus server 定时 GET /metrics 拉取文本格式指标。
+# Content-Type 用 prometheus_client.CONTENT_TYPE_LATEST(= text/plain;
+# version=0.0.4; charset=utf-8),不要改 —— Prometheus 解析靠这个。
+# include_in_schema=False 不让 /docs 里出现(运维端点,前端不调)。
+@app.get("/metrics", include_in_schema=False)
+async def metrics():
+    """Prometheus scrape endpoint. Render all metrics as text format."""
+    from fastapi.responses import Response
+    from lumen_core.metrics import render_metrics
+
+    body, content_type = render_metrics()
+    return Response(content=body, media_type=content_type)
 
 
 @app.get("/startup", include_in_schema=False)

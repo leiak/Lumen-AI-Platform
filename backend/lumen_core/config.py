@@ -12,6 +12,14 @@ class Settings(BaseSettings):
     APP_NAME: str = "Lumen AI Platform"
     DEBUG: bool = True
 
+    # --- Phase 0 Unit 5 (2026-09-02) Logging ---
+    # LOG_FORMAT: "json" (default — single-line JSON for ELK / Loki) or
+    # "dev" (中文 string, dev 期 tail 直读友好)。
+    LOG_FORMAT: str = "json"
+    # LOG_LEVEL: Python logging level(DEBUG / INFO / WARNING / ERROR)。
+    # dev 默认 INFO;prod 可升 WARNING 减噪。
+    LOG_LEVEL: str = "INFO"
+
     # Database
     DATABASE_URL: str = "mysql+pymysql://ai_user:ai_password@localhost:3306/ai_platform"
 

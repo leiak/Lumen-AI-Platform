@@ -120,3 +120,13 @@ moto[s3]>=5.0.0,<6.0
 # has ``multimodal_enabled=True``; pinning here so a freshly-built
 # celery image can handle multimodal KBs without a follow-up pip install.
 faiss-cpu>=1.7.0,<2.0
+
+# Phase 0 Unit 5 (2026-09-02): 结构化 JSON 日志(4.1)
+# python-json-logger 把 stdlib logging 输出转单行 JSON,grep / ELK /
+# Loki 直接吃。>=4.0 用 nhairs fork(原版 2.0 多年未维护)。
+python-json-logger>=4.0.0,<5.0
+
+# Phase 0 Unit 5 (2026-09-02): Prometheus 指标(4.3)
+# prometheus-client 是 Prometheus 官方 Python 客户端,提供 Counter /
+# Gauge / Histogram / Summary + /metrics HTTP handler。
+prometheus-client>=0.20.0,<1.0
