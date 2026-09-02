@@ -19,11 +19,13 @@ from __future__ import annotations
 
 from typing import Dict, Optional, Tuple
 
+import httpx
 from langchain_core.embeddings import Embeddings
 from pydantic import SecretStr
 from sqlalchemy.orm import Session
 
 from lumen_core.config import settings
+from lumen_core.httpx_bypass import bypass_proxy_client_kwargs
 from lumen_models.model_config import ModelConfig
 from lumen_services.embedding_logging import LoggingEmbeddings
 
@@ -79,11 +81,22 @@ def get_embeddings_for_config(
         )
 
     if cfg.model_type == "ollama":
+        # 跟 model_loader.create_chat_model 同款 httpx proxy bypass:
+        # 本机 Windows registry proxy(127.0.0.1:10793 之类)对 localhost:11434
+        # 返回 502,httpx 默认 trust_env=True 读 registry 后会走代理。
+        # 注入 {"proxy": None, "trust_env": False} 直连。详见
+        # lumen_core/httpx_bypass.py 顶部 incident timeline。
         emb: Embeddings = OllamaEmbeddings(
             model=str(cfg.model_name),
             base_url=str(cfg.base_url) if cfg.base_url else settings.OLLAMA_API_BASE,
+            client_kwargs=bypass_proxy_client_kwargs(),
         )
     elif cfg.model_type == "openai":
+        # 跟 model_loader create_chat_model 走同一个 bypass:openai SDK
+        # 用 sync httpx Client 走 embed_query / aembed_query,async httpx
+        # AsyncClient 走 aembed_query / aembed_documents。两个都得设,
+        # 漏一个留半个 bug。httpx 走顶部 import,test code 可以 patch。
+        _bypass = bypass_proxy_client_kwargs()
         emb = OpenAIEmbeddings(
             model=str(cfg.model_name),
             # OpenAIEmbeddings wants SecretStr | None; wrap the plain
@@ -91,6 +104,8 @@ def get_embeddings_for_config(
             # secret is never accidentally logged.
             api_key=SecretStr(str(cfg.api_key)) if cfg.api_key else None,
             base_url=str(cfg.base_url) if cfg.base_url else None,
+            http_client=httpx.Client(**_bypass),
+            http_async_client=httpx.AsyncClient(**_bypass),
         )
     else:  # pragma: no cover — guarded by SUPPORTED check above
         raise ValueError(f"Unhandled provider '{cfg.model_type}'")

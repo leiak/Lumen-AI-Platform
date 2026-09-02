@@ -18,6 +18,7 @@ from lumen_core.llm_call_context import (
 )
 from lumen_core.model_providers import get_openai_compatible_providers
 from lumen_core.database import SessionLocal
+from lumen_core.httpx_bypass import bypass_proxy_client_kwargs
 from lumen_services.llm_call_logging import (
     extract_usage,
     extract_finish_reason,
@@ -92,6 +93,12 @@ def _normalize_messages(messages: Any) -> List[BaseMessage]:
 
 
 logger = logging.getLogger(__name__)
+
+
+# ``bypass_proxy_client_kwargs`` 在 lumen_core.httpx_bypass 里定义,
+# 这里是它的 thin re-export,避免逐个 caller 改 import 路径
+# (也方便未来 grep 出"所有 bypass proxy 用法")。
+_bypass_proxy_client_kwargs = bypass_proxy_client_kwargs
 
 
 # ---------------------------------------------------------------------------
