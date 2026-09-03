@@ -11,6 +11,11 @@ import logging
 import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+# Phase 1 Group A 2.4 (2026-09-03): @degradable 装饰器替代 inline try/except,
+# 统一走 elasticsearch breaker + fallback 返 [] 模式(失败 5 次后 fast-fail,
+# 不再每次都等 timeout 累积)。
+from lumen_services.degradation import degradable
+
 logger = logging.getLogger(__name__)
 
 
@@ -99,14 +104,21 @@ class HybridRetriever:
 
     # ----------------------------------------------------------------- search
 
-    def _vector_search(self, query: str, k: int, filter_expr: Optional[str]) -> List[Dict[str, Any]]:
-        if self.vector_store is None:
-            return []
-        try:
-            results = self.vector_store.similarity_search(query, k=k, filter_expr=filter_expr)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("Vector search failed: %s", exc)
-            return []
+    @staticmethod
+    @degradable(breaker_name="elasticsearch", fallback=lambda *a, **kw: [])
+    def _vector_search_impl(
+        vector_store: Any,
+        query: str,
+        k: int,
+        filter_expr: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Phase 1 Group A 2.4: @degradable 包装,失败走 fallback=[].
+
+        抽出 staticmethod 是因为 @degradable 需要装饰纯函数,不能直接装
+        instance method(self 不参与 fallback 调用)。这里把 vector_store
+        作为第一个参数传入,跟 _bm25_search_impl 风格一致。
+        """
+        results = vector_store.similarity_search(query, k=k, filter_expr=filter_expr)
         if not results:
             return []
         # Normalise the result shape to a dict.
@@ -128,6 +140,35 @@ class HybridRetriever:
                 })
         return normalised
 
+    def _vector_search(self, query: str, k: int, filter_expr: Optional[str]) -> List[Dict[str, Any]]:
+        if self.vector_store is None:
+            return []
+        return self._vector_search_impl(self.vector_store, query, k, filter_expr)
+
+    @staticmethod
+    @degradable(breaker_name="elasticsearch", fallback=lambda *a, **kw: [])
+    def _bm25_search_impl(
+        bm25_index: Any,
+        query: str,
+        k: int,
+        tenant_id: Optional[int],
+        kb_id: Optional[int],
+        modality: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Phase 1 Group A 2.4: @degradable 包装,失败走 fallback=[]."""
+        raw = bm25_index.search(query, k=k)
+        results: List[Dict[str, Any]] = []
+        for doc_id, score, meta in raw:
+            if not _passes_filter(meta, tenant_id, kb_id, modality):
+                continue
+            results.append({
+                "id": str(doc_id),
+                "text": bm25_index.get_text(doc_id) or "",
+                "metadata": meta,
+                "bm25_score": float(score),
+            })
+        return results
+
     def _bm25_search(
         self,
         query: str,
@@ -138,22 +179,9 @@ class HybridRetriever:
     ) -> List[Dict[str, Any]]:
         if self.bm25_index is None or not getattr(self.bm25_index, "is_available", False):
             return []
-        try:
-            raw = self.bm25_index.search(query, k=k)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("BM25 search failed: %s", exc)
-            return []
-        results: List[Dict[str, Any]] = []
-        for doc_id, score, meta in raw:
-            if not _passes_filter(meta, tenant_id, kb_id, modality):
-                continue
-            results.append({
-                "id": str(doc_id),
-                "text": self.bm25_index.get_text(doc_id) or "",
-                "metadata": meta,
-                "bm25_score": float(score),
-            })
-        return results
+        return self._bm25_search_impl(
+            self.bm25_index, query, k, tenant_id, kb_id, modality,
+        )
 
     def search(
         self,
