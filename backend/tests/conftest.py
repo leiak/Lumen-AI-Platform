@@ -9,18 +9,26 @@ from lumen_models.tenant import Tenant
 from lumen_models.knowledge import KnowledgeBase
 # M38.2 ship 漏项补注册 + 全量 ensure_*:tests 走 conftest.py 而不 import lumen_main,
 # 但 Base.metadata 需要所有 model 类注册才能解析 FK,MySQL schema 也需要 lumen_main
-# 的 startup_event 跑过 ensure_* 才完整(workspace_id / folder_id / asset_storage_key 等
-# 后加列不会出现在 schema.sql 里)。直调 lumen_main.startup_event() 一次性全跑,
+# 的 lifespan startup 跑过 ensure_* 才完整(workspace_id / folder_id / asset_storage_key 等
+# 后加列不会出现在 schema.sql 里)。直调 lumen_main._lifespan 一次性全跑,
 # 后续 lumen_main 加新 model / 新 ensure_* 时 conftest 不需要改。
+#
+# Phase 1 Group A 1.1 (2026-09-03):lifespan 是 async context manager,
+# 进入时跑 startup 逻辑(yield 前),退出时跑 shutdown(yield 后)。
+# 我们只想跑 startup 拿到 ensure_* 副作用,所以 `async with` 进入后立刻退出。
 import asyncio
-from lumen_main import startup_event
+from lumen_main import _lifespan, app as _lumen_app
+
+async def _drive_lifespan_startup_once():
+    async with _lifespan(_lumen_app):
+        pass
 
 try:
-    asyncio.run(startup_event())
+    asyncio.run(_drive_lifespan_startup_once())
 except Exception as e:
-    # startup_event 在已有 dev DB 状态上对幂等 ALTER 会偶发重复键警告等,
+    # lifespan 在已有 dev DB 状态上对幂等 ALTER 会偶发重复键警告等,
     # schema 已就位时 ensure_* 应 no-op,任何异常继续往下(让个别 test 自己报清晰的错)。
-    print(f"WARNING: lumen_main.startup_event() failed: {e}")
+    print(f"WARNING: lumen_main._lifespan startup failed: {e}")
 
 
 @pytest.fixture

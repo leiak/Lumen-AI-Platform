@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 
@@ -249,8 +250,74 @@ app.add_middleware(
 )
 
 # Create tables on startup
-@app.on_event("startup")
-async def startup_event():
+def _should_run_scheduler_for_worker() -> bool:
+    """Phase 1 Group A 1.1 (2026-09-03): scheduler 启动守门。
+
+    决策:
+    - RUN_SCHEDULER=false → 强制不启
+    - RUN_SCHEDULER=true  → 强制启(单 worker 调试用)
+    - RUN_SCHEDULER=auto(默认)→ 仅 WORKER_RANK=0 才启
+
+    返回 bool:True = 这个 worker 应该启 scheduler。
+    抽成 helper 是为了单测覆盖(整 lifespan 太重 —— 40+ ensure_* + DB 迁移)。
+    """
+    run_mode = os.getenv("RUN_SCHEDULER", "auto").lower()
+    if run_mode == "false":
+        return False
+    if run_mode == "true":
+        return True
+    # auto:仅 worker 0 启
+    try:
+        worker_rank = int(os.getenv("WORKER_RANK", "0"))
+    except ValueError:
+        worker_rank = 0
+    return worker_rank == 0
+
+
+async def _shutdown_cleanup(started_scheduler: bool) -> None:
+    """Phase 1 Group A 1.1 (2026-09-03): lifespan finally 块的清理逻辑。
+
+    仅 `started_scheduler=True` 时调 scheduler.stop()(避免空 stop 抛错
+    — _scheduler singleton 已 start 才能 shutdown);最后必 engine.dispose()
+    防止 MySQL MDL 孤儿连接(2026-06-08 踩到,KILL 脚本恢复)。
+
+    抽成 helper 是为了单测 —— 整 lifespan 太重,直接调这个验 dispose 触发。
+    """
+    if started_scheduler:
+        try:
+            from lumen_services.workflow_scheduler import get_scheduler_service
+            get_scheduler_service().stop()
+        except Exception as e:  # noqa: BLE001
+            import logging as _shutdown_logger
+            _shutdown_logger.getLogger(__name__).warning(
+                "scheduler stop failed: %s", e,
+            )
+    # 关闭 SQLAlchemy 连接池,避免 taskkill / SIGTERM 后 MySQL 留 Sleep
+    # 连接持 MDL 导致下个 uvicorn 启动时 ensure_* ALTER 卡 MDL 等候链
+    # (2026-06-08 第 5 次重启时踩到,KILL 孤儿连接后才恢复)。
+    # Redis 客户端走 closure-based 模式(rate_limit.build_default_limiter),
+    # 未维护全局 registry,Phase 0 不强行关;Phase 1 引入分布式锁后会
+    # 跟 dist_lock 一起建全局 registry。
+    # S3 (boto3) 不需要显式 close,内部 connection pool 随 GC 释放。
+    from lumen_core.database import engine
+    engine.dispose()
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Phase 1 Group A 1.1 (2026-09-03): lifespan 上下文替代 @app.on_event。
+
+    为什么不用 @app.on_event("startup")/("shutdown"):
+    FastAPI 0.93+ 推荐 lifespan,语义更明确(上下文管理器 yield 前 = startup,
+    yield 后 = shutdown),而且 gunicorn UvicornWorker 在 fork 后子进程触发
+    lifespan startup —— 多 worker 模式下,所有 worker 都会跑一次 lifespan,
+    所以 WORKER_RANK 守门是 scheduler 启动的核心。
+
+    WORKER_RANK 守门逻辑:
+    - "true":强制启 scheduler(单 worker dev / 调试用)
+    - "false":强制不启
+    - "auto"(默认):WORKER_RANK=0 才启,gunicorn 0..N-1 编号
+    """
     # Phase 0 Unit 5 4.1 (2026-09-02):结构化 JSON 日志。
     # 必须在 ensure_* 迁移之前调,让迁移期间的 logger.error 也能 JSON 化。
     # LOG_FORMAT=json (生产 / ELK)  或 dev (中文 string, dev 友好);
@@ -363,45 +430,60 @@ async def startup_event():
     # to exist, and before scheduler reload so the DB is fresh.
     from lumen_scripts.seed_external_app import seed_dev_external_app
     seed_dev_external_app()
-    # Start workflow scheduler
-    from lumen_services.workflow_scheduler import get_scheduler_service
-    from lumen_core.database import SessionLocal
-    scheduler_service = get_scheduler_service()
-    scheduler_service.start()
-    # Repopulate in-memory job store from the database. The in-memory
-    # APScheduler store is wiped on every process restart, so without
-    # this hook every active schedule would silently stop firing.
-    db = SessionLocal()
-    try:
-        scheduler_service.reload_schedules(db)
-    finally:
-        db.close()
-    # M27: register retention cron jobs on the SAME scheduler
-    # (singleton from workflow_scheduler.get_scheduler()). Runs daily
-    # at 02:17 (hard) and 02:27 (soft) per the M27 spec.
-    from lumen_services.retention_scheduler import register_retention_jobs
-    register_retention_jobs()
-    # Phase 0 Unit 2 (2026-09-02):标记 startup_event 跑完。
+
+    # Phase 1 Group A 1.1 (2026-09-03): scheduler 单 worker 守门。
+    # gunicorn 多 worker 模式下,每个 worker 都会跑 lifespan startup。
+    # scheduler 是单例 + 内存 job store —— 跑在 N 个 worker 会重复触发 +
+    # race 写 DB。仅 WORKER_RANK=0 才启(其他 worker 跳过)。
+    _should_run_scheduler = _should_run_scheduler_for_worker()
+    if _should_run_scheduler:
+        from lumen_services.workflow_scheduler import get_scheduler_service
+        from lumen_core.database import SessionLocal
+        scheduler_service = get_scheduler_service()
+        scheduler_service.start()
+        # Repopulate in-memory job store from the database. The in-memory
+        # APScheduler store is wiped on every process restart, so without
+        # this hook every active schedule would silently stop firing.
+        db = SessionLocal()
+        try:
+            scheduler_service.reload_schedules(db)
+        finally:
+            db.close()
+        # M27: register retention cron jobs on the SAME scheduler
+        # (singleton from workflow_scheduler.get_scheduler()). Runs daily
+        # at 02:17 (hard) and 02:27 (soft) per the M27 spec.
+        from lumen_services.retention_scheduler import register_retention_jobs
+        register_retention_jobs()
+        import logging as _lifespan_logger
+        _lifespan_logger.getLogger(__name__).info(
+            "scheduler started (WORKER_RANK=%s RUN_SCHEDULER=%s)",
+            os.getenv("WORKER_RANK", "0"), os.getenv("RUN_SCHEDULER", "auto"),
+        )
+    else:
+        import logging as _lifespan_logger
+        _lifespan_logger.getLogger(__name__).info(
+            "scheduler SKIPPED (WORKER_RANK=%s RUN_SCHEDULER=%s)",
+            os.getenv("WORKER_RANK", "0"), os.getenv("RUN_SCHEDULER", "auto"),
+        )
+
+    # Phase 0 Unit 2 (2026-09-02):标记 startup 跑完。
     # 必须在所有 ensure_* / scheduler 启动之后才 flip,否则 readiness
     # probe 提前 200 但 DB 还没就绪 → K8s 派流量来挂首请求。
     global _startup_complete
     _startup_complete = True
 
+    try:
+        yield
+    finally:
+        # shutdown: 与原 @app.on_event("shutdown") 行为一致 —— 抽到
+        # _shutdown_cleanup helper,单测可直调(整 lifespan 太重)。
+        await _shutdown_cleanup(started_scheduler=_should_run_scheduler)
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    from lumen_services.workflow_scheduler import get_scheduler_service
-    scheduler_service = get_scheduler_service()
-    scheduler_service.stop()
-    # 关闭 SQLAlchemy 连接池,避免 taskkill / SIGTERM 后 MySQL 留 Sleep
-    # 连接持 MDL 导致下个 uvicorn 启动时 ensure_* ALTER 卡 MDL 等候链
-    # (2026-06-08 第 5 次重启时踩到,KILL 孤儿连接后才恢复)。
-    # Redis 客户端走 closure-based 模式(rate_limit.build_default_limiter),
-    # 未维护全局 registry,Phase 0 不强行关;Phase 1 引入分布式锁后会
-    # 跟 dist_lock 一起建全局 registry。
-    # S3 (boto3) 不需要显式 close,内部 connection pool 随 GC 释放。
-    from lumen_core.database import engine
-    engine.dispose()
+
+# 注入 lifespan —— 必须在 app 创建后、所有中间件注册前设置(虽然技术上中间件
+# 注册在 lifespan 后面也无副作用,但约定 lifespan 第一件事就注册)。FastAPI
+# 0.93+ 推荐用 lifespan 参数或 router.lifespan_context 注入上下文管理器。
+app.router.lifespan_context = _lifespan
 
 
 # Include routers

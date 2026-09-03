@@ -137,3 +137,11 @@ prometheus-client>=0.20.0,<1.0
 # httpx / redis / elasticsearch 的 transient 异常,3 次 exponential
 # backoff 0.5/1/2s,不动 boto3(已有 standard retry 3x 避免堆叠)。
 tenacity>=8.2,<10
+
+# Phase 1 Group A 1.1 (2026-09-03): gunicorn 多 worker 化生产入口。
+# dev 仍用 uvicorn --reload(Windows 兼容 + reload 友好);
+# 生产容器走 gunicorn + uvicorn.workers.UvicornWorker 多 worker,
+# post_fork dispose SQLAlchemy pool(否则 fork 后子进程首请求挂
+# "MySQL server has gone away")。UvicornWorker 已包含在 uvicorn[standard]
+# extra 里,这里只装 gunicorn master / arbiter 部分。
+gunicorn>=21.2.0,<24

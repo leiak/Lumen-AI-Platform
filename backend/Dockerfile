@@ -17,4 +17,10 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "lumen_main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Phase 1 Group A 1.1 (2026-09-03): gunicorn 多 worker 化生产入口。
+# dev 仍走 `uvicorn --reload`(单 worker,Windows 兼容,debug 友好);
+# 生产镜像 CMD 走 gunicorn + uvicorn.workers.UvicornWorker —— workers 数
+# 由 docker-compose / k8s 注入 WEB_WORKERS env(默认 = max(2, cpu_count()));
+# scheduler 仅 WORKER_RANK=0 worker 启动(见 gunicorn.conf.py +
+# lumen_main.py lifespan 守门)。
+CMD ["gunicorn", "lumen_main:app", "-c", "gunicorn.conf.py", "--bind", "0.0.0.0:8000"]

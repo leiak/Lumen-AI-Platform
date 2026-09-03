@@ -191,27 +191,50 @@ def test_ready_returns_503_when_both_fail(client, reset_startup_flag):
 
 
 # ===== shutdown_event:必须 engine.dispose() =====
+#
+# Phase 1 Group A 1.1 (2026-09-03):shutdown_event 函数被整合进 _lifespan
+# async context manager 的 finally 块,通过 _shutdown_cleanup(starter=...)
+# helper 单独可测。整 lifespan 太重(40+ ensure_* + DB 迁移),不能像
+# shutdown_event() 那样直接 await 验证。
 
 
 @pytest.mark.asyncio
 async def test_shutdown_event_disposes_engine():
     """防止 2026-06-08 复现的 MySQL MDL 孤儿连接场景。
 
-    shutdown_event 必须调 engine.dispose() 让 SQLAlchemy QueuePool 关闭
-    所有 checked-in 连接;否则 taskkill /F 后 MySQL Sleep 连接仍持 MDL,
-    下个 uvicorn startup ALTER 卡死(2026-06-08 第 5 次重启踩到)。
+    lifespan finally 块(_shutdown_cleanup)必须调 engine.dispose() 让
+    SQLAlchemy QueuePool 关闭所有 checked-in 连接;否则 taskkill /F 后
+    MySQL Sleep 连接仍持 MDL,下个 uvicorn startup ALTER 卡死(2026-06-08
+    第 5 次重启踩到)。
     """
-    from lumen_main import shutdown_event
+    from lumen_main import _shutdown_cleanup
 
     with patch("lumen_core.database.engine") as mock_engine:
-        # 不真跑 scheduler stop — 用 mock 防止污染
         with patch("lumen_services.workflow_scheduler.get_scheduler_service") as mock_get:
             mock_svc = MagicMock()
             mock_get.return_value = mock_svc
 
-            await shutdown_event()
+            await _shutdown_cleanup(started_scheduler=True)
 
             mock_svc.stop.assert_called_once()
+            mock_engine.dispose.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cleanup_no_scheduler_still_disposes():
+    """多 worker 模式 rank!=0 worker 启 lifespan 但不启 scheduler →
+    退出时 stop() 不该被调(否则空 stop 抛错),但 dispose 必须触发。
+    """
+    from lumen_main import _shutdown_cleanup
+
+    with patch("lumen_core.database.engine") as mock_engine:
+        with patch("lumen_services.workflow_scheduler.get_scheduler_service") as mock_get:
+            mock_svc = MagicMock()
+            mock_get.return_value = mock_svc
+
+            await _shutdown_cleanup(started_scheduler=False)
+
+            mock_svc.stop.assert_not_called()
             mock_engine.dispose.assert_called_once()
 
 
