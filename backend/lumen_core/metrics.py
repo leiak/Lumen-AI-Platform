@@ -117,6 +117,17 @@ lumen_celery_tasks_total = Counter(
 )
 
 
+# Phase 1 Group A 2.3 (2026-09-03): 熔断器状态 Gauge。
+# 每个 (breaker, state) label 对一个 0/1 值,只有当前态 = 1,其他 = 0。
+# closed=0 / half_open=1 / open=2 是 state code 常量,在
+# lumen_services.circuit_breaker.STATE_* 里定义。
+lumen_circuit_breaker_state = Gauge(
+    "lumen_circuit_breaker_state",
+    "Circuit breaker state by name. closed/half_open/open labels, 1=current, 0=other.",
+    ["breaker", "state"],
+)
+
+
 # ---- /metrics 端点 helper ----
 
 
@@ -191,6 +202,7 @@ def reset_metrics_for_test() -> None:
         lumen_embedding_calls_total,
         lumen_doc_processing_duration_seconds,
         lumen_celery_tasks_total,
+        lumen_circuit_breaker_state,
     )
     for metric in _LUMEN_METRICS:
         try:
@@ -212,6 +224,7 @@ __all__ = [
     "lumen_embedding_calls_total",
     "lumen_doc_processing_duration_seconds",
     "lumen_celery_tasks_total",
+    "lumen_circuit_breaker_state",
     "render_metrics",
     "get_metric_value",
     "reset_metrics_for_test",
