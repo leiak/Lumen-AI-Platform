@@ -162,6 +162,12 @@ class Settings(BaseSettings):
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    # --- Phase 1 Group A 2.1 (2026-09-03) Rate-limit middleware ---
+    # 关闭后 RateLimitMiddleware 跳过所有路径,等价于"无限流"。
+    # dev 默认开(Phase 0 已 ship fail-closed 限流);生产环境
+    # 关掉需要在 startup 注入 RATE_LIMIT_ENABLED=false 关闭保护。
+    RATE_LIMIT_ENABLED: bool = True
+
     class Config:
         env_file = ".env"
 

@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from lumen_core.config import settings
 from lumen_core.dynamic_cors import DynamicCORSMiddleware
 from lumen_api.middleware.trace_id import TraceIdMiddleware  # Phase 0 Unit 5 4.2
+from lumen_api.middleware.rate_limit import RateLimitMiddleware  # Phase 1 Group A 2.1
 from lumen_api.middleware.prometheus import PrometheusMiddleware  # Phase 0 Unit 5 4.3
 from lumen_core.database import (
     create_tables,
@@ -230,6 +231,13 @@ app.add_middleware(
 app.add_middleware(
     TraceIdMiddleware,
 )
+# Phase 1 Group A 2.1 (2026-09-03): 全局限流 middleware。
+# 紧贴 TraceId(同 contextvar 上下文),policy dict 覆盖关键高频路径
+# (/auth/login, /chat, /knowledge/upload, /videos/compose 等)。
+# Redis 挂走 fail-closed 503(Phase 0 行为保留);超限 429 + Retry-After。
+# 顺序: TraceId → RateLimit → Prometheus — 限流挡无效流量,但保留 metrics
+# 记录 429 / 503(让 Prometheus scrape 看得到限流事件)。
+app.add_middleware(RateLimitMiddleware)
 # Phase 0 Unit 5 4.3 (2026-09-02):Prometheus HTTP metrics 中间件。
 # 紧贴 TraceIdMiddleware(同 contextvar 上下文),记录每个请求的
 # counter + duration histogram。/metrics 端点本身**也被**记录(spec 注释
