@@ -95,37 +95,21 @@ services:
       start_period: 20s
     mem_limit: 1g  # 防 dev OOM
 
-  celery_worker:
+  celery_worker_doc:
+    # Phase 1 Group A 1.3 (2026-09-03): doc_parse queue —— 文档处理(parse +
+    # chunk + embed)。CPU/IO 重但单任务耗时短(1-3min),并发 -c 2。
+    # `-Q doc_parse,default` 兜底接住无路由的 task(防死信)。
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: lumen-platform-celery
-    command: celery -A lumen_tasks.celery_app worker --loglevel=info
+    container_name: lumen-platform-celery-doc
+    command: celery -A lumen_tasks.celery_app worker -Q doc_parse,default -c 2 -n celery_doc@%h --loglevel=info
     env_file:
       - .env.docker
-    # The /app/data mount must be writable so the BM25 index
-    # (`./data/faiss/<collection>.bm25.pkl`) can be persisted. A
-    # read-only mount makes the save() call silently no-op, which is
-    # what caused the second half of the "search returns nothing"
-    # bug. The upload dir is on the same path so re-running the
-    # worker against a fresh checkout doesn't lose uploaded files.
-    # /app bind-mount keeps the worker's Python source in sync with
-    # the host checkout — no rebuild needed for code-only changes
-    # (the prebuilt image's site-packages still provide the
-    # third-party deps that the pip install baked in).
     volumes:
       - D:/work-ai/0401-lingclaw-to-langchain-demo/backend/data:/app/data
       - D:/work-ai/0401-lingclaw-to-langchain-demo/backend:/app
-      # M33.5 (2026-06-26): bind-mount EasyOCR model cache out to the
-      # host. EasyOCR downloads ~80MB (en) + ~200MB (zh) detection/recog
-      # models into ``/root/.EasyOCR`` on first use. Without this
-      # mount, every container restart = re-download (the model is
-      # baked into the container's overlay FS, gone the moment the
-      # container exits). Mounting it to ``backend/data/easyocr`` makes
-      # the model survive restarts, image rebuilds, and lets other
-      # team members reuse the cache (just clone the dir).
       - D:/work-ai/0401-lingclaw-to-langchain-demo/backend/data/easyocr:/root/.EasyOCR
-      # PPT / storage files: STORAGE_DIR=/storage inside container, needs host mapping
       - D:/work-ai/0401-lingclaw-to-langchain-demo/storage:/storage
     depends_on:
       redis:
@@ -133,6 +117,43 @@ services:
       elasticsearch:
         condition: service_healthy
       ollama:
+        condition: service_healthy
+
+  celery_worker_ppt:
+    # Phase 1 Group A 1.3 (2026-09-03): ppt_gen queue —— PPT 视频生成,长任务
+    # (可能 30min+),独立 worker + 并发 -c 2。
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lumen-platform-celery-ppt
+    command: celery -A lumen_tasks.celery_app worker -Q ppt_gen -c 2 -n celery_ppt@%h --loglevel=info
+    env_file:
+      - .env.docker
+    volumes:
+      - D:/work-ai/0401-lingclaw-to-langchain-demo/backend/data:/app/data
+      - D:/work-ai/0401-lingclaw-to-langchain-demo/backend:/app
+      - D:/work-ai/0401-lingclaw-to-langchain-demo/storage:/storage
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  celery_worker_eval:
+    # Phase 1 Group A 1.3 (2026-09-03): eval_run queue —— RAG 评测,长任务
+    # (soft_time_limit=7200s),独立 worker + 单并发 -c 1 避免互相干扰
+    # (LLM 调用密集,串行更稳)。
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lumen-platform-celery-eval
+    command: celery -A lumen_tasks.celery_app worker -Q eval_run -c 1 -n celery_eval@%h --loglevel=info
+    env_file:
+      - .env.docker
+    volumes:
+      - D:/work-ai/0401-lingclaw-to-langchain-demo/backend/data:/app/data
+      - D:/work-ai/0401-lingclaw-to-langchain-demo/backend:/app
+      - D:/work-ai/0401-lingclaw-to-langchain-demo/storage:/storage
+    depends_on:
+      redis:
         condition: service_healthy
 
 volumes:
