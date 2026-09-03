@@ -130,3 +130,10 @@ python-json-logger>=4.0.0,<5.0
 # prometheus-client 是 Prometheus 官方 Python 客户端,提供 Counter /
 # Gauge / Histogram / Summary + /metrics HTTP handler。
 prometheus-client>=0.20.0,<1.0
+
+# Phase 1 Group A 2.5 (2026-09-03): 客户端 transient retry 装饰器。
+# tenacity 是业内标准的重试库(stop_after_attempt + wait_exponential +
+# retry_if_exception_type),纯 Python 0 依赖,Phase 1 统一包
+# httpx / redis / elasticsearch 的 transient 异常,3 次 exponential
+# backoff 0.5/1/2s,不动 boto3(已有 standard retry 3x 避免堆叠)。
+tenacity>=8.2,<10

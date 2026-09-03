@@ -189,12 +189,26 @@ class LoggingEmbeddings:
     def embed_query(self, text: str) -> List[float]:
         ctx = get_embedding_context()
         if ctx is None:
-            return self._inner.embed_query(text)
+            # Phase 1 Group A 2.5 (2026-09-03): 没有 ctx 时也走 retry,
+            # 跟有 ctx 行为一致(observability 可选,retry 不可选)。
+            # ``call_sync_with_retry`` 让 self._inner.embed_query transient
+            # 异常(httpx.ConnectError / TimeoutException / RemoteProtocolError)
+            # 重试 3 次 exponential 0.5/1/2s,reraise 原异常让上层 fail-fast。
+            from lumen_services.retry import call_sync_with_retry
+            return call_sync_with_retry(
+                lambda: self._inner.embed_query(text),
+                func_name="embedding.embed_query",
+            )
 
         started = datetime.utcnow()
         t0 = time.monotonic()
+        # Phase 1 Group A 2.5: retry 包 inner 调用,retry_count 写进 log。
+        from lumen_services.retry import call_sync_with_retry
         try:
-            result = self._inner.embed_query(text)
+            result = call_sync_with_retry(
+                lambda: self._inner.embed_query(text),
+                func_name="embedding.embed_query",
+            )
             self._write_log(
                 ctx=ctx,
                 text=text,
@@ -227,8 +241,13 @@ class LoggingEmbeddings:
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         ctx = get_embedding_context()
+        # Phase 1 Group A 2.5: retry 包 inner 调用(sync batch path)。
+        from lumen_services.retry import call_sync_with_retry
         if ctx is None:
-            return self._inner.embed_documents(texts)
+            return call_sync_with_retry(
+                lambda: self._inner.embed_documents(texts),
+                func_name="embedding.embed_documents",
+            )
 
         started = datetime.utcnow()
         t0 = time.monotonic()
@@ -238,7 +257,10 @@ class LoggingEmbeddings:
         total_chars = sum(len(t or "") for t in (texts or []))
         first_preview = texts[0] if texts else ""
         try:
-            result = self._inner.embed_documents(texts)
+            result = call_sync_with_retry(
+                lambda: self._inner.embed_documents(texts),
+                func_name="embedding.embed_documents",
+            )
             dim = len(result[0]) if result and len(result) > 0 else 0
             self._write_log_for_batch(
                 ctx=ctx,
@@ -273,16 +295,24 @@ class LoggingEmbeddings:
     async def aembed_query(self, text: str) -> List[float]:
         ctx = get_embedding_context()
         aembed = getattr(self._inner, "aembed_query", None)
+        # Phase 1 Group A 2.5: async retry 包 inner 调用。
+        from lumen_services.retry import call_async_with_retry
         if aembed is None:
             # langchain_core.Embeddings provides a default sync fallback
             return self.embed_query(text)
         if ctx is None:
-            return await aembed(text)
+            return await call_async_with_retry(
+                lambda: aembed(text),
+                func_name="embedding.aembed_query",
+            )
 
         started = datetime.utcnow()
         t0 = time.monotonic()
         try:
-            result = await aembed(text)
+            result = await call_async_with_retry(
+                lambda: aembed(text),
+                func_name="embedding.aembed_query",
+            )
             self._write_log(
                 ctx=ctx,
                 text=text,
@@ -314,17 +344,25 @@ class LoggingEmbeddings:
     async def aembed_documents(self, texts: List[str]) -> List[List[float]]:
         ctx = get_embedding_context()
         aembed = getattr(self._inner, "aembed_documents", None)
+        # Phase 1 Group A 2.5: async retry 包 inner 调用。
+        from lumen_services.retry import call_async_with_retry
         if aembed is None:
             return self.embed_documents(texts)
         if ctx is None:
-            return await aembed(texts)
+            return await call_async_with_retry(
+                lambda: aembed(texts),
+                func_name="embedding.aembed_documents",
+            )
 
         started = datetime.utcnow()
         t0 = time.monotonic()
         total_chars = sum(len(t or "") for t in (texts or []))
         first_preview = texts[0] if texts else ""
         try:
-            result = await aembed(texts)
+            result = await call_async_with_retry(
+                lambda: aembed(texts),
+                func_name="embedding.aembed_documents",
+            )
             dim = len(result[0]) if result and len(result) > 0 else 0
             self._write_log_for_batch(
                 ctx=ctx,

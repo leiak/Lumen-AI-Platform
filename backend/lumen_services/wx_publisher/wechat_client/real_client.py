@@ -167,10 +167,28 @@ class WechatRealClient:
 
         coro_factory 接收一个 str token 参数,返回 coroutine(因为
         不能 await 然后再 await — 两次 await 须手动 retry)。
+
+        Phase 1 Group A 2.5 (2026-09-03): 同时包 transient retry —— 网络层
+        connect refused / read timeout 等异常走 tenacity 3 次 exponential
+        backoff 0.5/1/2s 重试;token 过期 errcode 仍走单次 force_refresh。
         """
         token = await self._ensure_token(account)
+        from lumen_services.retry import call_async_with_retry
+
+        # 双层 try: 内层 tenacity 处理 transient 网络异常, 外层 WechatAPIError
+        # 处理业务级 token 过期 (40001/40014/42001)。
+        async def _call_with_transient_retry():
+            try:
+                return await coro_factory(token)
+            except WechatAPIError as exc:
+                # 业务级错误不走 tenacity (不属于 transient 网络异常)
+                raise exc
+
         try:
-            return await coro_factory(token)
+            return await call_async_with_retry(
+                _call_with_transient_retry,
+                func_name="wechat._passive_retry",
+            )
         except WechatAPIError as exc:
             if exc.errcode not in PASSIVE_REFRESH_ERRCODES:
                 raise

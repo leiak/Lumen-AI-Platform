@@ -158,13 +158,23 @@ class LoggingChatModel:
     def invoke(self, messages: Any, **kwargs) -> Any:
         ctx = get_call_context()
         normalized = _normalize_messages(messages)
+        # Phase 1 Group A 2.5 (2026-09-03): transient retry 包 inner.invoke。
+        # 流式路径(stream / astream)不在这里 wrap —— generator 已开始 yield 后
+        # 重试会重复发 content,违反 LLM 调用语义。
+        from lumen_services.retry import call_sync_with_retry
         if ctx is None:
-            return self._inner.invoke(messages, **kwargs)
+            return call_sync_with_retry(
+                lambda: self._inner.invoke(messages, **kwargs),
+                func_name="llm.invoke",
+            )
 
         started = datetime.utcnow()
         t0 = time.monotonic()
         try:
-            response = self._inner.invoke(messages, **kwargs)
+            response = call_sync_with_retry(
+                lambda: self._inner.invoke(messages, **kwargs),
+                func_name="llm.invoke",
+            )
             self._write_log(
                 ctx=ctx,
                 messages=normalized,
@@ -192,13 +202,21 @@ class LoggingChatModel:
     async def ainvoke(self, messages: Any, **kwargs) -> Any:
         ctx = get_call_context()
         normalized = _normalize_messages(messages)
+        # Phase 1 Group A 2.5: async retry 包 inner.ainvoke(同 invoke 注释)。
+        from lumen_services.retry import call_async_with_retry
         if ctx is None:
-            return await self._inner.ainvoke(messages, **kwargs)
+            return await call_async_with_retry(
+                lambda: self._inner.ainvoke(messages, **kwargs),
+                func_name="llm.ainvoke",
+            )
 
         started = datetime.utcnow()
         t0 = time.monotonic()
         try:
-            response = await self._inner.ainvoke(messages, **kwargs)
+            response = await call_async_with_retry(
+                lambda: self._inner.ainvoke(messages, **kwargs),
+                func_name="llm.ainvoke",
+            )
             self._write_log(
                 ctx=ctx,
                 messages=normalized,

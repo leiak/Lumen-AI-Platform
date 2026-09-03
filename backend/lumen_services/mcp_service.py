@@ -320,10 +320,20 @@ class MCPService:
         if auth_token:
             headers["Authorization"] = f"Bearer {auth_token}"
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(server_url, headers=headers, json=payload)
-            response.raise_for_status()
-            result = _parse_sse_response(response.text)
+        # Phase 1 Group A 2.5 (2026-09-03): transient retry 包 httpx 调用。
+        # mcp_server 远程调用易受网络抖动影响(connect refused / read timeout),
+        # tenacity 3 次 exponential backoff 0.5/1/2s 后 reraise,失败走 MCPError。
+        from lumen_services.retry import call_async_with_retry
+
+        async def _do_post():
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(server_url, headers=headers, json=payload)
+                response.raise_for_status()
+                return _parse_sse_response(response.text)
+
+        result = await call_async_with_retry(
+            _do_post, func_name="mcp_service._call_mcp_server",
+        )
 
         if "error" in result:
             msg = result["error"].get("message", "Unknown MCP error")
@@ -357,10 +367,19 @@ class MCPService:
             headers["Authorization"] = f"Bearer {server.auth_token}"
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(server.url, headers=headers, json=payload)
-                resp.raise_for_status()
-                data = _parse_sse_response(resp.text)
+            # Phase 1 Group A 2.5 (2026-09-03): transient retry 包 httpx 调用,
+            # 跟 _call_mcp_server 同模式。
+            from lumen_services.retry import call_async_with_retry
+
+            async def _do_post():
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(server.url, headers=headers, json=payload)
+                    resp.raise_for_status()
+                    return _parse_sse_response(resp.text)
+
+            data = await call_async_with_retry(
+                _do_post, func_name="mcp_service.discover_tools",
+            )
 
             tools = data["result"]["tools"]
             registered: List[DBMCPTool] = []
