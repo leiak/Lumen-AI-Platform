@@ -129,3 +129,10 @@ router.include_router(workspace_members.router)
 #   /api/v1/multimodal-configs/*  (list / get / create / update / delete / test)
 from . import multimodal_configs  # noqa: E402
 router.include_router(multimodal_configs.router)
+
+# Phase 1 Group A 1.5 (2026-09-03): Celery failed tasks DBQ admin endpoints
+#   /api/v1/admin/tasks/failed   (list with tenant_id / task_name / acknowledged filters)
+#   /api/v1/admin/tasks/{id}/retry (re-dispatch via celery_app.send_task)
+#   /api/v1/admin/tasks/{id}/ack  (mark acknowledged)
+from . import admin_tasks  # noqa: E402
+router.include_router(admin_tasks.router)

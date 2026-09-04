@@ -2422,3 +2422,29 @@ def ensure_knowledge_bases_multimodal_columns() -> None:
         logger.exception(
             "ensure_knowledge_bases_multimodal_columns failed; will retry on next startup"
         )
+
+
+def ensure_failed_tasks_table() -> None:
+    """Phase 1 Group A 1.5 (2026-09-03): create ``failed_tasks`` table if missing。
+
+    镜像 ``ensure_workspaces_table`` 的 ``tables=[...]`` 模式 —— 本表
+    FK 引用的父表(``tenants`` / ``users``)已经在 Phase 0 ship 之前
+    早就存在,所以 ``create_all(tables=[FailedTask.__table__])`` 不会撞
+    ``NoReferencedTableError``。Model ``__table_args__`` 已声明 UNIQUE +
+    composite index,``create_all`` 自动建。
+
+    失败 fallback:try/except 包死 + ``logger.exception``,uvicorn 启动
+    不阻塞(同 M38.4 模式)。下一次 uvicorn boot 重试。
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from lumen_models.failed_task import FailedTask  # noqa: F401
+        Base.metadata.create_all(
+            bind=engine,
+            tables=[FailedTask.__table__],
+        )
+    except Exception:
+        logger.exception(
+            "ensure_failed_tasks_table failed; will retry on next startup"
+        )

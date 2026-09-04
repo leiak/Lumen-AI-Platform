@@ -78,6 +78,8 @@ from lumen_core.database import (
     ensure_eval_runs_table,
     # M38.2.x v2: workspace RBAC grants table
     ensure_workspace_member_permissions_table,
+    # Phase 1 Group A 1.5 (2026-09-03): failed_tasks DLQ table
+    ensure_failed_tasks_table,
     # M38.1: documents.asset_storage_key + storage_backend 列 + 索引
     ensure_documents_storage_columns,
     # M38.2: workspaces / document_folders 表 + knowledge_bases.workspace_id
@@ -157,6 +159,7 @@ from lumen_models.workspace import Workspace, DocumentFolder  # M38.2: 注册 wo
 from lumen_models.workspace_member_permission import WorkspaceMemberPermission  # M38.2.x v2: workspace RBAC grants
 from lumen_models.multimodal_embedding_config import MultimodalEmbeddingConfig  # M38.4: multimodal embedding configs 表注册
 from lumen_models.image_asset import ImageAsset  # M38.4: image_assets 表注册
+from lumen_models.failed_task import FailedTask  # Phase 1 Group A 1.5 (2026-09-03): failed_tasks DLQ 表注册
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -425,6 +428,9 @@ async def _lifespan(app: FastAPI):
     ensure_eval_runs_table()
     # M38.2.x v2: workspace RBAC grants table (workspace_member_permissions)
     ensure_workspace_member_permissions_table()
+    # Phase 1 Group A 1.5 (2026-09-03): failed_tasks DLQ 表 — admin
+    # 通过 /admin/tasks/failed 查 / 重派 / ack 失败任务
+    ensure_failed_tasks_table()
     # Seed a demo ExternalApp for local dev (idempotent). Runs after
     # ensure_external_apps_tables() so the parent table is guaranteed
     # to exist, and before scheduler reload so the DB is fresh.

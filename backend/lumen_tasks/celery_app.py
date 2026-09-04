@@ -79,16 +79,20 @@ from celery.signals import worker_init  # noqa: E402
 
 @worker_init.connect
 def _on_worker_init(**_kwargs) -> None:
-    """worker 启动钩子:装 trace_id 信号链。
+    """worker 启动钩子:装 trace_id + DLQ 信号链。
 
-    Phase 0 ship 了 trace_signals.py 但未接入 —— 本任务必修。
+    Phase 0 ship 了 trace_signals.py 但未接入 —— 1.3 修了。本任务加 DLQ。
     装完后:
     - producer 端发 task 时 ctx 有 trace_id → before_task_publish 写到 headers
     - worker 端 task_prerun 读 headers 注入 ctx
     - worker 端 task_postrun 清 ctx(防串下一个 task)
+    - task 失败 → task_failure 写 FailedTask row(让 admin 查 / 重派 / ack)
     """
     from lumen_tasks.trace_signals import install_celery_signals
+    from lumen_tasks.dlq import install_dlq_signal
+
     install_celery_signals()
+    install_dlq_signal()
 
 
 # Task registration 现在由 Celery 的 ``include`` 处理。worker 启动时
