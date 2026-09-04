@@ -1,3 +1,4 @@
+import asyncio
 import os
 from contextlib import asynccontextmanager
 
@@ -291,12 +292,20 @@ def _should_run_scheduler_for_worker() -> bool:
     return worker_rank == 0
 
 
-async def _shutdown_cleanup(started_scheduler: bool) -> None:
+async def _shutdown_cleanup(
+    started_scheduler: bool,
+    celery_queue_monitor_task: "asyncio.Task | None" = None,
+    celery_queue_monitor_shutdown: "asyncio.Event | None" = None,
+) -> None:
     """Phase 1 Group A 1.1 (2026-09-03): lifespan finally 块的清理逻辑。
 
     仅 `started_scheduler=True` 时调 scheduler.stop()(避免空 stop 抛错
     — _scheduler singleton 已 start 才能 shutdown);最后必 engine.dispose()
     防止 MySQL MDL 孤儿连接(2026-06-08 踩到,KILL 脚本恢复)。
+
+    Phase 1 Group B 2.4.5 (2026-09-04):celery_queue_monitor 通过 Event + task
+    传参优雅退出(set Event → 等 task 5s → 超时则 cancel),避免后台 task 在
+    Redis 连接 close 后还在 tick。
 
     抽成 helper 是为了单测 —— 整 lifespan 太重,直接调这个验 dispose 触发。
     """
@@ -308,6 +317,24 @@ async def _shutdown_cleanup(started_scheduler: bool) -> None:
             import logging as _shutdown_logger
             _shutdown_logger.getLogger(__name__).warning(
                 "scheduler stop failed: %s", e,
+            )
+    # Phase 1 Group B 2.4.5 (2026-09-04):celery_queue_monitor 优雅退出。
+    # set Event 让 loop 退出 wait_for,最多等 5s,超时则 cancel —— 避免
+    # 后台 task 在 Redis connection 已 close 后还在 tick 抛 ConnectionError。
+    if celery_queue_monitor_task is not None and celery_queue_monitor_shutdown is not None:
+        celery_queue_monitor_shutdown.set()
+        try:
+            await asyncio.wait_for(celery_queue_monitor_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            celery_queue_monitor_task.cancel()
+            import logging as _shutdown_logger
+            _shutdown_logger.getLogger(__name__).warning(
+                "celery_queue_monitor didn't exit in 5s; cancelled"
+            )
+        except Exception as e:  # noqa: BLE001
+            import logging as _shutdown_logger
+            _shutdown_logger.getLogger(__name__).warning(
+                "celery_queue_monitor shutdown error: %s", e,
             )
     # 关闭 SQLAlchemy 连接池,避免 taskkill / SIGTERM 后 MySQL 留 Sleep
     # 连接持 MDL 导致下个 uvicorn 启动时 ensure_* ALTER 卡 MDL 等候链
@@ -497,6 +524,36 @@ async def _lifespan(app: FastAPI):
             os.getenv("WORKER_RANK", "0"), os.getenv("RUN_SCHEDULER", "auto"),
         )
 
+    # Phase 1 Group B 2.4.5 (2026-09-04):启 Celery 队列深度后台监控。
+    # 每 30s 一次 ``redis llen <queue>`` 更新 ``lumen_celery_queue_depth`` Gauge,
+    # Grafana Overview 看板 + B2c Alertmanager 告警共用。
+    # 注:**仅** WORKER_RANK=0 跑 —— gunicorn 多 worker 下每个 worker 都启会
+    # 浪费 N 倍 Redis 连接;同时只有 1 个 worker 写 gauge 也避免冲突。
+    celery_queue_monitor_task: "asyncio.Task | None" = None
+    celery_queue_monitor_shutdown: "asyncio.Event | None" = None
+    if _should_run_scheduler:  # 同 scheduler 守门规则
+        try:
+            from lumen_core.celery_queue_monitor import celery_queue_monitor_loop
+            redis_url = (
+                f"redis://{os.getenv('REDIS_HOST', 'localhost')}"
+                f":{os.getenv('REDIS_PORT', '26380')}"
+                f"/{os.getenv('REDIS_DB', '0')}"
+            )
+            celery_queue_monitor_shutdown = asyncio.Event()
+            celery_queue_monitor_task = asyncio.create_task(
+                celery_queue_monitor_loop(redis_url, celery_queue_monitor_shutdown),
+                name="lumen.celery_queue_monitor",
+            )
+            import logging as _lifespan_logger
+            _lifespan_logger.getLogger(__name__).info(
+                "celery_queue_monitor started (redis=%s)", redis_url,
+            )
+        except Exception as e:  # noqa: BLE001
+            import logging as _lifespan_logger
+            _lifespan_logger.getLogger(__name__).warning(
+                "celery_queue_monitor start failed (%s); metrics will stay at default 0", e,
+            )
+
     # Phase 0 Unit 2 (2026-09-02):标记 startup 跑完。
     # 必须在所有 ensure_* / scheduler 启动之后才 flip,否则 readiness
     # probe 提前 200 但 DB 还没就绪 → K8s 派流量来挂首请求。
@@ -508,7 +565,11 @@ async def _lifespan(app: FastAPI):
     finally:
         # shutdown: 与原 @app.on_event("shutdown") 行为一致 —— 抽到
         # _shutdown_cleanup helper,单测可直调(整 lifespan 太重)。
-        await _shutdown_cleanup(started_scheduler=_should_run_scheduler)
+        await _shutdown_cleanup(
+            started_scheduler=_should_run_scheduler,
+            celery_queue_monitor_task=celery_queue_monitor_task,
+            celery_queue_monitor_shutdown=celery_queue_monitor_shutdown,
+        )
 
 
 # 注入 lifespan —— 必须在 app 创建后、所有中间件注册前设置(虽然技术上中间件

@@ -1,0 +1,64 @@
+# Phase 1 Group B 2.4.5 (2026-09-04):Prometheus scrape 配置。
+#
+# 启动参数(在 docker-compose.yml 里):
+#   --config.file=/etc/prometheus/prometheus.yml
+#   --storage.tsdb.path=/prometheus          # 数据落 prometheus_data 卷
+#   --storage.tsdb.retention.time=15d        # dev 15d 够了,prod 调 90d
+#   --web.enable-lifecycle                    # SIGHUP 热加载 config(rule 改了)
+#
+# scrape 目标:
+#   1. lumen-backend — uvicorn 在 host:11335,/metrics 端点(Phase 0 4.3 ship)
+#   2. prometheus 自身 — internal metric ``up`` / ``scrape_duration_seconds``
+#   3. grafana 自身 — Grafana 暴露 ``/metrics``(内置,无需额外配置)
+#
+# host.docker.internal:
+#   Prometheus 容器内访问 host 上的 uvicorn:11335。Windows Docker Desktop
+#   默认 alias 不稳,docker-compose 配 extra_hosts: host-gateway 强制映射。
+#
+# 告警规则:
+#   /etc/prometheus/rules/*.yml 由 B2c Alertmanager 阶段填,这里 rule_files
+#   先引用,B2c 不至于再改 prometheus.yml。
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: "lumen-platform"
+
+# 告警规则 — Phase 1 Group B 2.4.7 (B2c) 填 alert.rules.yml / slo.rules.yml
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+# Alertmanager 地址 — B2c 起 alertmanager 容器后启用。
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ["lumen-platform-alertmanager:9093"]
+
+scrape_configs:
+  # ---- 主目标:uvicorn /metrics ----
+  - job_name: "lumen-backend"
+    metrics_path: "/metrics"
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      # host.docker.internal 走 extra_hosts: host-gateway 映射到 host gateway
+      - targets: ["host.docker.internal:11335"]
+        labels:
+          service: "lumen-backend"
+          env: "dev"
+
+  # ---- Prometheus 自身 ----
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+        labels:
+          service: "prometheus"
+
+  # ---- Grafana 自身(Grafana 11+ 默认 /metrics 端点)----
+  - job_name: "grafana"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["lumen-platform-grafana:3000"]
+        labels:
+          service: "grafana"

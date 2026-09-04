@@ -1,0 +1,19 @@
+# Phase 1 Group B 2.4.5 (2026-09-04):Grafana 自动 datasource 配 Prometheus。
+#
+# 启动时 Grafana 读 /etc/grafana/provisioning/datasources/*.yml 自动建 datasource,
+# 无需手动点 UI。改 datasource URL / 加 TLS 改这里即可。
+#
+# 容器内 Prometheus 在 docker DNS alias ``lumen-platform-prometheus:9090``,
+# 不走 host.docker.internal(同 docker network)。
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://lumen-platform-prometheus:9090
+    isDefault: true
+    editable: false  # dev 阶段禁止 UI 改,避免下次启动被覆盖;prod 可改 true
+    jsonData:
+      timeInterval: 15s  # 跟 prometheus.yml scrape_interval 对齐
+      httpMethod: POST

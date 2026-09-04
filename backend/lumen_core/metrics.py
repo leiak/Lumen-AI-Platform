@@ -117,6 +117,18 @@ lumen_celery_tasks_total = Counter(
 )
 
 
+# Phase 1 Group B 2.4.5 (2026-09-04): Celery 各队列任务堆积深度 Gauge。
+# 由 lumen_core.celery_queue_monitor 背景任务每 30s 跑 ``redis llen(queue)``
+# 更新 —— Prometheus 不会自己数 Celery 队列长度,得 backend 主动上报。
+# Grafana Overview 看板 + B2c Alertmanager ``lumen_celery_queue_depth_high``
+# 告警共用。
+lumen_celery_queue_depth = Gauge(
+    "lumen_celery_queue_depth",
+    "Number of pending tasks in a Celery queue (redis llen).",
+    ["queue"],  # doc_parse / ppt_gen / eval_run / default
+)
+
+
 # Phase 1 Group A 2.3 (2026-09-03): 熔断器状态 Gauge。
 # 每个 (breaker, state) label 对一个 0/1 值,只有当前态 = 1,其他 = 0。
 # closed=0 / half_open=1 / open=2 是 state code 常量,在
@@ -203,6 +215,7 @@ def reset_metrics_for_test() -> None:
         lumen_doc_processing_duration_seconds,
         lumen_celery_tasks_total,
         lumen_circuit_breaker_state,
+        lumen_celery_queue_depth,
     )
     for metric in _LUMEN_METRICS:
         try:
@@ -225,6 +238,7 @@ __all__ = [
     "lumen_doc_processing_duration_seconds",
     "lumen_celery_tasks_total",
     "lumen_circuit_breaker_state",
+    "lumen_celery_queue_depth",
     "render_metrics",
     "get_metric_value",
     "reset_metrics_for_test",

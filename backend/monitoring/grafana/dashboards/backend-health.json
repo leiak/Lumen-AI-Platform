@@ -1,0 +1,113 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "熔断器状态 (closed / half_open / open)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {"drawStyle": "line", "fillOpacity": 30, "stacking": {"mode": "normal"}},
+          "mappings": [
+            {"options": {"0": {"text": "OFF"}}, "type": "value"},
+            {"options": {"1": {"text": "ON"}}, "type": "value"}
+          ]
+        }
+      },
+      "options": {"legend": {"showLegend": true, "displayMode": "table"}},
+      "targets": [
+        {
+          "expr": "lumen_circuit_breaker_state",
+          "refId": "A",
+          "legendFormat": "{{breaker}} / {{state}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "限流拒绝速率 (req/s)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"drawStyle": "line", "fillOpacity": 20}
+        }
+      },
+      "options": {"legend": {"showLegend": true, "displayMode": "list"}},
+      "targets": [
+        {
+          "expr": "sum by (endpoint) (rate(lumen_rate_limit_rejections_total[1m]))",
+          "refId": "A",
+          "legendFormat": "{{endpoint}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Celery 任务完成速率 (tasks/s)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"drawStyle": "line", "fillOpacity": 10, "stacking": {"mode": "normal"}}
+        }
+      },
+      "options": {"legend": {"showLegend": true, "displayMode": "list"}},
+      "targets": [
+        {
+          "expr": "sum by (queue, status) (rate(lumen_celery_tasks_total[1m]))",
+          "refId": "A",
+          "legendFormat": "{{queue}} / {{status}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Scrape 自身状态 (up)",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 16},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            {"options": {"0": {"text": "DOWN", "color": "red"}}, "type": "value"},
+            {"options": {"1": {"text": "UP", "color": "green"}}, "type": "value"}
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]
+          }
+        }
+      },
+      "options": {"colorMode": "background", "textMode": "value_and_name", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [
+        {
+          "expr": "up{job=~\"lumen-backend|grafana|prometheus\"}",
+          "refId": "A",
+          "legendFormat": "{{job}}"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["lumen", "health"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Lumen — Backend Health",
+  "uid": "lumen-backend-health",
+  "version": 1
+}

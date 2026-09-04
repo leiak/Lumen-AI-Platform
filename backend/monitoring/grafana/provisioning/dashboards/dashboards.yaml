@@ -1,0 +1,18 @@
+# Phase 1 Group B 2.4.5 (2026-09-04):Grafana dashboard provider 配 4 块看板。
+#
+# 启动时 Grafana 扫 /var/lib/grafana/dashboards/*.json 自动加载,
+# 无需手动 import。每改 dashboard JSON + SIGHUP Grafana 会 reload(但容器
+# 默认 ``--enable-ui=false`` 不响应 reload,改 JSON 重启容器更稳)。
+apiVersion: 1
+
+providers:
+  - name: "Lumen Dashboards"
+    orgId: 1
+    folder: "Lumen"
+    type: file
+    disableDeletion: false
+    editable: true  # 允许 UI 编辑(开发常用),持久化需手动 export 回 JSON
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

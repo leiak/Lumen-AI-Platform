@@ -1,0 +1,110 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "外部依赖活跃连接数",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10}
+        }
+      },
+      "options": {"legend": {"showLegend": true, "displayMode": "table"}},
+      "targets": [
+        {
+          "expr": "lumen_active_connections",
+          "refId": "A",
+          "legendFormat": "{{type}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Embedding 调用速率 (calls/s)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"drawStyle": "line", "fillOpacity": 10}
+        }
+      },
+      "options": {"legend": {"showLegend": true, "displayMode": "list"}},
+      "targets": [
+        {
+          "expr": "sum by (model) (rate(lumen_embedding_calls_total[1m]))",
+          "refId": "A",
+          "legendFormat": "{{model}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Embedding 失败率",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {"drawStyle": "line", "fillOpacity": 20},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.05},
+              {"color": "red", "value": 0.1}
+            ]
+          }
+        }
+      },
+      "options": {"legend": {"showLegend": false}},
+      "targets": [
+        {
+          "expr": "sum by (model) (rate(lumen_embedding_calls_total{status=\"error\"}[5m])) / clamp_min(sum by (model) (rate(lumen_embedding_calls_total[5m])), 0.001)",
+          "refId": "A",
+          "legendFormat": "{{model}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "文档处理耗时 (P95 / s)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth"}
+        }
+      },
+      "options": {"legend": {"showLegend": true, "displayMode": "list"}},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lumen_doc_processing_duration_seconds_bucket[5m])))",
+          "refId": "A",
+          "legendFormat": "doc P95"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["lumen", "storage"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Lumen — Storage & External",
+  "uid": "lumen-storage",
+  "version": 1
+}

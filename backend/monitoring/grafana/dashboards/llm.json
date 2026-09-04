@@ -1,0 +1,89 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "LLM 调用速率 (calls/s)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10}
+        }
+      },
+      "options": {"legend": {"showLegend": true, "displayMode": "table"}},
+      "targets": [
+        {
+          "expr": "sum by (model) (rate(lumen_llm_calls_total[1m]))",
+          "refId": "A",
+          "legendFormat": "{{model}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "LLM 失败率",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {"drawStyle": "line", "fillOpacity": 20},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.02},
+              {"color": "red", "value": 0.05}
+            ]
+          }
+        }
+      },
+      "options": {"legend": {"showLegend": false}},
+      "targets": [
+        {
+          "expr": "sum by (model) (rate(lumen_llm_calls_total{status=\"error\"}[5m])) / clamp_min(sum by (model) (rate(lumen_llm_calls_total[5m])), 0.001)",
+          "refId": "A",
+          "legendFormat": "{{model}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Token 用量 (tokens/s)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "stacking": {"mode": "normal"}}
+        }
+      },
+      "options": {"legend": {"showLegend": true, "displayMode": "table"}},
+      "targets": [
+        {
+          "expr": "sum by (model, type) (rate(lumen_llm_tokens_total[1m]))",
+          "refId": "A",
+          "legendFormat": "{{model}} / {{type}}"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["lumen", "llm"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Lumen — LLM",
+  "uid": "lumen-llm",
+  "version": 1
+}
