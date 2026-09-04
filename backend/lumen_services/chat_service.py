@@ -1,6 +1,7 @@
 from typing import AsyncGenerator, Optional, List, Dict, Any
 import json
 import logging
+import time
 import uuid
 import warnings
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -10,6 +11,21 @@ from lumen_core.llm_call_context import LLMCallContext, set_call_context, reset_
 from lumen_services.model_loader import create_chat_model
 
 logger = logging.getLogger(__name__)
+
+
+def _observe_llm_ttfb(model_name: str, t0: float) -> None:
+    """Phase 1 Group B B2b 4.6 (2026-09-04): 把 LLM streaming 首 chunk 延迟写进
+    Prometheus Histogram,供 SLO ``chat_ttfb`` (P95 < 500ms) 看板用。
+
+    写入失败不影响主流程 —— 监控永远不应该让生产接口 fail。
+    """
+    try:
+        from lumen_core.metrics import lumen_llm_ttfb_seconds
+        lumen_llm_ttfb_seconds.labels(model=str(model_name)).observe(
+            time.monotonic() - t0
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("lumen_llm_ttfb_seconds.observe failed", exc_info=True)
 
 
 class ChatService:
@@ -102,8 +118,22 @@ class ChatService:
             return
 
         # Original token-streaming path (no tools, backward compat)
+        # Phase 1 Group B B2b 4.6 (2026-09-04): TTFB 测量 → lumen_llm_ttfb_seconds。
+        # 只在第一个 chunk 到达时记一次(后续 chunk 是 throughput 范畴,不是 latency)。
+        # tools 路径走 invoke() 不算"streaming",TTFB 概念不适用,
+        # 整段 latency 已被 http_request_duration_seconds 覆盖。
+        model_name = (
+            getattr(self.chat_model, "model", None)
+            or getattr(self.chat_model, "model_name", None)
+            or "unknown"
+        )
+        t0 = time.monotonic()
+        ttfb_recorded = False
         try:
             async for chunk in self.chat_model.astream(messages):
+                if not ttfb_recorded:
+                    _observe_llm_ttfb(model_name, t0)
+                    ttfb_recorded = True
                 if chunk.content:
                     yield chunk.content
         except Exception as e:

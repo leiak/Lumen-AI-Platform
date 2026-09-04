@@ -1,0 +1,203 @@
+# Phase 1 Group B B2b 4.6 (2026-09-04): Prometheus SLO recording rules + alert rules。
+#
+# 这是单一定义源 monitoring/slo_definitions.yaml 对应的 PromQL 视图。
+# 改 SLO 阈值请改 slo_definitions.yaml,这里跟它对齐。
+#
+# 命名约定:
+#   slo:<slo_name>:sli_5m          — 最近 5m SLI 值(availability 是成功比率 / latency 是 P95 秒数)
+#   slo:<slo_name>:burn_rate_5m    — 最近 5m 预算消耗速度(1.0 = 期望速率)
+#   slo:<slo_name>:burn_rate_1h    — 最近 1h 预算消耗速度
+#   SLOHighBurnRate<slo_name>      — alert rule,burn_rate_5m > 14.4 持续 2min
+
+groups:
+
+  # ---- 录制规则(SLI + burn rate)----
+  - name: slo_recording
+    interval: 30s
+    rules:
+
+      # ---- api_availability:5xx < 0.5% ----
+      - record: slo:api_availability:sli_5m
+        expr: |
+          sum(rate(http_requests_total{status!~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(http_requests_total[5m])), 0.001)
+      - record: slo:api_availability:burn_rate_5m
+        expr: |
+          (1 - slo:api_availability:sli_5m) / 0.005
+      - record: slo:api_availability:burn_rate_1h
+        expr: |
+          (1 - (
+            sum(rate(http_requests_total{status!~"5.."}[1h]))
+            /
+            clamp_min(sum(rate(http_requests_total[1h])), 0.001)
+          )) / 0.005
+
+      # ---- api_latency:P95 < 1s ----
+      # burn rate = (P95 - target) / budget_total
+      # 严格说"burn rate"在 latency SLO 上定义不太干净(用 P99 budget ratio 更标准),
+      # 这里用简化版:超时越久,burn rate 越高。
+      - record: slo:api_latency:sli_5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket[5m]))
+          )
+      - record: slo:api_latency:burn_rate_5m
+        expr: |
+          slo:api_latency:sli_5m / 1.0
+      - record: slo:api_latency:burn_rate_1h
+        expr: |
+          (
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(http_request_duration_seconds_bucket[1h]))
+            )
+          ) / 1.0
+
+      # ---- chat_ttfb:streaming TTFB P95 < 500ms ----
+      - record: slo:chat_ttfb:sli_5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(lumen_llm_ttfb_seconds_bucket[5m]))
+          )
+      - record: slo:chat_ttfb:burn_rate_5m
+        expr: |
+          slo:chat_ttfb:sli_5m / 0.5
+      - record: slo:chat_ttfb:burn_rate_1h
+        expr: |
+          (
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(lumen_llm_ttfb_seconds_bucket[1h]))
+            )
+          ) / 0.5
+
+      # ---- doc_processing:P95 < 30s ----
+      - record: slo:doc_processing:sli_5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(lumen_doc_processing_duration_seconds_bucket{status="success"}[5m]))
+          )
+      - record: slo:doc_processing:burn_rate_5m
+        expr: |
+          slo:doc_processing:sli_5m / 30.0
+      - record: slo:doc_processing:burn_rate_1h
+        expr: |
+          (
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(lumen_doc_processing_duration_seconds_bucket{status="success"}[1h]))
+            )
+          ) / 30.0
+
+      # ---- embedding_latency:P95 < 200ms ----
+      - record: slo:embedding_latency:sli_5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(lumen_embedding_duration_seconds_bucket{status="success"}[5m]))
+          )
+      - record: slo:embedding_latency:burn_rate_5m
+        expr: |
+          slo:embedding_latency:sli_5m / 0.2
+      - record: slo:embedding_latency:burn_rate_1h
+        expr: |
+          (
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(lumen_embedding_duration_seconds_bucket{status="success"}[1h]))
+            )
+          ) / 0.2
+
+      # ---- celery_success:> 99% ----
+      # 注意:目前 lumen_celery_tasks_total 没写入点,分母为 0 时走 clamp_min 兜底。
+      - record: slo:celery_success:sli_5m
+        expr: |
+          sum(rate(lumen_celery_tasks_total{status="success"}[5m]))
+          /
+          clamp_min(sum(rate(lumen_celery_tasks_total[5m])), 0.001)
+      - record: slo:celery_success:burn_rate_5m
+        expr: |
+          (1 - slo:celery_success:sli_5m) / 0.01
+      - record: slo:celery_success:burn_rate_1h
+        expr: |
+          (1 - (
+            sum(rate(lumen_celery_tasks_total{status="success"}[1h]))
+            /
+            clamp_min(sum(rate(lumen_celery_tasks_total[1h])), 0.001)
+          )) / 0.01
+
+  # ---- 告警规则 ----
+  # Phase 1 Group B B2c (roadmap 4.7) 落地 Alertmanager 后,这里定义的 alert
+  # 会被 Alertmanager 路由到 PagerDuty / Slack / JSON file 等 receiver。
+  # 现阶段规则已定义但未生效(没有 Alertmanager 进程在跑)。
+  - name: slo_alerts
+    interval: 30s
+    rules:
+
+      # 高消耗速率(>14.4x):按 Google SRE workbook,2h 内会用完月度预算
+      - alert: SLOApiAvailabilityHighBurnRate
+        expr: slo:api_availability:burn_rate_5m > 14.4
+        for: 2m
+        labels:
+          severity: warning
+          slo: api_availability
+        annotations:
+          summary: "API 5xx 错误率超速燃烧"
+          description: |
+            API 5xx 错误率消耗速度 {{ $value | humanize }}x 是预期速率的 14.4 倍以上,
+            按当前速度 2h 内会用完月度错误预算。
+            SLI 5m: {{ with query "slo:api_availability:sli_5m" }}{{ . | first | value }}{{ end }}
+
+      - alert: SLOApiLatencyHighBurnRate
+        expr: slo:api_latency:burn_rate_5m > 1.0
+        for: 5m
+        labels:
+          severity: warning
+          slo: api_latency
+        annotations:
+          summary: "API P95 latency 突破 1s SLO"
+          description: "API P95 latency {{ $value }}s 已突破 SLO 目标 1s。"
+
+      - alert: SLOChatTTFBHighBurnRate
+        expr: slo:chat_ttfb:burn_rate_5m > 1.0
+        for: 5m
+        labels:
+          severity: warning
+          slo: chat_ttfb
+        annotations:
+          summary: "Chat streaming TTFB 突破 500ms SLO"
+          description: "Chat streaming TTFB P95 {{ $value }}s 已突破 500ms SLO 目标。"
+
+      - alert: SLODocProcessingHighBurnRate
+        expr: slo:doc_processing:burn_rate_5m > 1.0
+        for: 10m
+        labels:
+          severity: warning
+          slo: doc_processing
+        annotations:
+          summary: "文档处理 P95 突破 30s SLO"
+          description: "文档处理 P95 {{ $value }}s 突破 30s SLO 目标。"
+
+      - alert: SLOEmbeddingLatencyHighBurnRate
+        expr: slo:embedding_latency:burn_rate_5m > 1.0
+        for: 5m
+        labels:
+          severity: warning
+          slo: embedding_latency
+        annotations:
+          summary: "Embedding P95 突破 200ms SLO"
+          description: "Embedding P95 {{ $value }}s 突破 200ms SLO 目标。"
+
+      - alert: SLOCelerySuccessHighBurnRate
+        expr: slo:celery_success:burn_rate_5m > 14.4
+        for: 2m
+        labels:
+          severity: warning
+          slo: celery_success
+        annotations:
+          summary: "Celery 任务失败率超速燃烧"
+          description: "Celery 任务失败率消耗速度 {{ $value }}x 超预期。"

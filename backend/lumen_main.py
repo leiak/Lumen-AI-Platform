@@ -296,6 +296,8 @@ async def _shutdown_cleanup(
     started_scheduler: bool,
     celery_queue_monitor_task: "asyncio.Task | None" = None,
     celery_queue_monitor_shutdown: "asyncio.Event | None" = None,
+    slo_budget_calculator_task: "asyncio.Task | None" = None,
+    slo_budget_calculator_shutdown: "asyncio.Event | None" = None,
 ) -> None:
     """Phase 1 Group A 1.1 (2026-09-03): lifespan finally 块的清理逻辑。
 
@@ -306,6 +308,9 @@ async def _shutdown_cleanup(
     Phase 1 Group B 2.4.5 (2026-09-04):celery_queue_monitor 通过 Event + task
     传参优雅退出(set Event → 等 task 5s → 超时则 cancel),避免后台 task 在
     Redis 连接 close 后还在 tick。
+
+    Phase 1 Group B B2b 4.6 (2026-09-04):slo_budget_calculator 同款 Event +
+    task 优雅退出模式。
 
     抽成 helper 是为了单测 —— 整 lifespan 太重,直接调这个验 dispose 触发。
     """
@@ -335,6 +340,23 @@ async def _shutdown_cleanup(
             import logging as _shutdown_logger
             _shutdown_logger.getLogger(__name__).warning(
                 "celery_queue_monitor shutdown error: %s", e,
+            )
+    # Phase 1 Group B B2b 4.6 (2026-09-04):slo_budget_calculator 优雅退出。
+    # 同 celery_queue_monitor 套路 —— Event + wait_for 5s + cancel。
+    if slo_budget_calculator_task is not None and slo_budget_calculator_shutdown is not None:
+        slo_budget_calculator_shutdown.set()
+        try:
+            await asyncio.wait_for(slo_budget_calculator_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            slo_budget_calculator_task.cancel()
+            import logging as _shutdown_logger
+            _shutdown_logger.getLogger(__name__).warning(
+                "slo_budget_calculator didn't exit in 5s; cancelled"
+            )
+        except Exception as e:  # noqa: BLE001
+            import logging as _shutdown_logger
+            _shutdown_logger.getLogger(__name__).warning(
+                "slo_budget_calculator shutdown error: %s", e,
             )
     # 关闭 SQLAlchemy 连接池,避免 taskkill / SIGTERM 后 MySQL 留 Sleep
     # 连接持 MDL 导致下个 uvicorn 启动时 ensure_* ALTER 卡 MDL 等候链
@@ -554,6 +576,31 @@ async def _lifespan(app: FastAPI):
                 "celery_queue_monitor start failed (%s); metrics will stay at default 0", e,
             )
 
+    # Phase 1 Group B B2b 4.6 (2026-09-04):启 SLO 错误预算后台计算器。
+    # 每 30s 读本地 prometheus_client REGISTRY + slo_definitions.yaml,
+    # 算 6 个 SLO 的 budget remaining + burn rate → 写 lumen_slo_* Gauge。
+    # Grafana SLO 看板 status bar 直接读这两个 Gauge。
+    # 注:同样仅 WORKER_RANK=0 跑 —— 避免多 worker 重复算同一个 SLO 写 Gauge 冲突。
+    slo_budget_calculator_task: "asyncio.Task | None" = None
+    slo_budget_calculator_shutdown: "asyncio.Event | None" = None
+    if _should_run_scheduler:
+        try:
+            from lumen_core.slo_budget_calculator import slo_budget_calculator_loop
+            slo_budget_calculator_shutdown = asyncio.Event()
+            slo_budget_calculator_task = asyncio.create_task(
+                slo_budget_calculator_loop(slo_budget_calculator_shutdown),
+                name="lumen.slo_budget_calculator",
+            )
+            import logging as _lifespan_logger
+            _lifespan_logger.getLogger(__name__).info(
+                "slo_budget_calculator started",
+            )
+        except Exception as e:  # noqa: BLE001
+            import logging as _lifespan_logger
+            _lifespan_logger.getLogger(__name__).warning(
+                "slo_budget_calculator start failed (%s); SLO gauges will stay at default", e,
+            )
+
     # Phase 0 Unit 2 (2026-09-02):标记 startup 跑完。
     # 必须在所有 ensure_* / scheduler 启动之后才 flip,否则 readiness
     # probe 提前 200 但 DB 还没就绪 → K8s 派流量来挂首请求。
@@ -569,6 +616,8 @@ async def _lifespan(app: FastAPI):
             started_scheduler=_should_run_scheduler,
             celery_queue_monitor_task=celery_queue_monitor_task,
             celery_queue_monitor_shutdown=celery_queue_monitor_shutdown,
+            slo_budget_calculator_task=slo_budget_calculator_task,
+            slo_budget_calculator_shutdown=slo_budget_calculator_shutdown,
         )
 
 

@@ -1,4 +1,5 @@
 """Phase 0 Unit 5 4.3 (2026-09-02):Prometheus 指标定义 + /metrics 端点。
+Phase 1 Group B B2b 4.6 (2026-09-04):SLO + 错误预算相关指标。
 
 **指标体系**:
 
@@ -16,9 +17,23 @@ Lumen 业务指标(各服务主动 .labels(...).inc() / .observe()):
 - ``lumen_rate_limit_rejections_total{endpoint}`` — 限流拒绝计数
 - ``lumen_llm_calls_total{model, status}`` — LLM 调用计数(在 chat / agent service 里 .inc())
 - ``lumen_llm_tokens_total{model, type=prompt|completion}`` — token 用量
+- ``lumen_llm_ttfb_seconds{model}`` — LLM Time-To-First-Byte(chat streaming 首 chunk)
 - ``lumen_embedding_calls_total{model, status}`` — embedding 调用计数
+- ``lumen_embedding_duration_seconds{model, status}`` — embedding 调用耗时
 - ``lumen_doc_processing_duration_seconds{status}`` — 文档处理耗时
 - ``lumen_celery_tasks_total{queue, status}`` — celery 任务计数
+
+SLO / 错误预算(由 lumen_core.slo_budget_calculator 30s tick 更新):
+- ``lumen_slo_budget_remaining{slo}`` — 月度错误预算剩余 ratio(1.0 = 100%, 0 = 用完, 负 = 超支)
+- ``lumen_slo_burn_rate_1h{slo}`` — 最近 1h 预算消耗速度(1.0 = 期望速率, >1 = 超速)
+
+**SLO 命名空间**(slo_definitions.yaml 单一定义源):
+- ``api_availability`` — API 5xx < 0.5%(99.5% 可用)
+- ``api_latency`` — API P95 < 1s
+- ``chat_ttfb`` — chat streaming TTFB P95 < 500ms
+- ``doc_processing`` — 文档处理 P95 < 30s
+- ``embedding_latency`` — embedding P95 < 200ms
+- ``celery_success`` — celery 任务成功率 > 99%
 
 **Endpoint**:``GET /metrics`` 返 Prometheus 文本格式(Content-Type:
 text/plain; version=0.0.4; charset=utf-8),Prometheus scrape 用。
@@ -27,12 +42,15 @@ text/plain; version=0.0.4; charset=utf-8),Prometheus scrape 用。
 - path 用 starlette route template(``/users/{user_id}``)而非实际 URL
   (避免 ``/users/1`` / ``/users/2`` ... 无限 label 增长)
 - high-cardinality 字段(trace_id / request_id / user_id)绝不进 label
+- SLO label 限定 6 个固定值(roadmap 锁定),不会动态增长
 
 **踩坑**:
 - prometheus_client 默认 registry 是全局单例;测试时要 reset,避免
   跨测试污染 → 用 ``prometheus_client.REGISTRY`` 直接 clear
 - Histogram bucket 选 [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s,
   2.5s, 5s, 10s] 覆盖 chat streaming / doc upload / admin 等场景
+- SLO Histogram bucket 选在目标 P95 阈值附近密布(embedding 200ms / chat
+  TTFB 500ms),让 histogram_quantile() 在阈值附近有足够分辨率
 """
 from __future__ import annotations
 
@@ -91,6 +109,16 @@ lumen_llm_calls_total = Counter(
     ["model", "status"],  # status: success / error / timeout
 )
 
+# Phase 1 Group B B2b 4.6 (2026-09-04): LLM Time-To-First-Byte。
+# chat streaming 第一个 chunk 到达耗时。SLO chat_ttfb:P95 < 500ms。
+# bucket 在 500ms 附近密布。
+lumen_llm_ttfb_seconds = Histogram(
+    "lumen_llm_ttfb_seconds",
+    "LLM Time-To-First-Byte for streaming responses (request -> first chunk).",
+    ["model"],
+    buckets=(0.025, 0.05, 0.1, 0.2, 0.5, 1.0, 2.5, 5.0, 10.0),
+)
+
 lumen_llm_tokens_total = Counter(
     "lumen_llm_tokens_total",
     "Total LLM tokens consumed.",
@@ -101,6 +129,16 @@ lumen_embedding_calls_total = Counter(
     "lumen_embedding_calls_total",
     "Total embedding model invocations.",
     ["model", "status"],
+)
+
+# Phase 1 Group B B2b 4.6 (2026-09-04): Embedding 调用耗时。
+# 用于 SLO embedding_latency:P95 < 200ms。bucket 在 200ms / 500ms 附近密布,
+# 让 histogram_quantile() 在阈值附近有足够分辨率。
+lumen_embedding_duration_seconds = Histogram(
+    "lumen_embedding_duration_seconds",
+    "Embedding call duration in seconds (sync embed_query + aembed_query).",
+    ["model", "status"],  # success / error
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1.0, 2.5, 5.0),
 )
 
 lumen_doc_processing_duration_seconds = Histogram(
@@ -137,6 +175,30 @@ lumen_circuit_breaker_state = Gauge(
     "lumen_circuit_breaker_state",
     "Circuit breaker state by name. closed/half_open/open labels, 1=current, 0=other.",
     ["breaker", "state"],
+)
+
+
+# Phase 1 Group B B2b 4.6 (2026-09-04): SLO 错误预算剩余。
+# 月度滚动窗口,1.0 = 100% 预算剩余(完美),0.0 = 用完,负数 = 超支。
+# 由 lumen_core.slo_budget_calculator 30s tick 更新(读本地
+# prometheus_client REGISTRY + slo_definitions.yaml 算 6 个 SLO)。
+#
+# slo label 限定 6 个固定值:
+# api_availability / api_latency / chat_ttfb /
+# doc_processing / embedding_latency / celery_success
+lumen_slo_budget_remaining = Gauge(
+    "lumen_slo_budget_remaining",
+    "Monthly SLO error budget remaining (1.0=full, 0=exhausted, negative=overspent).",
+    ["slo"],
+)
+
+# Phase 1 Group B B2b 4.6 (2026-09-04): SLO 预算消耗速度(最近 1h)。
+# 1.0 = 按预期速率消耗;> 1.0 = 超速(需要警觉);> 14.4 = 按 Google SRE
+# workbook 经验,2h 内会用完月度预算,触发 P2 alert 的典型阈值。
+lumen_slo_burn_rate_1h = Gauge(
+    "lumen_slo_burn_rate_1h",
+    "SLO error budget burn rate over last 1h (1.0=expected, >1=overpacing).",
+    ["slo"],
 )
 
 
@@ -211,11 +273,15 @@ def reset_metrics_for_test() -> None:
         lumen_rate_limit_rejections_total,
         lumen_llm_calls_total,
         lumen_llm_tokens_total,
+        lumen_llm_ttfb_seconds,
         lumen_embedding_calls_total,
+        lumen_embedding_duration_seconds,
         lumen_doc_processing_duration_seconds,
         lumen_celery_tasks_total,
         lumen_circuit_breaker_state,
         lumen_celery_queue_depth,
+        lumen_slo_budget_remaining,
+        lumen_slo_burn_rate_1h,
     )
     for metric in _LUMEN_METRICS:
         try:
@@ -234,11 +300,15 @@ __all__ = [
     "lumen_rate_limit_rejections_total",
     "lumen_llm_calls_total",
     "lumen_llm_tokens_total",
+    "lumen_llm_ttfb_seconds",
     "lumen_embedding_calls_total",
+    "lumen_embedding_duration_seconds",
     "lumen_doc_processing_duration_seconds",
     "lumen_celery_tasks_total",
     "lumen_circuit_breaker_state",
     "lumen_celery_queue_depth",
+    "lumen_slo_budget_remaining",
+    "lumen_slo_burn_rate_1h",
     "render_metrics",
     "get_metric_value",
     "reset_metrics_for_test",

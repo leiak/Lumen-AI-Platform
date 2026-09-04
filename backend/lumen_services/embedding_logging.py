@@ -39,6 +39,32 @@ from lumen_models.embedding_call_log import EmbeddingCallLog
 logger = logging.getLogger(__name__)
 
 
+def _observe_embedding_duration(model_name: str, t0: float, status: str) -> None:
+    """Phase 1 Group B B2b 4.6 (2026-09-04): 把 embedding 调用耗时写进
+    Prometheus Histogram,供 SLO ``embedding_latency`` (P95 < 200ms) 看板用。
+
+    失败也记(避免 SLO 数据漏掉失败事件)。写入失败绝不影响主流程 —— 监
+    控永远不应该让生产接口 fail。
+
+    Args:
+        model_name: model_config.model_name,作为 Histogram label。
+        t0: 调用 ``time.monotonic()`` 的起点。
+        status: ``"success"`` 或 ``"error"``。
+    """
+    try:
+        # 局部 import 避免 import cycle:lumen_core.metrics 可能被
+        # lumen_main 在 startup 时初始化,这条路径不能反过来依赖 metrics。
+        from lumen_core.metrics import lumen_embedding_duration_seconds
+
+        lumen_embedding_duration_seconds.labels(
+            model=str(model_name),
+            status=status,
+        ).observe(time.monotonic() - t0)
+    except Exception:  # noqa: BLE001
+        # Histogram 写入失败不能让 embedding 主流程挂掉
+        logger.debug("lumen_embedding_duration_seconds.observe failed", exc_info=True)
+
+
 # Sentinel used by ``embedding_factory.py`` when probing the embedding
 # dimension on cache cold-start. Rows whose text equals this constant
 # carry ``extra.is_dim_probe = True`` so the UI can filter them out by
@@ -188,22 +214,27 @@ class LoggingEmbeddings:
 
     def embed_query(self, text: str) -> List[float]:
         ctx = get_embedding_context()
+        from lumen_services.retry import call_sync_with_retry
+        t0 = time.monotonic()
         if ctx is None:
             # Phase 1 Group A 2.5 (2026-09-03): 没有 ctx 时也走 retry,
             # 跟有 ctx 行为一致(observability 可选,retry 不可选)。
             # ``call_sync_with_retry`` 让 self._inner.embed_query transient
             # 异常(httpx.ConnectError / TimeoutException / RemoteProtocolError)
             # 重试 3 次 exponential 0.5/1/2s,reraise 原异常让上层 fail-fast。
-            from lumen_services.retry import call_sync_with_retry
-            return call_sync_with_retry(
-                lambda: self._inner.embed_query(text),
-                func_name="embedding.embed_query",
-            )
+            try:
+                result = call_sync_with_retry(
+                    lambda: self._inner.embed_query(text),
+                    func_name="embedding.embed_query",
+                )
+                _observe_embedding_duration(self._model_name, t0, "success")
+                return result
+            except Exception:
+                _observe_embedding_duration(self._model_name, t0, "error")
+                raise
 
         started = datetime.utcnow()
-        t0 = time.monotonic()
         # Phase 1 Group A 2.5: retry 包 inner 调用,retry_count 写进 log。
-        from lumen_services.retry import call_sync_with_retry
         try:
             result = call_sync_with_retry(
                 lambda: self._inner.embed_query(text),
@@ -220,6 +251,7 @@ class LoggingEmbeddings:
                 duration_ms=int((time.monotonic() - t0) * 1000),
                 status="success",
             )
+            _observe_embedding_duration(self._model_name, t0, "success")
             return result
         except Exception as e:
             self._write_log(
@@ -235,6 +267,7 @@ class LoggingEmbeddings:
                 error_type=type(e).__name__,
                 error_message=str(e)[:1000],
             )
+            _observe_embedding_duration(self._model_name, t0, "error")
             raise
 
     # ---- sync embed_documents ----
@@ -243,14 +276,20 @@ class LoggingEmbeddings:
         ctx = get_embedding_context()
         # Phase 1 Group A 2.5: retry 包 inner 调用(sync batch path)。
         from lumen_services.retry import call_sync_with_retry
+        t0 = time.monotonic()
         if ctx is None:
-            return call_sync_with_retry(
-                lambda: self._inner.embed_documents(texts),
-                func_name="embedding.embed_documents",
-            )
+            try:
+                result = call_sync_with_retry(
+                    lambda: self._inner.embed_documents(texts),
+                    func_name="embedding.embed_documents",
+                )
+                _observe_embedding_duration(self._model_name, t0, "success")
+                return result
+            except Exception:
+                _observe_embedding_duration(self._model_name, t0, "error")
+                raise
 
         started = datetime.utcnow()
-        t0 = time.monotonic()
         # Preview is the first text (typical case is a chunk batch from
         # a single document). text_chars sums the whole batch so the
         # caller can see total ingestion volume.
@@ -273,6 +312,7 @@ class LoggingEmbeddings:
                 duration_ms=int((time.monotonic() - t0) * 1000),
                 status="success",
             )
+            _observe_embedding_duration(self._model_name, t0, "success")
             return result
         except Exception as e:
             self._write_log_for_batch(
@@ -288,6 +328,7 @@ class LoggingEmbeddings:
                 error_type=type(e).__name__,
                 error_message=str(e)[:1000],
             )
+            _observe_embedding_duration(self._model_name, t0, "error")
             raise
 
     # ---- async variants — pass through if inner supports it ----
@@ -297,17 +338,23 @@ class LoggingEmbeddings:
         aembed = getattr(self._inner, "aembed_query", None)
         # Phase 1 Group A 2.5: async retry 包 inner 调用。
         from lumen_services.retry import call_async_with_retry
+        t0 = time.monotonic()
         if aembed is None:
             # langchain_core.Embeddings provides a default sync fallback
             return self.embed_query(text)
         if ctx is None:
-            return await call_async_with_retry(
-                lambda: aembed(text),
-                func_name="embedding.aembed_query",
-            )
+            try:
+                result = await call_async_with_retry(
+                    lambda: aembed(text),
+                    func_name="embedding.aembed_query",
+                )
+                _observe_embedding_duration(self._model_name, t0, "success")
+                return result
+            except Exception:
+                _observe_embedding_duration(self._model_name, t0, "error")
+                raise
 
         started = datetime.utcnow()
-        t0 = time.monotonic()
         try:
             result = await call_async_with_retry(
                 lambda: aembed(text),
@@ -324,6 +371,7 @@ class LoggingEmbeddings:
                 duration_ms=int((time.monotonic() - t0) * 1000),
                 status="success",
             )
+            _observe_embedding_duration(self._model_name, t0, "success")
             return result
         except Exception as e:
             self._write_log(
@@ -339,6 +387,7 @@ class LoggingEmbeddings:
                 error_type=type(e).__name__,
                 error_message=str(e)[:1000],
             )
+            _observe_embedding_duration(self._model_name, t0, "error")
             raise
 
     async def aembed_documents(self, texts: List[str]) -> List[List[float]]:
@@ -346,16 +395,22 @@ class LoggingEmbeddings:
         aembed = getattr(self._inner, "aembed_documents", None)
         # Phase 1 Group A 2.5: async retry 包 inner 调用。
         from lumen_services.retry import call_async_with_retry
+        t0 = time.monotonic()
         if aembed is None:
             return self.embed_documents(texts)
         if ctx is None:
-            return await call_async_with_retry(
-                lambda: aembed(texts),
-                func_name="embedding.aembed_documents",
-            )
+            try:
+                result = await call_async_with_retry(
+                    lambda: aembed(texts),
+                    func_name="embedding.aembed_documents",
+                )
+                _observe_embedding_duration(self._model_name, t0, "success")
+                return result
+            except Exception:
+                _observe_embedding_duration(self._model_name, t0, "error")
+                raise
 
         started = datetime.utcnow()
-        t0 = time.monotonic()
         total_chars = sum(len(t or "") for t in (texts or []))
         first_preview = texts[0] if texts else ""
         try:
@@ -375,6 +430,7 @@ class LoggingEmbeddings:
                 duration_ms=int((time.monotonic() - t0) * 1000),
                 status="success",
             )
+            _observe_embedding_duration(self._model_name, t0, "success")
             return result
         except Exception as e:
             self._write_log_for_batch(
@@ -390,6 +446,7 @@ class LoggingEmbeddings:
                 error_type=type(e).__name__,
                 error_message=str(e)[:1000],
             )
+            _observe_embedding_duration(self._model_name, t0, "error")
             raise
 
     # ---- write helpers ----

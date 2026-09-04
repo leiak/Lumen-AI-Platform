@@ -1,0 +1,120 @@
+# Phase 1 Group B B2b 4.6 (2026-09-04): SLO 单一定义源。
+#
+# 这是 Grafana 看板 / Prometheus recording rules / 后端
+# lumen_slo_budget_calculator 共用的 SLO 配置文件。修改这里即影响所有
+# 三处 — 避免 SLO 定义在多份文件里漂移。
+#
+# 字段说明:
+#   slo_name       — 唯一标识符,对应 lumen_slo_budget_remaining / burn_rate_1h 的 {slo=...} label
+#   display_name   — Grafana 看板 / 告警通知里的可读名
+#   category       — availability / latency / processing
+#   target         — SLO 目标(availability 类型是 0~1 比率,latency 类型是秒数,success 是 0~1)
+#   sli_type       — ratio | latency_p95 | latency_p99
+#   window         — 评估窗口(roadmap 4.6 用月度 30d)
+#   sli_query      — PromQL 表达式(可作 Grafana panel 直接用,也作 recording rule 输入)
+#   budget_total   — 月度错误预算总量(单位跟 sli_type 对齐:ratio 是 0~1,latency 是秒数)
+#   burn_alert_threshold — 1h burn rate 超过此值触发 P2 alert (Google SRE 经验值 14.4x)
+
+slos:
+
+  # ---- 1. API 可用性:5xx 错误率 < 0.5%(roadmap 4.6) ----
+  - slo_name: api_availability
+    display_name: "API 可用性 (5xx < 0.5%)"
+    category: availability
+    sli_type: ratio
+    target: 0.995
+    window: 30d
+    sli_query: |
+      sum(rate(http_requests_total{status!~"5.."}[5m]))
+      /
+      sum(rate(http_requests_total[5m]))
+    budget_total: 0.005
+    burn_alert_threshold: 14.4
+
+  # ---- 2. API P95 latency < 1s(roadmap 4.6) ----
+  # 注意:走全站 path,不区分 chat / admin,简单通用。后续可拆 path label。
+  - slo_name: api_latency
+    display_name: "API P95 latency (< 1s)"
+    category: latency
+    sli_type: latency_p95
+    target: 1.0
+    window: 30d
+    sli_query: |
+      histogram_quantile(
+        0.95,
+        sum by (le) (rate(http_request_duration_seconds_bucket[5m]))
+      )
+    budget_total: 1.0
+    burn_alert_threshold: 14.4
+
+  # ---- 3. Chat streaming TTFB P95 < 500ms(roadmap 4.6) ----
+  # 来自 lumen_llm_ttfb_seconds Histogram,labels=[model]
+  - slo_name: chat_ttfb
+    display_name: "Chat streaming TTFB P95 (< 500ms)"
+    category: latency
+    sli_type: latency_p95
+    target: 0.5
+    window: 30d
+    sli_query: |
+      histogram_quantile(
+        0.95,
+        sum by (le) (rate(lumen_llm_ttfb_seconds_bucket[5m]))
+      )
+    budget_total: 0.5
+    burn_alert_threshold: 14.4
+
+  # ---- 4. 文档处理 P95 < 30s(roadmap 4.6) ----
+  # 简化版:不按 file_type 拆(PDF/MD),用全 P95 30s 阈值。
+  # 后续可加 doc.file_type label 让 dashboard 按类型分桶显示。
+  - slo_name: doc_processing
+    display_name: "文档处理 P95 (< 30s)"
+    category: processing
+    sli_type: latency_p95
+    target: 30.0
+    window: 30d
+    sli_query: |
+      histogram_quantile(
+        0.95,
+        sum by (le) (rate(lumen_doc_processing_duration_seconds_bucket{status="success"}[5m]))
+      )
+    budget_total: 30.0
+    burn_alert_threshold: 14.4
+
+  # ---- 5. Embedding P95 < 200ms(roadmap 4.6) ----
+  - slo_name: embedding_latency
+    display_name: "Embedding P95 (< 200ms)"
+    category: latency
+    sli_type: latency_p95
+    target: 0.2
+    window: 30d
+    sli_query: |
+      histogram_quantile(
+        0.95,
+        sum by (le) (rate(lumen_embedding_duration_seconds_bucket{status="success"}[5m]))
+      )
+    budget_total: 0.2
+    burn_alert_threshold: 14.4
+
+  # ---- 6. Celery 任务成功率 > 99%(roadmap 4.6) ----
+  # 注意:目前 lumen_celery_tasks_total{status="..."} 没实际写入点,
+  # dashboard 会一直显示 100%(分母为 0)。Phase 1 后续需要把
+  # celery_tasks.py 的 .delay() / task_success / task_failure 信号都接上。
+  - slo_name: celery_success
+    display_name: "Celery 任务成功率 (> 99%)"
+    category: availability
+    sli_type: ratio
+    target: 0.99
+    window: 30d
+    sli_query: |
+      sum(rate(lumen_celery_tasks_total{status="success"}[5m]))
+      /
+      clamp_min(sum(rate(lumen_celery_tasks_total[5m])), 0.001)
+    budget_total: 0.01
+    burn_alert_threshold: 14.4
+
+# 全局告警路由(B2c Alertmanager 落地):
+# - P1 critical(API 5xx > 1% 持续 5min / DB 主从切换 / MinIO 不可写 / Redis 主节点 down)
+#   → PagerDuty 7×24
+# - P2 warning(SLO burn_rate > 14.4x 持续 1h / Circuit breaker open / 队列堆积 > 100)
+#   → Slack 频道
+# - P3 info → Slack #lumen-ops

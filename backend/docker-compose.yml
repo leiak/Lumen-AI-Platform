@@ -111,7 +111,7 @@ services:
       - "19090:9090"
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./monitoring/prometheus_rules:/etc/prometheus/rules:ro
+      - ./monitoring/rules:/etc/prometheus/rules:ro
       - prometheus_data:/prometheus
     # Prometheus 容器内访问 host 上的 uvicorn:11335 —— host.docker.internal
     # 在 Windows Docker Desktop 默认 alias 不到,用 host-gateway(Linux 也有)。
