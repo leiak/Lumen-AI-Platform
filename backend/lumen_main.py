@@ -80,6 +80,20 @@ from lumen_core.database import (
     ensure_workspace_member_permissions_table,
     # Phase 1 Group A 1.5 (2026-09-03): failed_tasks DLQ table
     ensure_failed_tasks_table,
+    # Phase 1 Group A 3.4 (2026-09-04): UNIQUE × soft-delete 冲突修复。
+    # 给 9 张表(users × 2 / model_configs / multimodal_embedding_configs /
+    # external_apps / wx_accounts / roles / skills /
+    # customer_field_definitions)加 dedup VIRTUAL GENERATED 列 + 重建 UNIQUE,
+    # 实现"软删后 identifier 可复用"。详见
+    # docs-internal/roadmap/2026-09-04-phase-1-3-4-unique-softdelete-fix.md。
+    ensure_users_unique_dedup,
+    ensure_model_configs_unique_dedup,
+    ensure_mec_unique_dedup,
+    ensure_external_apps_unique_dedup,
+    ensure_wx_accounts_unique_dedup,
+    ensure_roles_unique_dedup,
+    ensure_skills_unique_dedup,
+    ensure_customer_field_definitions_unique_dedup,
     # M38.1: documents.asset_storage_key + storage_backend 列 + 索引
     ensure_documents_storage_columns,
     # M38.2: workspaces / document_folders 表 + knowledge_bases.workspace_id
@@ -431,6 +445,17 @@ async def _lifespan(app: FastAPI):
     # Phase 1 Group A 1.5 (2026-09-03): failed_tasks DLQ 表 — admin
     # 通过 /admin/tasks/failed 查 / 重派 / ack 失败任务
     ensure_failed_tasks_table()
+    # Phase 1 Group A 3.4 (2026-09-04): UNIQUE × soft-delete 冲突修复。
+    # 9 个 ensure_* 都 idempotent(以 dedup column 已存在为"完成"信号),
+    # 后续 boot 是 no-op。
+    ensure_users_unique_dedup()
+    ensure_model_configs_unique_dedup()
+    ensure_mec_unique_dedup()
+    ensure_external_apps_unique_dedup()
+    ensure_wx_accounts_unique_dedup()
+    ensure_roles_unique_dedup()
+    ensure_skills_unique_dedup()
+    ensure_customer_field_definitions_unique_dedup()
     # Seed a demo ExternalApp for local dev (idempotent). Runs after
     # ensure_external_apps_tables() so the parent table is guaranteed
     # to exist, and before scheduler reload so the DB is fresh.

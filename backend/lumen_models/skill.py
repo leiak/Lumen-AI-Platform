@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, Integer, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, Computed, String, Text, Integer, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from lumen_models.base import BaseModel
@@ -7,7 +7,7 @@ from lumen_models.base import BaseModel
 class Skill(BaseModel):
     __tablename__ = "skills"
 
-    name = Column(String(100), nullable=False, unique=True)
+    name = Column(String(100), nullable=False)
     description = Column(Text)
     category = Column(String(50))  # e.g., "web", "data", "code", "chat"
     content = Column(Text)  # The actual skill prompt or code
@@ -22,3 +22,17 @@ class Skill(BaseModel):
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Phase 1 Group A 3.4 (2026-09-04):VIRTUAL GENERATED 列,active 行 =
+    # 原 name,弱删行(``is_active=0``)= NULL;让 ``name`` UNIQUE 落在
+    # dedup 列上,实现"弱删后 skill name 可复用"。
+    # 同步去掉 ``unique=True`` —— DB 端 UNIQUE 已迁到 dedup 列。
+    skills_dedup_key = Column(
+        String(100),
+        Computed(
+            "CASE WHEN is_active = 1 THEN name ELSE NULL END",
+            persisted=False,
+        ),
+        nullable=True,
+        comment="Phase 1 3.4 dedup key for soft-delete UNIQUE",
+    )

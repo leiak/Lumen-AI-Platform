@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, Text, DateTime, Float
+from sqlalchemy import Column, Computed, Integer, String, Boolean, Text, DateTime, Float
 from sqlalchemy.sql import func
 from lumen_models.base import BaseModel
 
@@ -26,3 +26,21 @@ class ModelConfig(BaseModel):
     is_video = Column(Boolean, default=False, comment="M36: Usable as a video generation model (Kling/Sora/Veo future)")
     tenant_id = Column(Integer, nullable=True, comment="Tenant ID (null for global)")
     description = Column(Text, nullable=True, comment="Model description")
+
+    # Phase 1 Group A 3.4 (2026-09-04):VIRTUAL GENERATED 列,把
+    # ``(tenant_id, model_type, model_name)`` 复合 UNIQUE 转成
+    # ``(tenant_id, model_configs_dedup_key)`` —— active 行 =
+    # ``<model_type>|<model_name>``,软删行 = NULL;UNIQUE on dedup 列
+    # 实现"软删后 (type, model_name) 可复用"。VARCHAR(300) 留余量
+    # (50 + 1 + 100 ≈ 151 字符)。
+    model_configs_dedup_key = Column(
+        String(300),
+        Computed(
+            "CASE WHEN is_active = 1 "
+            "THEN CONCAT_WS('|', model_type, model_name) "
+            "ELSE NULL END",
+            persisted=False,
+        ),
+        nullable=True,
+        comment="Phase 1 3.4 dedup key for soft-delete UNIQUE",
+    )

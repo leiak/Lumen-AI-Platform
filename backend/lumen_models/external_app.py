@@ -4,7 +4,7 @@ Field-level documentation lives in
 ``docs/superpowers/specs/2026-06-08-external-chat-widget-design.md`` § 4.
 """
 from sqlalchemy import (
-    Column, String, Text, Integer, ForeignKey, DateTime, Boolean, JSON,
+    Column, Computed, String, Text, Integer, ForeignKey, DateTime, Boolean, JSON,
     UniqueConstraint, Index,
 )
 from sqlalchemy.orm import relationship
@@ -37,6 +37,19 @@ class ExternalApp(BaseModel):
     description = Column(Text, nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     last_used_at = Column(DateTime, nullable=True)
+
+    # Phase 1 Group A 3.4 (2026-09-04):VIRTUAL GENERATED 列,active 行 =
+    # 原 app_key,弱删行(``is_active=0``)= NULL;让 ``app_key`` UNIQUE
+    # 落在 dedup 列上,实现"弱删后 app_key 可复用"。
+    external_apps_dedup_key = Column(
+        String(64),
+        Computed(
+            "CASE WHEN is_active = 1 THEN app_key ELSE NULL END",
+            persisted=False,
+        ),
+        nullable=True,
+        comment="Phase 1 3.4 dedup key for soft-delete UNIQUE",
+    )
 
     visitors = relationship(
         "ExternalVisitor", back_populates="app", cascade="all, delete-orphan"

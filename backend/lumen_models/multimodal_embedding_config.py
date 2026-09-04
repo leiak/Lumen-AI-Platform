@@ -22,7 +22,7 @@
 - spec: docs-internal/superpowers/specs/2026-08-26-kb-multimodal-parsing.md
 - 选型: docs-internal/superpowers/plans/2026-08-31-m38-4-multimodal-embedding-selector.md
 """
-from sqlalchemy import JSON, Boolean, Column, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Column, Computed, Index, Integer, String, Text
 
 from lumen_models.base import BaseModel
 
@@ -82,10 +82,30 @@ class MultimodalEmbeddingConfig(BaseModel):
     # NULL = 全局 builtin,所有租户可见;非 NULL = 租户私有配置
     tenant_id = Column(Integer, nullable=True, index=True, comment="NULL = global builtin")
 
+    # Phase 1 Group A 3.4 (2026-09-04):VIRTUAL GENERATED 列,active 行 =
+    # 原 name,弱删行(``enabled=0``)= NULL;让 ``uq_mec_tenant_name``
+    # UNIQUE 落在 dedup 列上,实现"弱删后 (tenant, name) 可复用"。
+    # 注意:本表用 ``enabled`` 不用 ``is_active``(M38.4 step 2 设计如此)。
+    mec_dedup_name = Column(
+        String(255),
+        Computed(
+            "CASE WHEN enabled = 1 THEN name ELSE NULL END",
+            persisted=False,
+        ),
+        nullable=True,
+        comment="Phase 1 3.4 dedup key for soft-delete UNIQUE",
+    )
+
     __table_args__ = (
         # 一个 provider 下同一租户不应该重名(全局 builtin 也算
         # ``tenant_id=NULL`` 这一组);删 KB 时如果引用了 config 不
-        # 报错,只是把 config 留作"无人引用"状态由 admin 手动清理
+        # 报错,只是把 config 留作"无人引用"状态由 admin 手动清理。
+        # Phase 1 3.4:UNIQUE 实际列是 ``(tenant_id, mec_dedup_name)``
+        # (见 ``lumen_core.database.ensure_mec_unique_dedup``),但
+        # ORM 仍声明 ``(tenant_id, name)`` —— SQLAlchemy metadata
+        # 跟 DB 实际列不同源,但 ORM 端 INSERT 时不指定 unique,实际
+        # DB 端 UNIQUE 由 ensure_* 重建控制,二者不影响(``create_all``
+        # 对已存在表不再 attempt DDL,只对新建表生效)。
         Index("uq_mec_tenant_name", "tenant_id", "name", unique=True),
         Index("ix_mec_provider_enabled", "provider", "enabled"),
     )

@@ -9,6 +9,7 @@ Plan: docs/superpowers/plans/2026-06-20-customer-management.md
 """
 from sqlalchemy import (
     Column,
+    Computed,
     Integer,
     String,
     Text,
@@ -47,8 +48,24 @@ class CustomerFieldDefinition(BaseModel):
     is_active = Column(Boolean, nullable=False, default=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
 
+    # Phase 1 Group A 3.4 (2026-09-04):VIRTUAL GENERATED 列,active 行 =
+    # 原 field_key,弱删行(``is_active=0``)= NULL;让
+    # ``uk_customer_fields_tenant_key`` UNIQUE 落在 dedup 列上,实现
+    # "弱删后同 tenant 内 field_key 可复用"。
+    cfd_dedup_key = Column(
+        String(50),
+        Computed(
+            "CASE WHEN is_active = 1 THEN field_key ELSE NULL END",
+            persisted=False,
+        ),
+        nullable=True,
+        comment="Phase 1 3.4 dedup key for soft-delete UNIQUE",
+    )
+
     __table_args__ = (
         # Spec §3.3:UNIQUE(tenant_id, field_key) — 同租户下 field_key 唯一
+        # Phase 1 3.4:DB 实际列是 ``(tenant_id, cfd_dedup_key)``
+        # (见 ``lumen_core.database.ensure_customer_field_definitions_unique_dedup``)。
         UniqueConstraint("tenant_id", "field_key", name="uk_customer_fields_tenant_key"),
         Index("idx_customer_fields_tenant_active", "tenant_id", "is_active", "order_index"),
     )

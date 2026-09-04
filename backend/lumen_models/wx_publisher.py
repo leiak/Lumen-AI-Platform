@@ -4,6 +4,7 @@ Spec: docs/superpowers/specs/2026-06-17-wx-publisher-design.md §3
 """
 from sqlalchemy import (
     Column,
+    Computed,
     Integer,
     String,
     Text,
@@ -46,9 +47,25 @@ class WxAccount(BaseModel):
     last_verified_at = Column(DateTime, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
 
+    # Phase 1 Group A 3.4 (2026-09-04):VIRTUAL GENERATED 列,active 行 =
+    # 原 app_id,弱删行(``is_active=0``)= NULL;让
+    # ``uk_wx_accounts_tenant_appid`` UNIQUE 落在 dedup 列上,实现"弱删后
+    # 同 tenant 内 app_id 可复用"。
+    wx_accounts_dedup_key = Column(
+        String(50),
+        Computed(
+            "CASE WHEN is_active = 1 THEN app_id ELSE NULL END",
+            persisted=False,
+        ),
+        nullable=True,
+        comment="Phase 1 3.4 dedup key for soft-delete UNIQUE",
+    )
+
     __table_args__ = (
         # Spec §3.1: UNIQUE(tenant_id, app_id) — same app_id may exist
         # for different tenants but not twice within one tenant.
+        # Phase 1 3.4:DB 实际列是 ``(tenant_id, wx_accounts_dedup_key)``
+        # (见 ``lumen_core.database.ensure_wx_accounts_unique_dedup``)。
         UniqueConstraint("tenant_id", "app_id", name="uk_wx_accounts_tenant_appid"),
         Index("idx_wx_accounts_tenant_active", "tenant_id", "is_active"),
     )

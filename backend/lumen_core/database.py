@@ -2448,3 +2448,286 @@ def ensure_failed_tasks_table() -> None:
         logger.exception(
             "ensure_failed_tasks_table failed; will retry on next startup"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 Group A 3.4 (2026-09-04): UNIQUE × soft-delete 冲突修复。
+#
+# 思路(详见 docs-internal/roadmap/2026-09-04-phase-1-3-4-unique-softdelete-fix.md):
+# MySQL 5.7+/8.0 不支持 partial unique index,走 "GENERATED ALWAYS AS
+# ... VIRTUAL + UNIQUE on the generated column" trick —— 软删行(``is_active=0`` /
+# ``enabled=0``)的 dedup 字段自动为 NULL,MySQL UNIQUE 对多个 NULL 不视为冲突,
+# 实现"软删后名字立即可复用"。
+#
+# 9 张表 10 个 UNIQUE 都按相同模式:加 dedup 列 + 删旧 UNIQUE + 加新 UNIQUE on
+# dedup。每个 ensure_* 独立幂等,失败 fallback ``logger.exception`` 不阻塞
+# uvicorn 启动(同 M38.4 模式)。
+# ---------------------------------------------------------------------------
+
+
+def ensure_users_unique_dedup() -> None:
+    """``users.email`` + ``users.username`` 跟 ``is_active`` 的冲突修复。
+
+    - 加 ``users_dedup_email`` + ``users_dedup_username`` VIRTUAL GENERATED 列
+      (active 行 = 原值,软删行 = NULL)
+    - 重建 ``ix_users_email`` + ``ix_users_username`` UNIQUE on dedup 列
+
+    判定逻辑:以 dedup column 是否已存在为"修复已完成"信号 —— 第一次跑
+    会加列 + drop 旧 UNIQUE + 加新 UNIQUE;后续跑全部 no-op。
+    ``_index_exists`` 不能直接用,因为旧 UNIQUE 名字跟新 UNIQUE 名字相同,
+    仅靠 index 名判定会跳过 drop+recreate 步骤(详见 2026-09-04 audit 复测
+    教训)。
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        with engine.begin() as conn:
+            email_done = _column_exists("users", "users_dedup_email")
+            username_done = _column_exists("users", "users_dedup_username")
+            if email_done and username_done:
+                return  # 已修复,no-op
+            # 加缺的那个 dedup 列
+            if not email_done:
+                conn.execute(text(
+                    "ALTER TABLE users "
+                    "ADD COLUMN users_dedup_email VARCHAR(255) "
+                    "GENERATED ALWAYS AS ("
+                    "CASE WHEN is_active = 1 THEN email ELSE NULL END"
+                    ") VIRTUAL"
+                ))
+                conn.execute(text("ALTER TABLE users DROP INDEX ix_users_email"))
+                conn.execute(text(
+                    "ALTER TABLE users "
+                    "ADD UNIQUE KEY ix_users_email (users_dedup_email)"
+                ))
+            if not username_done:
+                conn.execute(text(
+                    "ALTER TABLE users "
+                    "ADD COLUMN users_dedup_username VARCHAR(50) "
+                    "GENERATED ALWAYS AS ("
+                    "CASE WHEN is_active = 1 THEN username ELSE NULL END"
+                    ") VIRTUAL"
+                ))
+                conn.execute(text("ALTER TABLE users DROP INDEX ix_users_username"))
+                conn.execute(text(
+                    "ALTER TABLE users "
+                    "ADD UNIQUE KEY ix_users_username (users_dedup_username)"
+                ))
+    except Exception:
+        logger.exception(
+            "ensure_users_unique_dedup failed; will retry on next startup"
+        )
+
+
+def ensure_model_configs_unique_dedup() -> None:
+    """``model_configs(tenant_id, model_type, model_name)`` 跟 ``is_active`` 的冲突修复。
+
+    composite UNIQUE 用 ``CONCAT_WS('|', model_type, model_name)`` 合成一个
+    dedup 列(VARCHAR(300) 留余量);新 UNIQUE 仍以 ``tenant_id`` 为首列 +
+    dedup 列。dev DB 全 active 时迁移语义不变;软删行(``is_active=0``)
+    dedup=NULL,释放槽位。
+
+    判定:dedup column 已存在即视为修复完成(2026-09-04 复测教训:用
+    ``_index_exists`` 判定会跳过 drop+recreate 步骤,因为 index 名字相同)。
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        if _column_exists("model_configs", "model_configs_dedup_key"):
+            return
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE model_configs "
+                "ADD COLUMN model_configs_dedup_key VARCHAR(300) "
+                "GENERATED ALWAYS AS ("
+                "CASE WHEN is_active = 1 "
+                "THEN CONCAT_WS('|', model_type, model_name) "
+                "ELSE NULL END"
+                ") VIRTUAL"
+            ))
+            conn.execute(text(
+                "ALTER TABLE model_configs "
+                "DROP INDEX uq_model_configs_tenant_type_name"
+            ))
+            conn.execute(text(
+                "ALTER TABLE model_configs "
+                "ADD UNIQUE KEY uq_model_configs_tenant_type_name "
+                "(tenant_id, model_configs_dedup_key)"
+            ))
+    except Exception:
+        logger.exception(
+            "ensure_model_configs_unique_dedup failed; will retry on next startup"
+        )
+
+
+def ensure_mec_unique_dedup() -> None:
+    """``multimodal_embedding_configs(tenant_id, name)`` 跟 ``enabled`` 的冲突修复。
+
+    本表用 ``enabled`` 而不是 ``is_active`` —— M38.4 step 2 设计如此,不要
+    copy-paste 别的表。
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        if _column_exists("multimodal_embedding_configs", "mec_dedup_name"):
+            return
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE multimodal_embedding_configs "
+                "ADD COLUMN mec_dedup_name VARCHAR(255) "
+                "GENERATED ALWAYS AS ("
+                "CASE WHEN enabled = 1 THEN name ELSE NULL END"
+                ") VIRTUAL"
+            ))
+            conn.execute(text(
+                "ALTER TABLE multimodal_embedding_configs "
+                "DROP INDEX uq_mec_tenant_name"
+            ))
+            conn.execute(text(
+                "ALTER TABLE multimodal_embedding_configs "
+                "ADD UNIQUE KEY uq_mec_tenant_name "
+                "(tenant_id, mec_dedup_name)"
+            ))
+    except Exception:
+        logger.exception(
+            "ensure_mec_unique_dedup failed; will retry on next startup"
+        )
+
+
+def ensure_external_apps_unique_dedup() -> None:
+    """``external_apps(app_key)`` 跟 ``is_active`` 的冲突修复。"""
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        if _column_exists("external_apps", "external_apps_dedup_key"):
+            return
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE external_apps "
+                "ADD COLUMN external_apps_dedup_key VARCHAR(64) "
+                "GENERATED ALWAYS AS ("
+                "CASE WHEN is_active = 1 THEN app_key ELSE NULL END"
+                ") VIRTUAL"
+            ))
+            conn.execute(text("ALTER TABLE external_apps DROP INDEX app_key"))
+            conn.execute(text(
+                "ALTER TABLE external_apps "
+                "ADD UNIQUE KEY app_key (external_apps_dedup_key)"
+            ))
+    except Exception:
+        logger.exception(
+            "ensure_external_apps_unique_dedup failed; will retry on next startup"
+        )
+
+
+def ensure_wx_accounts_unique_dedup() -> None:
+    """``wx_accounts(tenant_id, app_id)`` 跟 ``is_active`` 的冲突修复。"""
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        if _column_exists("wx_accounts", "wx_accounts_dedup_key"):
+            return
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE wx_accounts "
+                "ADD COLUMN wx_accounts_dedup_key VARCHAR(50) "
+                "GENERATED ALWAYS AS ("
+                "CASE WHEN is_active = 1 THEN app_id ELSE NULL END"
+                ") VIRTUAL"
+            ))
+            conn.execute(text(
+                "ALTER TABLE wx_accounts "
+                "DROP INDEX uk_wx_accounts_tenant_appid"
+            ))
+            conn.execute(text(
+                "ALTER TABLE wx_accounts "
+                "ADD UNIQUE KEY uk_wx_accounts_tenant_appid "
+                "(tenant_id, wx_accounts_dedup_key)"
+            ))
+    except Exception:
+        logger.exception(
+            "ensure_wx_accounts_unique_dedup failed; will retry on next startup"
+        )
+
+
+def ensure_roles_unique_dedup() -> None:
+    """``roles(name)`` 跟 ``is_active`` 的冲突修复。"""
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        if _column_exists("roles", "roles_dedup_key"):
+            return
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE roles "
+                "ADD COLUMN roles_dedup_key VARCHAR(50) "
+                "GENERATED ALWAYS AS ("
+                "CASE WHEN is_active = 1 THEN name ELSE NULL END"
+                ") VIRTUAL"
+            ))
+            conn.execute(text("ALTER TABLE roles DROP INDEX name"))
+            conn.execute(text(
+                "ALTER TABLE roles "
+                "ADD UNIQUE KEY name (roles_dedup_key)"
+            ))
+    except Exception:
+        logger.exception(
+            "ensure_roles_unique_dedup failed; will retry on next startup"
+        )
+
+
+def ensure_skills_unique_dedup() -> None:
+    """``skills(name)`` 跟 ``is_active`` 的冲突修复。"""
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        if _column_exists("skills", "skills_dedup_key"):
+            return
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE skills "
+                "ADD COLUMN skills_dedup_key VARCHAR(100) "
+                "GENERATED ALWAYS AS ("
+                "CASE WHEN is_active = 1 THEN name ELSE NULL END"
+                ") VIRTUAL"
+            ))
+            conn.execute(text("ALTER TABLE skills DROP INDEX name"))
+            conn.execute(text(
+                "ALTER TABLE skills "
+                "ADD UNIQUE KEY name (skills_dedup_key)"
+            ))
+    except Exception:
+        logger.exception(
+            "ensure_skills_unique_dedup failed; will retry on next startup"
+        )
+
+
+def ensure_customer_field_definitions_unique_dedup() -> None:
+    """``customer_field_definitions(tenant_id, field_key)`` 跟 ``is_active`` 的冲突修复。"""
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        if _column_exists("customer_field_definitions", "cfd_dedup_key"):
+            return
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE customer_field_definitions "
+                "ADD COLUMN cfd_dedup_key VARCHAR(50) "
+                "GENERATED ALWAYS AS ("
+                "CASE WHEN is_active = 1 THEN field_key ELSE NULL END"
+                ") VIRTUAL"
+            ))
+            conn.execute(text(
+                "ALTER TABLE customer_field_definitions "
+                "DROP INDEX uk_customer_fields_tenant_key"
+            ))
+            conn.execute(text(
+                "ALTER TABLE customer_field_definitions "
+                "ADD UNIQUE KEY uk_customer_fields_tenant_key "
+                "(tenant_id, cfd_dedup_key)"
+            ))
+    except Exception:
+        logger.exception(
+            "ensure_customer_field_definitions_unique_dedup failed; "
+            "will retry on next startup"
+        )
