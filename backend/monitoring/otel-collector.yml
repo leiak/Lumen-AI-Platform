@@ -1,0 +1,92 @@
+# Phase 1 Group B 4.4 Day 4 (2026-09-05): OTel Collector 配置。
+#
+# 启动参数 (在 docker-compose.yml 里):
+#   otelcol-contrib --config=/etc/otelcol-contrib/config.yaml
+#
+# 数据流:
+#   uvicorn / celery (OTLP gRPC :4317 / HTTP :4318)
+#     → OTel Collector
+#       → jaeger exporter → lumen-platform-jaeger:14250 (gRPC ingest)
+#       → prometheus exporter → :8889/metrics (被 prometheus scrape)
+#
+# 设计要点:
+#   1. traces 直接走 jaeger exporter (port 14250, jaeger gRPC),不走
+#      "otlp receiver → jaeger otlp receiver" 的二级链路 —— 14250 是
+#      jaeger 约定俗成的稳定 ingest 路径,跟 OTLP 协议独立解耦。
+#   2. memory_limiter 80% / spike 20% 防止 dev 容器 OOM (otelcol 默认
+#      不限内存,挂掉时连同 batch queue 一起丢,trace 不可见)。
+#   3. batch timeout 100ms / send_batch_size 8192 — dev 默认小批次
+#      低延迟;prod 可调 5s / 8192 减 overhead。
+#   4. metrics pipeline receivers=[otlp] 是为收集 otel collector
+#      内部 otelcol_* 自监控 metric (via telemetry SDK);prometheus
+#      exporter 暴露到 :8889/metrics。
+#   5. service.telemetry.metrics.level=detailed 让 otelcol 暴露
+#      完整的 receiver/processor/exporter 内部 metric (默认 basic
+#      只暴露进程级 CPU/内存)。dev 调试需要 detailed。
+#
+# 端口约定 (避免与同机其他服务冲突):
+#   - 4317 / 4318 OTLP (同 lumen-platform-jaeger,dev 调试用)
+#   - 8889 prometheus exporter (8888 已被 Jupyter 占)
+#   - 13133 health_check extension UI
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # memory_limiter 防止突发流量 OOM;spike_limit 允许短时超限
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+
+  # batch 默认 100ms 超时,小批次低延迟适合 dev;prod 改 5s
+  batch:
+    timeout: 100ms
+    send_batch_size: 8192
+
+exporters:
+  # jaeger exporter → lumen-platform-jaeger:14250 (jaeger gRPC ingest)
+  # tls.insecure=true 因为 docker network 内裸 gRPC
+  jaeger:
+    endpoint: lumen-platform-jaeger:14250
+    tls:
+      insecure: true
+
+  # prometheus exporter 暴露到 :8889/metrics,被 lumen-platform-prometheus
+  # 容器内 scrape (static_configs target = lumen-platform-otel-collector:8889)
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # resource attribute (service.name 等) 转成 prometheus label,
+    # 便于在 grafana 按服务名分组
+    resource_to_telemetry_conversion:
+      enabled: true
+
+extensions:
+  - health_check
+
+service:
+  extensions: [health_check]
+
+  # otelcol 自身 metric level=detailed 才能在 :8889/metrics 看到
+  # otelcol_receiver_accepted_spans / otelcol_exporter_sent_spans /
+  # otelcol_processor_batch_batch_send_size 等 receiver/processor/
+  # exporter 内部 metric。默认 basic 只暴露进程级 CPU / 内存。
+  telemetry:
+    metrics:
+      level: detailed
+      address: 0.0.0.0:8888
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]

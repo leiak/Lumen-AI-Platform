@@ -265,6 +265,63 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  jaeger:
+    # Phase 1 Group B 4.4 Day 4 (2026-09-05): Jaeger all-in-one 接 OTel Collector 转发的 trace。
+    # jaegertracing/all-in-one:latest 内含 jaeger collector + query + UI,单容器够 dev 用。
+    # 端口 16686 UI / 4317 OTLP gRPC / 4318 OTLP HTTP 暴露 host 供 dev 调试。
+    # 14250 jaeger collector gRPC 不暴露 host —— 仅 docker network 内 OTel Collector 调用。
+    # COLLECTOR_OTLP_ENABLED=true 让 jaeger 直接接 OTLP(双 ingest 路径,便于不挂 collector 调试)。
+    # badger 是 jaeger 1.35+ 默认 storage,持久化到 jaeger_data 卷避免重启丢 trace。
+    image: jaegertracing/all-in-one:latest
+    container_name: lumen-platform-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # UI
+      - "4317:4317"    # OTLP gRPC(可选,直接 ingest 路径)
+      - "4318:4318"    # OTLP HTTP(同上)
+      - "14250:14250"  # jaeger collector gRPC(OTel collector jaeger exporter 目标)
+    volumes:
+      - jaeger_data:/badger
+    healthcheck:
+      # jaegertracing/all-in-one 镜像有 wget,14269 是 admin port,/status 返 "ok"
+      test: ["CMD-SHELL", "wget -qO- http://localhost:14269/status | grep -q ok || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    mem_limit: 512m
+
+  otel_collector:
+    # Phase 1 Group B 4.4 Day 4 (2026-09-05): OTel Collector 接 backend span →
+    # 转 jaeger exporter + 暴露 :8889/metrics 给 prometheus scrape。
+    # otel/opentelemetry-collector-contrib 含 jaeger / prometheus / batch 等 contrib exporter,
+    # 而 otel/opentelemetry-collector(无 -contrib)只含 core subset。
+    # 8889 是 prometheus exporter 端口(8888 已被 Jupyter 占),13133 是 health_check UI。
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: lumen-platform-otel-collector
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    ports:
+      - "4317:4317"   # OTLP gRPC(backend 用)
+      - "4318:4318"   # OTLP HTTP(同上)
+      - "8889:8889"   # prometheus exporter(prometheus 容器内 scrape)
+      - "13133:13133" # health_check extension(dev 调试用)
+    volumes:
+      # 配置挂 host 文件,改完 `docker compose restart otel_collector` 即可热加载。
+      # 注意:`docker compose restart` 不重读 env_file 但 config file 是挂载的,改完无需 force-recreate。
+      - ./monitoring/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      jaeger:
+        condition: service_healthy
+    healthcheck:
+      # otelcol-contrib 镜像有 wget
+      test: ["CMD", "wget", "-qO-", "http://localhost:13133/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    mem_limit: 512m
+
 volumes:
   mysql_data:
   es_data:
@@ -274,3 +331,4 @@ volumes:
   prometheus_data:
   grafana_data:
   alertmanager_data:
+  jaeger_data:

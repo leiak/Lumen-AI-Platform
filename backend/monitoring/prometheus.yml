@@ -10,6 +10,9 @@
 #   1. lumen-backend — uvicorn 在 host:11335,/metrics 端点(Phase 0 4.3 ship)
 #   2. prometheus 自身 — internal metric ``up`` / ``scrape_duration_seconds``
 #   3. grafana 自身 — Grafana 暴露 ``/metrics``(内置,无需额外配置)
+#   4. node-exporter — host 硬件 + OS 指标(Phase 1 Group B 2.4.7 / B2c)
+#   5. redis-exporter — Redis 指标(Phase 1 Group B 2.4.7 / B2c)
+#   6. otel-collector — OTel Collector 自监控指标(Phase 1 Group B 4.4 Day 4)
 #
 # host.docker.internal:
 #   Prometheus 容器内访问 host 上的 uvicorn:11335。Windows Docker Desktop
@@ -82,3 +85,17 @@ scrape_configs:
       - targets: ["host.docker.internal:19101"]
         labels:
           service: "redis-exporter"
+
+  # ---- OTel Collector(Phase 1 Group B 4.4 Day 4 2026-09-05):OTel 内部指标 ----
+  # 端口 8889 = otel-collector 容器 prometheus exporter 暴露的 /metrics 端点。
+  # 采集的指标包括 otelcol_receiver_accepted_spans / otelcol_exporter_sent_spans /
+  # otelcol_processor_batch_batch_send_size 等,用于看 collector 自身健康度。
+  # 30s 拉一次够用(otcol 自监控延迟敏感度低,15s 也可)。
+  # 同 docker network 内静态目标,不需要 host-gateway。
+  - job_name: "otel-collector"
+    metrics_path: "/metrics"
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["lumen-platform-otel-collector:8889"]
+        labels:
+          service: "otel-collector"

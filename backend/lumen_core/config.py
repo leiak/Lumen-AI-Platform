@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     OTEL_ENDPOINT: str = "http://localhost:4317"
     # OTEL_SERVICE_NAME: 覆盖默认 "lumen-backend"。生产可设环境特定名。
     OTEL_SERVICE_NAME: str = "lumen-backend"
+    # --- Phase 1 Group B 4.4 Day 4 (2026-09-05) 采样率 ---
+    # OTEL_SAMPLE_RATIO: 0.0~1.0,root span 采样比例。0.0 = 不采(等价
+    # ALWAYS_OFF),1.0 = 全采(等价 ALWAYS_ON),中间值用 ParentBased
+    # TraceIdRatioBased(ratio)。dev 默认 1.0 保留全量 trace 给调试;
+    # prod 高流量场景降到 0.05~0.1 减 collector 压力。
+    # 注意:0.0/1.0 边界走 ALWAYS_OFF/ALWAYS_ON sampler 而不是
+    # TraceIdRatioBased(0/1) —— 后者在部分 SDK 版本会因 ratio arg 报错。
+    OTEL_SAMPLE_RATIO: float = 1.0
     # DEPLOYMENT_ENV: "dev" / "staging" / "prod"。影响 OTel resource
     # deployment.environment label + 后续 SLO / 告警路由。
     DEPLOYMENT_ENV: str = "dev"

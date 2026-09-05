@@ -19,6 +19,8 @@
 | Widget | dist 不存在 / 加载失败 | [§7 widget](#7-widget) |
 | LangSmith | tracing 不工作 | [§8 langsmith](#8-langsmith) |
 | 兜底 | 全栈重启 | [§9 兜底](#9-兜底) |
+| MinIO | 端口冲突 / multipart 卡 / endpoint 504 | [§10 MinIO](#10-minio-m381-follow-up-2026-08-31) |
+| OTel | Jaeger 看不到 trace / collector 端口冲突 | [§11 Jaeger + OTel Collector](#11-jaeger--otel-collector-phase-1-group-b-44-day-4-2026-09-05) |
 
 ---
 
@@ -267,6 +269,81 @@ python -m scripts.bench_minio --doc-size 10MB --docs-per-tenant 20 --concurrency
 - **默认凭据 `minioadmin/minioadmin` 只用于 dev**。生产必须改 + 启用 MinIO KMS。
 - **`STORAGE_BACKEND` 运行时切换** 不支持(工厂是 singleton,改 env 必须重启 uvicorn)。
 - **`boto3` Windows registry proxy bypass** 未处理(参考 `httpx-proxy-bypass-2026-08-31.md`,production Linux `HTTPS_PROXY` 出去代理需要 follow-up)。
+
+---
+
+## 11. Jaeger + OTel Collector (Phase 1 Group B 4.4 Day 4, 2026-09-05)
+
+OTel Collector + Jaeger 完整链路: backend → OTLP gRPC → Collector → jaeger / prometheus exporters。dev 默认 backend 走 console(stdout),不连 collector。要看 trace 必须切换到 otlp + 启动两个容器。
+
+### 11.1 一键起 Jaeger + OTel Collector
+
+```bash
+cd backend && docker compose up -d lumen-platform-jaeger lumen-platform-otel-collector
+```
+
+容器起来后:
+- Jaeger UI: http://localhost:16686(浏览器打开看 trace tree)
+- OTel Collector health: http://localhost:13133/status(返 `{"status":"Server available"}`)
+- OTel Collector /metrics: http://localhost:8889/metrics(`otelcol_*` 自监控)
+
+### 11.2 切 backend 到 OTLP(让 span 真正流到 Jaeger)
+
+**关键**:`backend/.env` 默认 `OTEL_EXPORTER=console`,改 `otlp` + 重启 uvicorn 才能让 trace 真正流到 collector。改 `.env` 是项目保护动作(避免 Claude 误改),手动编辑即可。
+
+```bash
+# 在 backend/.env 末尾追加或修改:
+OTEL_EXPORTER=otlp
+OTEL_ENDPOINT=http://localhost:4317   # otel-collector 容器 4317 → host 4317
+OTEL_SAMPLE_RATIO=1.0                 # dev 默认全采;prod 可降到 0.05~0.1
+```
+
+改完**必须重启 uvicorn**(singleton 在 startup 读 env,改完不重启不生效)。
+
+### 11.3 端到端验证
+
+```bash
+cd backend && python -m scripts.validate_otel_collector --send-test-span
+```
+
+期望输出 `3/3 passed`:
+1. Jaeger services API 找到 `lumen-backend` service
+2. OTel Collector /metrics 找到 `otelcol_receiver_accepted_spans` 指标
+3. Prometheus targets API 找到 `otel-collector` job `Up`
+
+### 11.4 常见问题
+
+| 症状 | 排查 / 修法 |
+|------|------|
+| Jaeger UI 没 `lumen-backend` service | (a) 没改 `OTEL_EXPORTER=otlp`;(b) uvicorn 没重启;(c) OTel collector 容器没起(`docker ps --filter "name=lumen-platform-otel-collector"`) |
+| Jaeger UI 有 service 但 span tree 空 | 后端没真正发请求(uvicorn 启动了但没请求)。`--send-test-span` 主动发 1 个,2 秒后刷 UI |
+| Collector `/metrics` 没 `otelcol_receiver_accepted_spans` | collector 配置没生效。`docker logs lumen-platform-otel-collector` 看 config load error。改 `monitoring/otel-collector.yml` 后 `docker compose restart lumen-platform-otel-collector` 即可(config 文件是挂载,无需 force-recreate) |
+| Prometheus targets `otel-collector` Down | 改完 `monitoring/prometheus.yml` 没 reload。`docker exec lumen-platform-prometheus kill -HUP 1` 或重启 prometheus 容器 |
+| 后端 log 报 `ConnectionError: http://localhost:4317` | OTel Collector 容器没起,或 4317 没 expose host。`docker ps` 看容器状态 + `curl http://localhost:13133/status` 探活 |
+| W3C traceparent 链路断(celery worker 看不到 uvicorn 的 trace) | Celery 容器跟 uvicorn 进程不在同一 docker network,或 `OTEL_EXPORTER=otlp` 没在 celery container env(`docker exec lumen-platform-celery-doc env | grep OTEL`) |
+| 端口 16686/4317/4318/8889 冲突 | 改 `backend/docker-compose.yml` 端口映射,记得同步改 `OTEL_ENDPOINT`(同机 IntelliEngine-* 系列可能占这些端口) |
+| 采样率不生效,trace 还是 100% | (a) `OTEL_SAMPLE_RATIO` 没设;(b) 设了但没重启 uvicorn;(c) 设了非数字 fallback 到 1.0,看 uvicorn log 有无 warning |
+
+### 11.5 采样率语义速查
+
+`OTEL_SAMPLE_RATIO=0.0` ~ `1.0`,详见 `lumen_core/otel.py:_build_sampler`:
+
+| 值 | 行为 |
+|---|------|
+| `0.0` | ALWAYS_OFF,不采任何 span |
+| `0.0 < ratio < 1.0` | ParentBased(TraceIdRatioBased(ratio)),父 span 决定 + 子 span 按 ratio 随机采 |
+| `1.0` | ALWAYS_ON,全采 |
+| 非数字 | logger.warning + fallback 1.0 |
+| 未设 | 默认 1.0(dev 调试保留全量) |
+
+**ParentBased 关键**:跨进程 trace(uvicorn → celery worker → ollama)必须尊重 upstream 的采样决定 —— 上游不采,下游也不采,否则 trace tree 断裂(只看到一半 span)。
+
+### 11.6 注意事项
+
+- **`docker compose restart` 不重读 `env_file`**(同 M27 easyocr / M38.1.x docker 修):改完 `backend/.env.docker.example` 必须 `docker compose up -d --force-recreate --no-deps celery_worker_doc celery_worker_ppt celery_worker_eval` 才生效。
+- **otel-collector 容器内存限 512MB**(dev OOM guard):突发流量超 50% 内存(256MB)时 memory_limiter 触发 spike 拒收。生产可调大或改用 K8s HPA。
+- **`OTEL_SAMPLE_RATIO` 在 dev 1.0 是设计选择**:调试阶段保留全量 trace 排查问题方便,prod 高流量场景**必须**降到 0.05~0.1,否则 collector / jaeger 内存爆炸。
+- **`boto3 Windows registry proxy bypass` 未处理**(同 §10 MinIO 注意事项):本机 dev 不影响,production Linux `HTTPS_PROXY` 出去代理需要 follow-up。
 
 ---
 

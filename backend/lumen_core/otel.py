@@ -10,6 +10,9 @@ OTel SDK + instrumentation 直接补这 3 块。
 2. 自动 instrument httpx(下游 Ollama / OpenAI / 自家 API 自动写 span,
    parent 走 W3C ``traceparent`` 透传)
 3. SQLAlchemy / Celery 自动 instrumentation 留 Day 2(跟 engine 创建顺序耦合)
+4. 采样率走 ``_build_sampler()`` 读 ``OTEL_SAMPLE_RATIO`` env,
+   ``ParentBased(TraceIdRatioBased(ratio))`` 保留 root span 决定
+   (Day 4 ship,Phase 1 4.4)
 
 **幂等性**:
 - 同一进程多次调 ``setup_tracing()`` 只有第一次生效,后续直接返 False
@@ -23,6 +26,9 @@ OTel SDK + instrumentation 直接补这 3 块。
     gRPC,``http://localhost:4318/v1/traces`` for HTTP)
   - ``OTEL_SERVICE_NAME``: 覆盖默认 ``lumen-backend``
   - ``OTEL_SERVICE_VERSION``: 覆盖默认 git SHA / ``0.1.0``
+  - ``OTEL_SAMPLE_RATIO``: 0.0~1.0 root span 采样比例。0.0 / 1.0 边界
+    走 ``ALWAYS_OFF`` / ``ALWAYS_ON`` 避开 ``TraceIdRatioBased`` ratio
+    arg 报错(Day 4 ship)。
   - ``DEPLOYMENT_ENV``: ``dev`` / ``staging`` / ``prod``(默认 ``dev``)
 
 **踩坑**:
@@ -33,6 +39,8 @@ OTel SDK + instrumentation 直接补这 3 块。
 - 旧 ``lumen_services.httpx_trace`` 模块 + ``HTTPXClientInstrumentor`` 双
   写 ``X-Trace-Id`` / ``traceparent`` header;两者不冲突(不同 header 名),
   但 Day 5 计划把 ``httpx_trace`` 标 deprecated(已 ship 代码保留兼容)
+- ``OTEL_SAMPLE_RATIO`` 写 ``"1"`` / ``"1.0"`` / ``"0.05"`` 都接受,但
+  ``"abc"`` 这种非数字 fallback 1.0 + logger.warning,绝不让 SDK 崩
 """
 from __future__ import annotations
 
@@ -110,7 +118,6 @@ def _do_setup(
     from opentelemetry import trace
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    from opentelemetry.sdk.trace.sampling import ALWAYS_ON
 
     from lumen_core.otel_config import build_resource
 
@@ -120,7 +127,9 @@ def _do_setup(
         deployment_environment=deployment_environment,
     )
 
-    provider = TracerProvider(resource=resource, sampler=ALWAYS_ON)
+    sampler = _build_sampler()
+
+    provider = TracerProvider(resource=resource, sampler=sampler)
 
     # 选 exporter
     exporter = _build_exporter(exporter_mode)
@@ -277,6 +286,55 @@ def _build_exporter(exporter_mode: str):
     return ConsoleSpanExporter()
 
 
+def _build_sampler():
+    """Phase 1 Group B 4.4 Day 4 (2026-09-05): 按 ``OTEL_SAMPLE_RATIO`` env 构造 sampler。
+
+    **为什么 ParentBased**:跨进程 trace 链(W3C ``traceparent`` 透传)必须尊重
+    upstream 决定 —— 如果上游(nginx / 外部 API gateway)决定不采样,我们
+    用 ratio=1.0 又采了,造成 trace 树断裂(只看到一半 span)。ParentBased
+    默认 parent 不决定时走 root sampler,这样:
+    - 上游采样了 → 我们按 ratio 采子 span(TraceIdRatioBased 用 trace_id
+      hash 算 decision,父子一致)
+    - 上游没采 → 整个 trace 链都不采
+
+    **为什么 TraceIdRatioBased 而非其他**:业界事实标准;ratio 语义直接
+    (``0.1`` = 10%);子 span 跟随 parent 决定,无需手动协调。
+
+    **为什么 0.0 / 1.0 边界走 ALWAYS_OFF / ALWAYS_ON**:
+    - 部分 SDK 版本 ``TraceIdRatioBased(ratio=0.0)`` 会因 ratio 校验报
+      ``InvalidArgumentError``(被 0 当成 "永远不采,会除零" 的边缘 case)
+    - ``ALWAYS_OFF`` / ``ALWAYS_ON`` 是 OTel SDK 提供的常数,绕过 ratio 校验
+
+    **异常 fallback**:``OTEL_SAMPLE_RATIO=abc`` 这种非数字 fallback 1.0
+    + logger.warning,绝不让 SDK 启动失败 —— OTel 是可观测性,挂了不应
+    挂业务。
+    """
+    from opentelemetry.sdk.trace.sampling import (
+        ALWAYS_OFF,
+        ALWAYS_ON,
+        ParentBased,
+        TraceIdRatioBased,
+    )
+
+    raw = os.getenv("OTEL_SAMPLE_RATIO", "1.0").strip()
+    try:
+        ratio = float(raw)
+    except ValueError:
+        logger.warning(
+            "OTEL_SAMPLE_RATIO=%r invalid, falling back to 1.0 (ALWAYS_ON)", raw,
+        )
+        return ALWAYS_ON
+
+    # 边界值走 ALWAYS_ON/OFF 避免 ratio arg 报错
+    if ratio >= 1.0:
+        return ALWAYS_ON
+    if ratio <= 0.0:
+        return ALWAYS_OFF
+
+    # 中间值 ParentBased(root=TraceIdRatioBased(ratio)) 保留 trace 链一致性
+    return ParentBased(root=TraceIdRatioBased(ratio))
+
+
 def is_initialized() -> bool:
     """当前进程是否已 setup_tracing()(测试 / 重启场景用)。"""
     return _initialized
@@ -345,4 +403,5 @@ __all__ = [
     "is_initialized",
     "reset_for_test",
     "DEFAULT_SERVICE_NAME",
+    "_build_sampler",
 ]

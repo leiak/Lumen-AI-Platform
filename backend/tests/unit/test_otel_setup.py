@@ -231,3 +231,78 @@ def test_setup_tracing_swallows_exceptions(monkeypatch):
     result = otel.setup_tracing()
     assert result is False
     assert otel.is_initialized() is False
+
+
+# ===== Phase 1 Group B 4.4 Day 4 (2026-09-05) _build_sampler =====
+
+
+def test_build_sampler_default_ratio_is_always_on(monkeypatch):
+    """OTEL_SAMPLE_RATIO 未设 → ALWAYS_ON(等价 ratio=1.0)。"""
+    monkeypatch.delenv("OTEL_SAMPLE_RATIO", raising=False)
+
+    from opentelemetry.sdk.trace.sampling import ALWAYS_ON
+
+    sampler = otel._build_sampler()
+    assert sampler is ALWAYS_ON
+
+
+def test_build_sampler_ratio_one_returns_always_on(monkeypatch):
+    """OTEL_SAMPLE_RATIO=1.0 → ALWAYS_ON(避开 TraceIdRatioBased 边界 bug)。"""
+    monkeypatch.setenv("OTEL_SAMPLE_RATIO", "1.0")
+
+    from opentelemetry.sdk.trace.sampling import ALWAYS_ON
+
+    sampler = otel._build_sampler()
+    assert sampler is ALWAYS_ON
+
+
+def test_build_sampler_ratio_zero_returns_always_off(monkeypatch):
+    """OTEL_SAMPLE_RATIO=0.0 → ALWAYS_OFF(避开 TraceIdRatioBased ratio=0 报错)。"""
+    monkeypatch.setenv("OTEL_SAMPLE_RATIO", "0.0")
+
+    from opentelemetry.sdk.trace.sampling import ALWAYS_OFF
+
+    sampler = otel._build_sampler()
+    assert sampler is ALWAYS_OFF
+
+
+def test_build_sampler_mid_ratio_uses_parent_based(monkeypatch):
+    """OTEL_SAMPLE_RATIO=0.5 → ParentBased(TraceIdRatioBased(0.5)),保留 trace 链一致性。"""
+    monkeypatch.setenv("OTEL_SAMPLE_RATIO", "0.5")
+
+    from opentelemetry.sdk.trace.sampling import (
+        ParentBased,
+        TraceIdRatioBased,
+    )
+
+    sampler = otel._build_sampler()
+    assert isinstance(sampler, ParentBased)
+    # ParentBased 把 root 存到 _root(私有字段,SDK 内部约定)。
+    # TraceIdRatioBased.get_description() 返 "TraceIdRatioBased{0.5}" 字符串,
+    # 验证 ratio 真的被设进去了。
+    assert isinstance(sampler._root, TraceIdRatioBased)
+    assert "0.5" in sampler._root.get_description()
+
+
+def test_build_sampler_invalid_string_falls_back_to_always_on(monkeypatch):
+    """OTEL_SAMPLE_RATIO='abc' 非数字 → fallback ALWAYS_ON + logger.warning,绝不抛。"""
+    monkeypatch.setenv("OTEL_SAMPLE_RATIO", "abc")
+
+    from opentelemetry.sdk.trace.sampling import ALWAYS_ON
+
+    sampler = otel._build_sampler()
+    assert sampler is ALWAYS_ON
+
+
+def test_build_sampler_setup_tracing_applies_sampler(monkeypatch):
+    """端到端:setup_tracing() 把 _build_sampler() 的 sampler 装到 TracerProvider。"""
+    monkeypatch.setenv("OTEL_EXPORTER", "console")
+    monkeypatch.setenv("OTEL_SAMPLE_RATIO", "0.0")
+
+    from opentelemetry.sdk.trace.sampling import ALWAYS_OFF
+
+    otel.setup_tracing()
+    from opentelemetry import trace
+
+    provider = trace.get_tracer_provider()
+    assert provider.sampler is ALWAYS_OFF
