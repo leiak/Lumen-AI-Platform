@@ -148,7 +148,15 @@ gunicorn>=21.2.0,<24
 
 # Phase 1 Group B 2.4.4 (2026-09-04): OpenTelemetry SDK + 业务 instrumentation。
 # SDK / OTLP gRPC / FastAPI / ASGI / util-http 已在 2026-09 之前安装(基础栈);
-# 这次 ship 加 httpx 出站自动 instrumentation(下游 Ollama / OpenAI / 自家
-# API 自动写 span,parent 走 W3C traceparent 透传)。SQLAlchemy / Celery 留
-# Day 2 ship,跟 engine / celery_app 创建顺序耦合。
+# Day 1 ship 加 httpx 出站自动 instrumentation(下游 Ollama / OpenAI / 自家
+# API 自动写 span,parent 走 W3C traceparent 透传)。
+# Day 2 ship 加 SQLAlchemy + Celery + Pymysql 自动 instrumentation ——
+# SQLAlchemy 覆盖 engine.execute()/ORM query(主要路径);
+# Pymysql 覆盖 raw connect()(ensure_* 迁移脚本 + 直连备份);
+# Celery 覆盖 worker task(自动起 parent span + 跨进程 traceparent 注入)。
+# dbapi 是 pymysql 的 peer dep,显式 pin 防 pip 解析飘。
 opentelemetry-instrumentation-httpx>=0.57b0,<1.0
+opentelemetry-instrumentation-sqlalchemy>=0.57b0,<1.0
+opentelemetry-instrumentation-celery>=0.57b0,<1.0
+opentelemetry-instrumentation-pymysql>=0.57b0,<1.0
+opentelemetry-instrumentation-dbapi>=0.57b0,<1.0

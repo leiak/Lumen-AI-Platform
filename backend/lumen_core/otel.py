@@ -128,14 +128,22 @@ def _do_setup(
 
     trace.set_tracer_provider(provider)
 
-    # 自动 instrument httpx(模块级 patch,不需 app 引用)。
-    # SQLAlchemy / Celery 留 Day 2。
-    try:
-        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-
-        HTTPXClientInstrumentor().instrument()
-    except ImportError:
-        logger.warning("HTTPXClientInstrumentor not installed; httpx spans disabled")
+    # 自动 instrument:httpx(出站 HTTP)+ SQLAlchemy(engine execute / ORM query)
+    # + Pymysql(raw connect,覆盖 ensure_* 迁移脚本)+ Celery(task 自动起 parent
+    # span + 跨进程 W3C traceparent header 注入)。
+    #
+    # 顺序:SQLAlchemy 必须先(pymysql 是底层 driver,先 instrument pymysql 再
+    # instrument SQLAlchemy 时 SQLAlchemy 会用上 instrumented pymysql);
+    # Celery 不依赖其他两个,放最后。
+    #
+    # idempotency:每个 Instrumentor 内部 _instrumented 守门,二次调用会
+    # 抛 AlreadyInstrumentedError。我们包在 try 里吞掉,跟 logger.warning
+    # 走 — 真重复 setup 是 bug,生产里不应该发生,但测试 reset 后重 setup
+    # 会撞。
+    _instrument_httpx()
+    _instrument_pymysql()
+    _instrument_sqlalchemy()
+    _instrument_celery()
 
     logger.info(
         "OpenTelemetry initialized: exporter=%s service=%s version=%s env=%s",
@@ -144,6 +152,90 @@ def _do_setup(
         resource.attributes.get("service.version"),
         resource.attributes.get("deployment.environment"),
     )
+
+
+def _instrument_httpx() -> None:
+    """httpx 出站 HTTP 自动 instrumentation(Day 1 ship)。"""
+    try:
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+
+        HTTPXClientInstrumentor().instrument()
+    except ImportError:
+        logger.warning("HTTPXClientInstrumentor not installed; httpx spans disabled")
+    except Exception as e:  # noqa: BLE001
+        # AlreadyInstrumentedError 等 — 真重复 setup 是 bug,日志警告不阻塞
+        logger.warning("httpx instrumentation failed: %s", e)
+
+
+def _instrument_pymysql() -> None:
+    """pymysql raw connect 自动 instrumentation(Day 2)。
+
+    主要覆盖路径:lumen_core.database 里 ``ensure_*`` 迁移脚本 + 任何
+    直连 MySQL 的管理脚本(pymysql.connect())。SQLAlchemy ORM 路径走
+    SQLAlchemyInstrumentor,不重复。
+
+    pymysql 是 SQLAlchemy 默认 driver 之一,pymysql.instrument 必须在
+    SQLAlchemy 之前调,否则 SQLAlchemy 拿到的 connection 是 uninstrumented
+    DBAPI,SQL span 关联不到 raw query span。
+    """
+    try:
+        from opentelemetry.instrumentation.pymysql import PyMySQLInstrumentor
+
+        PyMySQLInstrumentor().instrument()
+    except ImportError:
+        logger.warning("PyMySQLInstrumentor not installed; raw pymysql spans disabled")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("pymysql instrumentation failed: %s", e)
+
+
+def _instrument_sqlalchemy() -> None:
+    """SQLAlchemy engine 自动 instrumentation(Day 2)。
+
+    关键决策:用 ``instrument(engine=engine)`` 而非全局 ``instrument()``。
+    全局会试图 patch 所有 engine,但项目只有 1 个 engine(create_engine
+    在 lumen_core.database.py:6 模块级);用 ``engine=`` 显式传避免误伤
+    任何未来 import 进来的其他 engine(比如测试 fixture)。
+
+    engine import 在这里(lazy),setup_tracing() 主干 try/except 包一切,
+    MySQL down 时 create_engine 仍然能成功(create_engine 是 lazy,
+    真正连接是第一次 query 时),所以 SQLAlchemy instrumentation 不会阻塞
+    uvicorn 启动。
+    """
+    try:
+        from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+
+        from lumen_core.database import engine
+
+        SQLAlchemyInstrumentor().instrument(engine=engine)
+    except ImportError:
+        logger.warning(
+            "SQLAlchemyInstrumentor not installed; SQLAlchemy spans disabled",
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("sqlalchemy instrumentation failed: %s", e)
+
+
+def _instrument_celery() -> None:
+    """Celery task 自动 instrumentation(Day 2)。
+
+    自动为每个 task 创建 parent span + 跨进程 W3C traceparent header 注入。
+    自研 ``lumen_tasks.trace_signals`` 保留 X-Trace-Id header 路径作为
+    fallback(老客户端不识别 traceparent 时还能 join)。
+
+    CeleryInstrumentor.instrument() 是 module-level patch(改 Celery class),
+    无需先 import celery_app — uvicorn 进程调 setup_tracing() 时如果
+    celery_app 没 import,CeleryInstrumentor 仍能 instrument 后续任何
+    Celery() 实例化。这是 Day 2 的关键设计:Celery instrument 不依赖
+    celery_app 加载顺序。
+    """
+    try:
+        from opentelemetry.instrumentation.celery import CeleryInstrumentor
+
+        CeleryInstrumentor().instrument()
+    except ImportError:
+        logger.warning("CeleryInstrumentor not installed; celery task spans disabled")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("celery instrumentation failed: %s", e)
 
 
 def _build_exporter(exporter_mode: str):
@@ -169,8 +261,8 @@ def _build_exporter(exporter_mode: str):
         return OTLPSpanExporter(endpoint=endpoint, timeout=2)
 
     if exporter_mode == "otlp_http":
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # type: ignore[import-untyped]
-            OTLPSpanExporter,
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # type: ignore[import-not-found,no-redef]
+            OTLPSpanExporter as HTTPOTLPSpanExporter,
         )
 
         endpoint = (
@@ -178,7 +270,7 @@ def _build_exporter(exporter_mode: str):
             or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
             or "http://localhost:4318/v1/traces"
         )
-        return OTLPSpanExporter(endpoint=endpoint, timeout=2)
+        return HTTPOTLPSpanExporter(endpoint=endpoint, timeout=2)
 
     # 未知值兜底走 console + warning
     logger.warning("Unknown OTEL_EXPORTER=%r,falling back to console", exporter_mode)

@@ -1,5 +1,9 @@
 """Phase 0 Unit 5 4.2 (2026-09-02):Celery trace_id 贯通信号。
 
+Phase 1 Group B 2.4.4 (2026-09-04) Day 2 演进:跟 ``CeleryInstrumentor``
+(W3C traceparent header)共存 — 双 header 都注入,worker 端优先 OTel
+current span,无 OTel span 时回退 X-Trace-Id。
+
 **做什么**:Celery 任务 producer 把 trace_id 放到 task request 的 headers
 里(走 `apply_async(headers={"X-Trace-Id": "..."})` 或 worker 端
 prestore),worker `task_prerun` 信号里读出来,set 到当前进程 contextvar,
@@ -16,6 +20,15 @@ prestore),worker `task_prerun` 信号里读出来,set 到当前进程 contextvar
 **Celery 信号约定**:
 - ``before_task_publish`` (sender side):从 ctx 拿 trace_id 写到 message headers
 - ``task_prerun`` (worker side):从 message headers 读 trace_id 写回 ctx
+
+**Phase 1 4.4 Day 2:OTel 共存**:
+- ``CeleryInstrumentor().instrument()`` 装好后,每个 task 自动建 parent span
+  + inject W3C ``traceparent`` header
+- 自研 handler 保留 X-Trace-Id 路径作为兼容(老客户端不识别 traceparent
+  也能 join trace)
+- worker 端 ``task_prerun`` 优先用 OTel current span 的 trace_id(避免
+  X-Trace-Id ≠ traceparent 时日志 / span 分裂),无 OTel span 时回退
+  X-Trace-Id header
 
 **踩坑**:
 - celery worker 是独立进程,每个 task 在独立 asyncio loop(实际是 billiard
@@ -68,6 +81,27 @@ def _read_trace_id_from_task_headers(task: Any) -> Optional[str]:
     return None
 
 
+def _has_valid_otel_span() -> bool:
+    """Phase 1 4.4 Day 2:检查当前 OTel context 是否有 valid span。
+
+    如果有 → CeleryInstrumentor 已经 inject 了 traceparent header,worker
+    端 task_prerun 已经从 traceparent 建好 span。此时不应该用 X-Trace-Id
+    header 覆盖 contextvar(可能不一致)。
+
+    OTel SDK 未装 / import 失败 → 返 False,继续走 X-Trace-Id 路径。
+    """
+    try:
+        from opentelemetry import trace as _otel_trace
+    except ImportError:
+        return False
+    try:
+        sc = _otel_trace.get_current_span().get_span_context()
+        return bool(sc and sc.is_valid)
+    except Exception:  # noqa: BLE001
+        # OTel 内部异常 swallow,跟 tracing.get_trace_id() 行为一致
+        return False
+
+
 def task_prerun_handler(task_id: str, task: Any, **kwargs) -> None:
     """Celery ``task_prerun`` 信号 handler:在 task body 跑前注入 trace_id。
 
@@ -75,7 +109,20 @@ def task_prerun_handler(task_id: str, task: Any, **kwargs) -> None:
         from celery import signals
         signals.task_prerun.connect(task_prerun_handler)
         signals.task_postrun.connect(task_postrun_handler)
+
+    Phase 1 4.4 Day 2 演进:
+    - 如果 CeleryInstrumentor 已经建了 valid OTel span → 不动 contextvar,
+      让 ``get_trace_id()`` 通过 OTel bridge 拿 trace_id(避免不一致)
+    - 如果 OTel 未装 / 无 valid span → 走老路径:从 X-Trace-Id header 拿
+      trace_id set 到 contextvar
     """
+    if _has_valid_otel_span():
+        logger.debug(
+            "celery task_prerun: OTel span valid, deferring to OTel bridge task=%s",
+            task.name,
+        )
+        return
+
     tid = _read_trace_id_from_task_headers(task)
     if tid:
         set_trace_id(tid)
@@ -95,6 +142,10 @@ def task_postrun_handler(task_id: str, task: Any, **kwargs) -> None:
     """Celery ``task_postrun`` 信号 handler:task 跑完清 ctx。
 
     防下一个 task 串 / 防 shutdown 期间的 log 还带旧 tid。
+
+    Phase 1 4.4 Day 2:即便 OTel 已接管,清 contextvar 是 back-compat
+    守门(代码里很多地方直接调 get_trace_id() 拿 contextvar,而不是走
+    OTel bridge)。
     """
     clear_trace_id()
 
@@ -112,6 +163,12 @@ def before_task_publish_handler(
 
     注意:必须**就地改 headers**(celery 的 hook 拿到的是 mutable dict,
     in-place 修改生效)。
+
+    Phase 1 4.4 Day 2:CeleryInstrumentor 也通过这个 signal 注入 W3C
+    traceparent header(从 OTel current span context 拿 trace_id +
+    span_id)。两个 handler 都跑,Redis message 里同时有 X-Trace-Id +
+    traceparent 两个 header。worker 端根据 OTel 是否有效优先选 OTel
+    (见 task_prerun_handler)。
     """
     if headers is None:
         return
@@ -173,4 +230,5 @@ __all__ = [
     "apply_async_with_trace",
     "install_celery_signals",
     "CELERY_HEADER_KEY",
+    "_has_valid_otel_span",
 ]

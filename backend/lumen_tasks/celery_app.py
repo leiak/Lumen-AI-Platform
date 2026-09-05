@@ -79,15 +79,28 @@ from celery.signals import worker_init  # noqa: E402
 
 @worker_init.connect
 def _on_worker_init(**_kwargs) -> None:
-    """worker 启动钩子:装 trace_id + DLQ 信号链。
+    """worker 启动钩子:装 OTel + trace_id + DLQ 信号链。
 
     Phase 0 ship 了 trace_signals.py 但未接入 —— 1.3 修了。本任务加 DLQ。
+    Phase 1 4.4 Day 2 ship 加 OpenTelemetry — 每个 celery worker 进程独立
+    setup_tracing(setup_tracing 内部 _initialized 是 module-level 单例,
+    进程内守门;celery worker 是独立 python 进程,fork 后 state 是 fresh)。
+
     装完后:
     - producer 端发 task 时 ctx 有 trace_id → before_task_publish 写到 headers
     - worker 端 task_prerun 读 headers 注入 ctx
     - worker 端 task_postrun 清 ctx(防串下一个 task)
     - task 失败 → task_failure 写 FailedTask row(让 admin 查 / 重派 / ack)
+    - Celery task 自动创建 parent span(Day 2 CeleryInstrumentor);
+      自研 X-Trace-Id header 跟 OTel W3C traceparent header 共存
     """
+    # Phase 1 Group B 2.4.4 (2026-09-04):OTel setup per worker process。
+    # 必须在 install_celery_signals 之前 —— CeleryInstrumentor 装好,worker
+    # 端 task_prerun 信号 handler 才能拿到当前 span context 来 inject header。
+    from lumen_core.otel import setup_tracing
+
+    setup_tracing()
+
     from lumen_tasks.trace_signals import install_celery_signals
     from lumen_tasks.dlq import install_dlq_signal
 
