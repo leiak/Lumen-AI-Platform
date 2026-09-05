@@ -20,6 +20,21 @@ class Settings(BaseSettings):
     # dev 默认 INFO;prod 可升 WARNING 减噪。
     LOG_LEVEL: str = "INFO"
 
+    # --- Phase 1 Group B 2.4.4 (2026-09-04) OpenTelemetry ---
+    # OTEL_EXPORTER: "console"(dev 默认 — span 打到 stdout)/ "otlp"(OTLP
+    # gRPC)/ "otlp_http"(OTLP HTTP/protobuf)/ "none"(完全关闭)。
+    # dev 设 "none" 或 "none" 让 uvicorn 启动不报 OTel warning。
+    OTEL_EXPORTER: str = "console"
+    # OTEL_ENDPOINT: exporter URL。gRPC 默认 localhost:4317,HTTP 默认
+    # localhost:4318/v1/traces(Day 4 docker-compose 加 jaeger / otel-
+    # collector 后改成容器 DNS,例如 http://lumen-platform-otel-collector:4317)。
+    OTEL_ENDPOINT: str = "http://localhost:4317"
+    # OTEL_SERVICE_NAME: 覆盖默认 "lumen-backend"。生产可设环境特定名。
+    OTEL_SERVICE_NAME: str = "lumen-backend"
+    # DEPLOYMENT_ENV: "dev" / "staging" / "prod"。影响 OTel resource
+    # deployment.environment label + 后续 SLO / 告警路由。
+    DEPLOYMENT_ENV: str = "dev"
+
     # Database
     DATABASE_URL: str = "mysql+pymysql://ai_user:ai_password@localhost:3306/ai_platform"
 

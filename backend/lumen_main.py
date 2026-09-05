@@ -183,6 +183,27 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+# Phase 1 Group B 2.4.4 (2026-09-04): OpenTelemetry SDK + FastAPI 自动 instrumentation。
+# 模块级(不是 lifespan)原因:FastAPIInstrumentor.instrument_app(app) 必须在
+# TracerProvider 设置之后才能拿到正确 tracer;两件事绑定在一起最干净。
+# setup_tracing() 本身幂等(模块级 _initialized 守门),多次调用无副作用。
+# OTEL_EXPORTER=none / off → noop,不污染 dev / pytest 输出。
+#
+# httpx 自动 instrumentation 也在 setup_tracing() 内部完成(HTTPXClientInstrumentor
+# 是模块级 patch,无需 app 引用)。SQLAlchemy / Celery 自动 instrumentation
+# 留 Day 2(跟 engine 创建顺序 / Celery worker_init 信号耦合)。
+from lumen_core.otel import setup_tracing
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+if setup_tracing(
+    service_name=settings.OTEL_SERVICE_NAME,
+    deployment_environment=settings.DEPLOYMENT_ENV,
+):
+    # 只在 setup_tracing 真初始化了 TracerProvider 时才 instrument app;
+    # OTEL_EXPORTER=none 时不挂中间件,免得 FastAPIInstrumentor 报"NoOp tracer"
+    # warning + 0 收益开销。
+    FastAPIInstrumentor.instrument_app(app)
+
 # Phase 0 Unit 2 (2026-09-02):启动期标志。
 # K8s readiness / startup probe 用,/startup 返 503 表示 uvicorn 进程在
 # 跑但 startup_event 还没跑完(40+ ensure_* 迁移 + scheduler 启动),

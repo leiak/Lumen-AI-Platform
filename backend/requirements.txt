@@ -145,3 +145,10 @@ tenacity>=8.2,<10
 # "MySQL server has gone away")。UvicornWorker 已包含在 uvicorn[standard]
 # extra 里,这里只装 gunicorn master / arbiter 部分。
 gunicorn>=21.2.0,<24
+
+# Phase 1 Group B 2.4.4 (2026-09-04): OpenTelemetry SDK + 业务 instrumentation。
+# SDK / OTLP gRPC / FastAPI / ASGI / util-http 已在 2026-09 之前安装(基础栈);
+# 这次 ship 加 httpx 出站自动 instrumentation(下游 Ollama / OpenAI / 自家
+# API 自动写 span,parent 走 W3C traceparent 透传)。SQLAlchemy / Celery 留
+# Day 2 ship,跟 engine / celery_app 创建顺序耦合。
+opentelemetry-instrumentation-httpx>=0.57b0,<1.0
