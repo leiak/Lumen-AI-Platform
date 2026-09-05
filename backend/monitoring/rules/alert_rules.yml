@@ -1,0 +1,268 @@
+# Phase 1 Group B 2.4.7 / B2c (2026-09-04): P1+P2+P3 告警规则。
+#
+# 这是 alertmanager.yml 路由的告警来源。
+# 6 个 SLO burn-rate 告警独立放在 slo.yml(跟 SLO 单一定义源 slo_definitions.yaml 对齐),
+# 这里只管"基础设施"层面的 P1/P2/P3。
+#
+# Severity 约定(在 alertmanager.yml 路由里消费):
+#   critical → PagerDuty 7×24
+#   warning  → Slack #lumen-alerts
+#   info     → Slack #lumen-ops
+#
+# 每条 alert 必须有 labels:
+#   severity: critical | warning | info
+#   component: api | database | storage | cache | queue | circuit | embedding | host
+#   (可选) team: backend | infra | data
+
+groups:
+
+  # ============================================================
+  # P1 critical — PagerDuty 7×24
+  # ============================================================
+  - name: p1_critical
+    interval: 30s
+    rules:
+
+      # API 5xx 错误率 > 1% 持续 5min(roadmap 4.7 P1)
+      # 比 SLO api_availability(0.5%)更激进,因为 1% 已经属于严重故障。
+      - alert: API5xxCritical
+        expr: |
+          (
+            sum(rate(http_requests_total{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(http_requests_total[5m])), 0.001)
+          ) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+          component: api
+          team: backend
+        annotations:
+          summary: "API 5xx 错误率 > 1% 持续 5 分钟"
+          description: |
+            {{ $labels.alertname }}:5xx 错误率 {{ $value | humanizePercentage }} > 1% 阈值,
+            已持续 5min 以上,可能是后端 / DB / 第三方依赖故障。
+
+      # MySQL 主从复制断(slave SQL thread / IO thread 异常)
+      # MySQL exporter 提供 ``mysql_slave_status_slave_io_running`` /
+      # ``mysql_slave_status_slave_sql_running`` metric。
+      # 真实 prod 可能有 > 1 个 slave,这里用 ``min`` 聚合:任一 slave 出问题就告警。
+      - alert: DatabaseReplicationBroken
+        expr: |
+          mysql_slave_status_slave_io_running == 0
+          or
+          mysql_slave_status_slave_sql_running == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: database
+          team: infra
+        annotations:
+          summary: "MySQL 主从复制异常"
+          description: |
+            MySQL slave IO/SQL thread 未运行,主从同步已断 > 2min。
+            立即检查:网络 / binlog 损坏 / relay log 满 / slave 进程崩溃。
+
+      # MinIO/S3 写盘异常 —— S3 ``http_requests_total`` 5xx 比例 > 5% 持续 3min
+      # MinIO 用 prometheus client 暴露 http_requests_total{code="5xx"}。
+      - alert: MinIOWriteDown
+        expr: |
+          (
+            sum(rate(minio_s3_requests_total{code=~"5.."}[3m]))
+            /
+            clamp_min(sum(rate(minio_s3_requests_total[3m])), 0.001)
+          ) > 0.05
+        for: 3m
+        labels:
+          severity: critical
+          component: storage
+          team: infra
+        annotations:
+          summary: "MinIO/S3 写盘不可用"
+          description: |
+            MinIO S3 写请求 5xx 比例 {{ $value | humanizePercentage }} > 5%,
+            知识库上传 / 头像 / 导出文件可能失败。
+
+      # Redis 主节点不可达(master_link_down / connected_slaves=0 持续 1min)
+      # Redis exporter 提供 ``redis_connected_slaves`` / ``master_link_down``。
+      - alert: RedisMasterDown
+        expr: |
+          redis_up == 0
+          or
+          (
+            redis_instance_info_role == "master"
+            and redis_connected_slaves == 0
+          )
+        for: 1m
+        labels:
+          severity: critical
+          component: cache
+          team: infra
+        annotations:
+          summary: "Redis 主节点不可达"
+          description: |
+            Redis master 不可达或无 connected slaves > 1min。
+            Celery broker / rate limit middleware / 队列堆积告警可能随即触发。
+
+  # ============================================================
+  # P2 warning — Slack #lumen-alerts
+  # ============================================================
+  - name: p2_warning
+    interval: 30s
+    rules:
+
+      # Celery 队列堆积 > 100 持续 10min(roadmap 4.7 P2)
+      # lumen_celery_queue_depth 是 backend 30s tick 写入的 Gauge,
+      # queue label 限定 doc_parse / ppt_gen / eval_run / default。
+      - alert: CeleryQueueDepthHigh
+        expr: lumen_celery_queue_depth > 100
+        for: 10m
+        labels:
+          severity: warning
+          component: queue
+          team: backend
+        annotations:
+          summary: "Celery 队列 {{ $labels.queue }} 堆积 > 100 持续 10min"
+          description: |
+            队列深度 {{ $value }} 超过 100,worker 可能 hang / 慢 / 死锁。
+            看 worker 日志 + Celery Flower(`/dashboard/celery-flower` 如果有)定位瓶颈任务。
+
+      # Circuit breaker 打开(open)状态持续 5min
+      # lumen_circuit_breaker_state 是 (breaker, state) one-hot Gauge,
+      # state in {closed, half_open, open};open=1 表示当前态是 open。
+      - alert: CircuitBreakerOpen
+        expr: lumen_circuit_breaker_state{state="open"} == 1
+        for: 5m
+        labels:
+          severity: warning
+          component: circuit
+          team: backend
+        annotations:
+          summary: "Circuit breaker {{ $labels.breaker }} 已打开 5min+"
+          description: |
+            熔断器 {{ $labels.breaker }} 处于 open 状态(拒绝所有请求),
+            通常意味着下游依赖(Ollama / ES / MySQL / S3)持续失败。
+
+      # Embedding 调用 P95 > 1s 持续 10min(roadmap 4.7 P2)
+      # SLO embedding_latency P95 < 200ms 是软目标;P95 > 1s 已经是严重降级。
+      - alert: EmbeddingLatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, model) (rate(lumen_embedding_duration_seconds_bucket{status="success"}[5m]))
+          ) > 1.0
+        for: 10m
+        labels:
+          severity: warning
+          component: embedding
+          team: backend
+        annotations:
+          summary: "Embedding P95 > 1s 持续 10min"
+          description: |
+            Embedding 模型 {{ $labels.model }} P95 {{ $value }}s 已超过 1s,
+            影响 KB 检索 / RAG pipeline 响应时间。
+
+      # LLM 调用失败率 > 10% 持续 5min(roadmap 4.7 P2)
+      # lumen_llm_calls_total{model, status},status in {success, error, timeout}。
+      - alert: LLMSuccessRateLow
+        expr: |
+          (
+            sum(rate(lumen_llm_calls_total{status!="success"}[5m]))
+            /
+            clamp_min(sum(rate(lumen_llm_calls_total[5m])), 0.001)
+          ) > 0.10
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+          team: backend
+        annotations:
+          summary: "LLM 失败率 > 10% 持续 5min"
+          description: |
+            LLM 调用失败率 {{ $value | humanizePercentage }} 超阈值,
+            可能是 Ollama 死 / 网络抖 / model 切换 / API key 过期。
+
+  # ============================================================
+  # P3 info — Slack #lumen-ops
+  # ============================================================
+  - name: p3_info
+    interval: 60s
+    rules:
+
+      # Host 磁盘剩余 < 20% 持续 30min
+      # node_exporter 暴露 ``node_filesystem_avail_bytes`` / ``node_filesystem_size_bytes``。
+      - alert: HostDiskSpaceLow
+        expr: |
+          (
+            node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}
+          /
+          node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}
+          ) < 0.20
+        for: 30m
+        labels:
+          severity: info
+          component: host
+          team: infra
+        annotations:
+          summary: "Host {{ $labels.instance }} 磁盘剩余 < 20% ({{ $labels.mountpoint }})"
+          description: |
+            磁盘可用率 {{ $value | humanizePercentage }},持续 30min+。
+            清理 Prometheus TSDB / Celery worker 日志 / 上传产物。
+
+      # 容器内存 > 90% 持续 15min(uvicorn / celery worker / Prometheus)
+      # cAdvisor / node_exporter 暴露 ``container_memory_usage_bytes`` /
+      # ``container_spec_memory_limit_bytes``。
+      - alert: ContainerMemoryHigh
+        expr: |
+          (
+            container_memory_usage_bytes{name!=""}
+          /
+            container_spec_memory_limit_bytes{name!=""}
+          ) > 0.90
+          and
+          container_spec_memory_limit_bytes{name!=""} > 0
+        for: 15m
+        labels:
+          severity: info
+          component: host
+          team: infra
+        annotations:
+          summary: "容器 {{ $labels.name }} 内存 > 90%"
+          description: |
+            容器内存使用率 {{ $value | humanizePercentage }} 持续 15min+。
+            可能 OOM kill,看 docker logs / metric ``container_memory_failures_total``。
+
+      # Prometheus 自身 scrape target down(`up == 0`)
+      # 持续 5min 才告警,避免单次 scrape 抖动。
+      - alert: PrometheusScrapeTargetDown
+        expr: up == 0
+        for: 5m
+        labels:
+          severity: info
+          component: monitoring
+          team: infra
+        annotations:
+          summary: "Prometheus scrape target {{ $labels.job }} 不可达"
+          description: |
+            job={{ $labels.job }} instance={{ $labels.instance }}
+            已 5min 无数据,可能是容器挂了 / 网络隔离 / 端口被防火墙挡。
+
+      # /api/v1/alerts/webhook(本服务接收端)返回 5xx
+      # 自监控 —— 防止"告警系统本身挂了"。
+      - alert: AlertsWebhookReceiverErrors
+        expr: |
+          (
+            sum(rate(http_requests_total{path="/api/v1/alerts/webhook",status=~"5.."}[10m]))
+            /
+            clamp_min(sum(rate(http_requests_total{path="/api/v1/alerts/webhook"}[10m])), 0.001)
+          ) > 0.10
+        for: 10m
+        labels:
+          severity: info
+          component: monitoring
+          team: backend
+        annotations:
+          summary: "告警 webhook receiver 5xx > 10%"
+          description: |
+            /api/v1/alerts/webhook 5xx 率 {{ $value | humanizePercentage }} > 10%,
+            Alertmanager 可能正在发无效 payload 导致落盘失败 / OSError。

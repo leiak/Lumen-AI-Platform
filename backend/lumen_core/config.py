@@ -162,6 +162,22 @@ class Settings(BaseSettings):
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    # --- Phase 1 Group B 2.4.7 / B2c (2026-09-04) Alertmanager webhook ---
+    # 关掉后 /api/v1/alerts/webhook 返 503(让 AM 重试,不走静默丢)。
+    # dev 默认开;生产可关用于演练。
+    ALERTS_WEBHOOK_ENABLED: bool = True
+
+    @property
+    def ALERTS_DIR(self) -> Path:
+        """Phase 1 Group B 2.4.7 / B2c (2026-09-04):Alertmanager webhook 落盘目录。
+
+        每个 firing alert 一个 JSON 文件,文件名 = fingerprint(同名覆盖,便于
+        外部脚本聚合)。默认在 ``backend/storage/alerts/`` 下。
+        """
+        d = self.STORAGE_DIR / "alerts"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     # --- Phase 1 Group A 2.1 (2026-09-03) Rate-limit middleware ---
     # 关闭后 RateLimitMiddleware 跳过所有路径,等价于"无限流"。
     # dev 默认开(Phase 0 已 ship fail-closed 限流);生产环境

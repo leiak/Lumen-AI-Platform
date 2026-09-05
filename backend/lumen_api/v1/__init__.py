@@ -136,3 +136,8 @@ router.include_router(multimodal_configs.router)
 #   /api/v1/admin/tasks/{id}/ack  (mark acknowledged)
 from . import admin_tasks  # noqa: E402
 router.include_router(admin_tasks.router)
+
+# Phase 1 Group B 2.4.7 / B2c (2026-09-04): Alertmanager webhook receiver
+#   /api/v1/alerts/webhook  (no-auth AM sink, writes JSON + uvicorn log)
+from . import alerts_webhook  # noqa: E402
+router.include_router(alerts_webhook.router)

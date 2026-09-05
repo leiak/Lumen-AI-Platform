@@ -29,11 +29,11 @@ global:
 rule_files:
   - /etc/prometheus/rules/*.yml
 
-# Alertmanager 地址 — B2c 起 alertmanager 容器后启用。
-# alerting:
-#   alertmanagers:
-#     - static_configs:
-#         - targets: ["lumen-platform-alertmanager:9093"]
+# Alertmanager 地址 — Phase 1 Group B 2.4.7 (B2c) 启用。
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["lumen-platform-alertmanager:9093"]
 
 scrape_configs:
   # ---- 主目标:uvicorn /metrics ----
@@ -62,3 +62,23 @@ scrape_configs:
       - targets: ["lumen-platform-grafana:3000"]
         labels:
           service: "grafana"
+
+  # ---- Node exporter(Phase 1 Group B 2.4.7 / B2c 2026-09-04):host 硬件 + OS 指标 ----
+  # 端口 19100 映射到 9100;host mount /proc /sys / 让 exporter 看到 host metric。
+  # P3 告警(磁盘 / 内存)走这里采集的 node_filesystem_avail_bytes / container_memory_usage_bytes。
+  - job_name: "node-exporter"
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["host.docker.internal:19100"]
+        labels:
+          service: "node-exporter"
+
+  # ---- Redis exporter(Phase 1 Group B 2.4.7 / B2c 2026-09-04):Redis 指标 ----
+  # 端口 19101 映射到 9121。
+  # P1 告警(RedisMasterDown)走这里采集的 redis_up / redis_connected_slaves。
+  - job_name: "redis-exporter"
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["host.docker.internal:19101"]
+        labels:
+          service: "redis-exporter"

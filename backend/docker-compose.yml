@@ -218,6 +218,53 @@ services:
       redis:
         condition: service_healthy
 
+  alertmanager:
+    # Phase 1 Group B 2.4.7 / B2c (2026-09-04):告警路由 + 抑制 + 分组。
+    # 端口 19093 避 default 9093(同机可能已有 AM 实例)。
+    image: prom/alertmanager:latest
+    container_name: lumen-platform-alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+      - '--web.external-url=http://localhost:19093'
+    ports:
+      - "19093:9093"
+    volumes:
+      - D:/work-ai/0401-lingclaw-to-langchain-demo/backend/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    restart: unless-stopped
+
+  node_exporter:
+    # Phase 1 Group B 2.4.7 / B2c (2026-09-04):host 硬件 + OS 指标。
+    # 端口 19100 避 default 9100。Host 模式 mount /proc /sys / 让 exporter 看到
+    # 真实机器资源(container 自身 metric 不准)。
+    image: prom/node-exporter:latest
+    container_name: lumen-platform-node-exporter
+    command:
+      - '--path.rootfs=/host'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    ports:
+      - "19100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    restart: unless-stopped
+
+  redis_exporter:
+    # Phase 1 Group B 2.4.7 / B2c (2026-09-04):Redis 指标(used_memory / connected_clients /
+    # keyspace_hits / db_keys 等)。端口 19101 避 default 9121。
+    image: oliver006/redis_exporter:latest
+    container_name: lumen-platform-redis-exporter
+    command:
+      - '--redis.addr=redis://lumen-platform-redis:6379'
+    ports:
+      - "19101:9121"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   mysql_data:
   es_data:
@@ -226,3 +273,4 @@ volumes:
   minio_data:
   prometheus_data:
   grafana_data:
+  alertmanager_data:

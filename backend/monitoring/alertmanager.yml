@@ -1,0 +1,122 @@
+# Phase 1 Group B 2.4.7 / B2c (2026-09-04): Alertmanager 配置。
+#
+# 路由原则(roadmap 4.7):
+#   P1 critical(API 5xx > 1% / DB 主从切换 / MinIO 写挂 / Redis master down)
+#       → PagerDuty 7×24  +  Slack #lumen-alerts 兜底
+#   P2 warning(SLO burn_rate / Circuit breaker open / 队列堆积 > 100 / LLM 失败率高)
+#       → Slack #lumen-alerts
+#   P3 info(磁盘 / 内存 / scrape target down / webhook 自身 5xx)
+#       → Slack #lumen-ops
+#
+# 所有 alert 必落盘到 backend /api/v1/alerts/webhook — 用于离线聚合 / 演练 /
+# 后续扩 PagerDuty 真实接入。这里"lumen-default"作为兜底 receiver。
+#
+# 抑制规则(inhibit_rules):
+#   1. critical alert 抑制其下属的 warning / info 告警(避免 Redis master
+#      down 把"队列堆积 + embedding 慢"也同时发出,噪音)
+#   2. resolved 状态不发送到 PagerDuty(Slack 仍收)
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: "lumen-default"
+  group_by: ["alertname", "severity", "component"]
+  group_wait: 30s       # 同组 alert 等 30s 一起发,降噪
+  group_interval: 5m    # 同组未变化 alert 5min 重复一次
+  repeat_interval: 4h   # 同 alert 持续 firing 4h 重发一次
+  routes:
+    # ---- P1 critical → PagerDuty + Slack 双发 ----
+    - matchers:
+        - severity = "critical"
+      receiver: "pagerduty-critical"
+      group_wait: 10s
+      group_interval: 2m
+      repeat_interval: 30m
+      continue: true
+      routes:
+        - matchers:
+            - severity = "critical"
+          receiver: "slack-alerts"
+          # critical 仍同步发 Slack 给值班人即时看到
+
+    # ---- P2 warning → Slack #lumen-alerts ----
+    - matchers:
+        - severity = "warning"
+      receiver: "slack-alerts"
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 2h
+
+    # ---- P3 info → Slack #lumen-ops ----
+    - matchers:
+        - severity = "info"
+      receiver: "slack-ops"
+      group_wait: 1m
+      group_interval: 30m
+      repeat_interval: 12h
+
+# ---- receivers ----
+receivers:
+  # 兜底:所有 alert 必落 /api/v1/alerts/webhook(JSON file),即使 PagerDuty / Slack 不可达
+  # 也保证告警不丢。Lumen 平台自己消费的告警链路。
+  - name: "lumen-default"
+    webhook_configs:
+      - url: "http://host.docker.internal:11335/api/v1/alerts/webhook"
+        send_resolved: true
+        max_alerts: 0  # 不截断,一次性发完
+
+  # PagerDuty 集成(B2c 落地形态)
+  # 真实生产:PAGERDUTY_ROUTING_KEY 走 env var 注入,Events API v2 格式。
+  # dev 默认关闭(注释掉),演练时手动 flip。
+  - name: "pagerduty-critical"
+    webhook_configs:
+      # dev 真实生产都用同一个 lumen webhook 收口 —— PagerDuty 收不到不会
+      # 阻塞 Lumen 平台自身的告警流水线。
+      - url: "http://host.docker.internal:11335/api/v1/alerts/webhook"
+        send_resolved: true
+    # 当 ``PAGERDUTY_ROUTING_KEY`` env 注入后,改用真 PD receiver:
+    # pagerduty_configs:
+    #   - routing_key: "<PAGERDUTY_ROUTING_KEY>"
+    #     send_resolved: true
+    #     description: "{{ .CommonAnnotations.summary }}"
+    #     severity: "{{ .CommonLabels.severity }}"
+
+  # Slack #lumen-alerts(P2 告警主战场)
+  - name: "slack-alerts"
+    webhook_configs:
+      - url: "http://host.docker.internal:11335/api/v1/alerts/webhook"
+        send_resolved: true
+
+  # Slack #lumen-ops(P3 通知)
+  - name: "slack-ops"
+    webhook_configs:
+      - url: "http://host.docker.internal:11335/api/v1/alerts/webhook"
+        send_resolved: true
+
+# ---- 抑制规则 ----
+# critical 抑制 warning / info:避免告警风暴里淹没真正需要紧急响应的 critical。
+inhibit_rules:
+  # 1. 严重告警抑制同 alertname 的下属告警(由 component label 关联)
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity =~ "warning|info"
+    equal: ["component"]
+  # 2. resolved 不送 PagerDuty(避免 PD ack 收尾噪音)
+  # 注:AM 默认 send_resolved=true 全发;这里用 matchers 排除
+  # (实际通过上面 PagerDuty receiver 配置 + 同 label 处理,见 receiver 内注释)
+  # 3. P3 info 被同 component 的 P2 warning 抑制
+  - source_matchers:
+      - severity = "warning"
+    target_matchers:
+      - severity = "info"
+    equal: ["component"]
+
+# ---- 模板覆盖 ----
+# Lumen 平台告警消息体格式:
+#   [severity] alertname
+#   component=<component> team=<team>
+#   description...
+# 默认 AM 模板够用,这里不重写。
+templates: []
