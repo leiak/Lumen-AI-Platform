@@ -261,6 +261,49 @@ async def chat_stream(
             request_ip=request_ip,
             user_agent=user_agent,
         ))
+        # Phase 1 Group B 4.4 Day 3 (2026-09-05): chat.endpoint root span。
+        # 在 generator 内(非 endpoint 层)起 — Phase 0 已 ship 注释解释了
+        # 为什么不在 endpoint 层(StreamingResponse 后 outer try/finally 会在
+        # LLM 调用前清掉 context)。span 作为 chat.stream / llm.chat 的 parent。
+        from opentelemetry import trace as _otel_trace
+
+        _endpoint_span = _otel_trace.get_tracer("lumen.manual").start_span(
+            "chat.endpoint",
+            attributes={
+                "chat.endpoint": "/chat/stream",
+                "chat.user_id": current_user.id,
+                "chat.tenant_id": current_user.tenant_id,
+                "chat.conversation_id": (
+                    int(request.conversation_id) if request.conversation_id else -1
+                ),
+                "chat.agent_id": (
+                    int(request.agent_id) if request.agent_id else -1
+                ),
+                "chat.status": "running",
+            },
+        )
+        # 把 OTel trace_id 同步到 contextvar,让老 LLMCallLog.trace_id
+        # 跟 OTel span trace_id 对齐(back-compat)
+        try:
+            from lumen_core.tracing_decorator import _set_contextvar_from_span
+            _set_contextvar_from_span(_endpoint_span)
+        except Exception:  # noqa: BLE001
+            pass
+        # 把 endpoint 自己的 trace_id(32-hex)写到 contextvar,这样后续
+        # 嵌套的 chat.stream / llm.chat / retrieval.search / embedding.generate
+        # span 都用同一个 trace_id,contextvar 优先保证 LLMCallLog.trace_id 一致
+        from lumen_core.tracing import set_trace_id as _set_tid
+        try:
+            sc = _endpoint_span.get_span_context()
+            if sc.is_valid:
+                _set_tid(format(sc.trace_id, "032x"))
+        except Exception:  # noqa: BLE001
+            pass
+
+        import time as _time
+        _endpoint_t0 = _time.monotonic()
+        _endpoint_status = "completed"
+
         try:
             service = ChatService()
             agent_service = AgentService()
@@ -390,6 +433,7 @@ async def chat_stream(
                 ).order_by(MessageModel.created_at.asc()).all()
                 history = [{"role": m.role, "content": m.content} for m in history_msgs[:-1]]
             except Exception as e:
+                _endpoint_status = "error"
                 yield f"data: {json.dumps({'content': f'Database error: {str(e)}', 'done': True})}\n\n"
                 return
 
@@ -415,6 +459,7 @@ async def chat_stream(
                     user_msg.msg_metadata = json.dumps(user_msg_meta, ensure_ascii=False)
                     db.commit()
             except Exception as e:
+                _endpoint_status = "error"
                 yield f"data: {json.dumps({'content': f'Feature prep error: {str(e)}', 'done': True})}\n\n"
                 return
 
@@ -429,8 +474,22 @@ async def chat_stream(
                     full_response += chunk
                     yield f"data: {json.dumps({'content': chunk, 'done': False})}\n\n"
             except Exception as e:
+                _endpoint_status = "error"
                 yield f"data: {json.dumps({'content': f'LLM error: {str(e)}', 'done': True})}\n\n"
                 return
+
+            # Phase 1 Group B 4.4 Day 3 (2026-09-05): chat.endpoint span 上写
+            # completion_chars + model。content 不写(PII 安全)。
+            try:
+                _endpoint_span.set_attribute("chat.completion_chars", len(full_response or ""))
+                _endpoint_span.set_attribute(
+                    "chat.model",
+                    getattr(getattr(service, "chat_model", None), "model", None)
+                    or getattr(getattr(service, "chat_model", None), "model_name", None)
+                    or "unknown",
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
             # Save assistant message
             try:
@@ -476,6 +535,23 @@ async def chat_stream(
         finally:
             reset_call_context(ctx_token)
             reset_embedding_context(emb_ctx_token)
+            # Phase 1 Group B 4.4 Day 3 (2026-09-05): chat.endpoint root span 收尾
+            try:
+                _endpoint_span.set_attribute("chat.status", _endpoint_status)
+                _endpoint_span.set_attribute(
+                    "chat.duration_ms",
+                    int((_time.monotonic() - _endpoint_t0) * 1000),
+                )
+                if _endpoint_status == "error":
+                    from opentelemetry.trace import Status as _St, StatusCode as _Sc
+                    _endpoint_span.set_status(_St(_Sc.ERROR, "chat endpoint error"))
+            except Exception:  # noqa: BLE001
+                logger.debug("chat.endpoint span attr write failed; ignored", exc_info=True)
+            finally:
+                try:
+                    _endpoint_span.end()
+                except Exception:  # noqa: BLE001
+                    pass
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 

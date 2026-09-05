@@ -129,6 +129,27 @@ class WorkflowExecutor:
 
         total_nodes = len(definition.get("nodes", []))
 
+        # Phase 1 Group B 4.4 Day 3 (2026-09-05): workflow.run root span + per
+        # BFS iteration workflow.node child span。span attribute 用 workflow.*
+        # 命名空间;status / duration_ms 在 finally 写。
+        from opentelemetry import trace as _otel_trace
+        from opentelemetry.trace import Status, StatusCode
+
+        _run_span = _otel_trace.get_tracer("lumen.manual").start_span(
+            "workflow.run",
+            attributes={
+                "workflow.run_id": int(run_id) if isinstance(run_id, int) else -1,
+                "workflow.workflow_id": (
+                    int(self.workflow_id) if isinstance(self.workflow_id, int) else -1
+                ),
+                "workflow.tenant_id": int(tenant_id) if isinstance(tenant_id, int) else -1,
+                "workflow.total_nodes": total_nodes,
+                "workflow.status": "running",
+            },
+        )
+        _run_t0 = time.monotonic()
+        _run_status = "completed"
+
         try:
             nodes: List[dict] = definition["nodes"]
             edges: List[dict] = definition["edges"]
@@ -165,6 +186,7 @@ class WorkflowExecutor:
                 if self._cancel_event is not None and self._cancel_event.is_set():
                     self._cancelled = True
                     logger.info(f"Workflow run {run_id} cancelled at boundary")
+                    _run_status = "cancelled"
                     return {
                         "status": "cancelled",
                         "results": {
@@ -204,6 +226,22 @@ class WorkflowExecutor:
 
                 execution_order += 1
 
+                # Phase 1 Group B 4.4 Day 3 (2026-09-05): workflow.node 子 span。
+                # 用 set_span_in_context 把 _run_span 包成 Context 显式传给
+                # start_span(context=...) — 比 use_span 嵌套 try/finally 干净。
+                from opentelemetry.trace import set_span_in_context
+                _parent_ctx = set_span_in_context(_run_span) if _run_span else None
+                _node_span = _otel_trace.get_tracer("lumen.manual").start_span(
+                    "workflow.node",
+                    context=_parent_ctx,
+                    attributes={
+                        "workflow.node.id": str(node_id),
+                        "workflow.node.type": str(node_type),
+                        "workflow.node.execution_order": int(execution_order),
+                        "workflow.run_id": int(run_id) if isinstance(run_id, int) else -1,
+                    },
+                )
+                _node_status = "running"
                 try:
                     node_instance = self._instantiate(node, tenant_id, user)
                     result = await run_node_with_handling(node_instance)
@@ -225,6 +263,7 @@ class WorkflowExecutor:
                     )
 
                     if result is _FAILED_RESULT:
+                        _node_status = "failed"
                         self._finish_node_run(
                             node_run_id=node_run_id,
                             status="failed",
@@ -239,6 +278,20 @@ class WorkflowExecutor:
                             "duration_ms": duration_ms,
                         })
 
+                        _run_status = "failed"
+                        try:
+                            _node_span.set_attribute("workflow.node.status", _node_status)
+                            _node_span.set_attribute(
+                                "workflow.node.duration_ms",
+                                int((time.monotonic() - node_started_monotonic) * 1000),
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                        finally:
+                            try:
+                                _node_span.end()
+                            except Exception:  # noqa: BLE001
+                                pass
                         return {
                             "status": "failed",
                             "error": result.error,
@@ -250,6 +303,7 @@ class WorkflowExecutor:
                         }
 
                     # success path
+                    _node_status = "completed"
                     self._finish_node_run(
                         node_run_id=node_run_id,
                         status="completed",
@@ -268,6 +322,7 @@ class WorkflowExecutor:
                         if nid not in ran:
                             queue.append(nid)
                 except NodeRunError as e:
+                    _node_status = "failed"
                     duration_ms = int(
                         (time.monotonic() - node_started_monotonic) * 1000
                     )
@@ -295,12 +350,49 @@ class WorkflowExecutor:
                         "error_message": str(e),
                     })
 
+                    try:
+                        from opentelemetry.trace import Status as _St, StatusCode as _Sc
+                        _node_span.record_exception(e)
+                        _node_span.set_status(_St(_Sc.ERROR, str(e)[:200]))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _run_status = "failed"
+                    # Phase 1 Group B 4.4 Day 3: workflow.node span 收尾
+                    try:
+                        _node_span.set_attribute("workflow.node.status", _node_status)
+                        _node_span.set_attribute(
+                            "workflow.node.duration_ms",
+                            int((time.monotonic() - node_started_monotonic) * 1000),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    finally:
+                        try:
+                            _node_span.end()
+                        except Exception:  # noqa: BLE001
+                            pass
                     return {
                         "status": "failed",
                         "error": str(e),
                         "results": {nid: r.model_dump() for nid, r in self.results.items()},
                         "final_output": None,
                     }
+                finally:
+                    # Phase 1 Group B 4.4 Day 3: workflow.node span 收尾
+                    # (覆盖非 except 的成功 + NodeRunError 之外的异常路径)
+                    try:
+                        _node_span.set_attribute("workflow.node.status", _node_status)
+                        _node_span.set_attribute(
+                            "workflow.node.duration_ms",
+                            int((time.monotonic() - node_started_monotonic) * 1000),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    finally:
+                        try:
+                            _node_span.end()
+                        except Exception:  # noqa: BLE001
+                            pass
 
             final_output = self._collect_final_output()
             await self._emit(EVENT_RUN_END, {
@@ -319,6 +411,28 @@ class WorkflowExecutor:
                     session.close()
                 except Exception:
                     logger.warning("Failed to close executor session", exc_info=True)
+            # Phase 1 Group B 4.4 Day 3: workflow.run root span 收尾。
+            try:
+                _run_span.set_attribute("workflow.status", _run_status)
+                _run_span.set_attribute(
+                    "workflow.duration_ms",
+                    int((time.monotonic() - _run_t0) * 1000),
+                )
+                _run_span.set_attribute(
+                    "workflow.completed_nodes",
+                    len(self.results or {}),
+                )
+                if _run_status == "failed":
+                    _run_span.set_status(Status(StatusCode.ERROR, "workflow failed"))
+                elif _run_status == "cancelled":
+                    _run_span.set_attribute("workflow.cancelled", True)
+            except Exception:  # noqa: BLE001
+                logger.debug("workflow.run span attr write failed; ignored", exc_info=True)
+            finally:
+                try:
+                    _run_span.end()
+                except Exception:  # noqa: BLE001
+                    pass
 
     async def _emit(self, event: str, data: Dict[str, Any]) -> None:
         """M30a: best-effort event emission. A failure here must NEVER

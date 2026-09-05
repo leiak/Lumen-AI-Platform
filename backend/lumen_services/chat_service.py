@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from lumen_core.config import settings
 from lumen_core.llm_call_context import LLMCallContext, set_call_context, reset_call_context
+from lumen_core.tracing_decorator import traced_span
 from lumen_services.model_loader import create_chat_model
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,18 @@ class ChatService:
             timeout=timeout,
         )
 
+    @traced_span(
+        "chat.stream",
+        attributes_fn=lambda self, messages, tools=None, **_: {
+            "chat.model": (
+                getattr(getattr(self, "chat_model", None), "model", None)
+                or getattr(getattr(self, "chat_model", None), "model_name", None)
+                or "unknown"
+            ),
+            "chat.has_tools": bool(tools),
+            "chat.messages_count": len(messages or []),
+        },
+    )
     async def stream_chat_messages(
         self,
         messages: List[Any],
@@ -71,7 +84,22 @@ class ChatService:
 
         When `tools` is None (no tool calling needed), falls back to the
         original `astream` token-streaming path for backward compat.
+
+        Phase 1 Group B 4.4 Day 3 (2026-09-05): wrapped in ``chat.stream``
+        OTel span via ``@traced_span`` decorator. First chunk / first
+        response triggers a ``ttfb`` span event with ``llm.ttfb_ms`` —
+        same metric that flows to ``lumen_llm_ttfb_seconds`` Prometheus
+        histogram (Phase 0 Unit 5 B2b 4.6). Span is async-generator aware
+        (kept active across yield via ``use_span(end_on_exit=False)``).
         """
+        # Phase 1 Group B 4.4 Day 3 (2026-09-05): span + t0 for ttfb event
+        from opentelemetry import trace as _otel_trace
+
+        _span = _otel_trace.get_current_span()
+        _stream_t0 = time.monotonic()
+        _ttfb_recorded = False
+        _chunk_count = 0
+
         # M16 tool calling path: only when tools are provided
         if tools:
             chat_model = self.chat_model.bind_tools(tools)
@@ -83,10 +111,20 @@ class ChatService:
                 for _ in range(max_tool_rounds + 1):
                     response = chat_model.invoke(current_messages)
 
+                    if not _ttfb_recorded:
+                        _ttfb_recorded = True
+                        try:
+                            _span.add_event("ttfb", {
+                                "llm.ttfb_ms": int((time.monotonic() - _stream_t0) * 1000),
+                            })
+                        except Exception:  # noqa: BLE001
+                            pass
+
                     tool_calls = getattr(response, "tool_calls", None) or []
                     if not tool_calls:
                         content = getattr(response, "content", "") or ""
                         if content:
+                            _chunk_count += 1
                             yield content
                         return
 
@@ -111,10 +149,17 @@ class ChatService:
                 if response is not None:
                     content = getattr(response, "content", "") or ""
                     if content:
+                        _chunk_count += 1
                         yield content
             except Exception as e:
                 logger.error("LLM streaming error: %s", e)
                 yield f"Error: {str(e)}"
+            finally:
+                try:
+                    _span.set_attribute("chat.chunk_count", _chunk_count)
+                    _span.set_attribute("chat.duration_ms", int((time.monotonic() - _stream_t0) * 1000))
+                except Exception:  # noqa: BLE001
+                    pass
             return
 
         # Original token-streaming path (no tools, backward compat)
@@ -134,11 +179,24 @@ class ChatService:
                 if not ttfb_recorded:
                     _observe_llm_ttfb(model_name, t0)
                     ttfb_recorded = True
+                    try:
+                        _span.add_event("ttfb", {
+                            "llm.ttfb_ms": int((time.monotonic() - _stream_t0) * 1000),
+                        })
+                    except Exception:  # noqa: BLE001
+                        pass
                 if chunk.content:
+                    _chunk_count += 1
                     yield chunk.content
         except Exception as e:
             logger.error("LLM streaming error: %s", e)
             yield f"Error: {str(e)}"
+        finally:
+            try:
+                _span.set_attribute("chat.chunk_count", _chunk_count)
+                _span.set_attribute("chat.duration_ms", int((time.monotonic() - _stream_t0) * 1000))
+            except Exception:  # noqa: BLE001
+                pass
 
     async def stream_chat(
         self,

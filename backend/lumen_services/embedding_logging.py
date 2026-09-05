@@ -215,60 +215,96 @@ class LoggingEmbeddings:
     def embed_query(self, text: str) -> List[float]:
         ctx = get_embedding_context()
         from lumen_services.retry import call_sync_with_retry
-        t0 = time.monotonic()
-        if ctx is None:
-            # Phase 1 Group A 2.5 (2026-09-03): 没有 ctx 时也走 retry,
-            # 跟有 ctx 行为一致(observability 可选,retry 不可选)。
-            # ``call_sync_with_retry`` 让 self._inner.embed_query transient
-            # 异常(httpx.ConnectError / TimeoutException / RemoteProtocolError)
-            # 重试 3 次 exponential 0.5/1/2s,reraise 原异常让上层 fail-fast。
+        # Phase 1 Group B 4.4 Day 3 (2026-09-05): embed span for OTel trace。
+        # 走 ``start_as_current_span`` + 手动 end,异常 + dim 在 finally 写。
+        from opentelemetry import trace as _otel_trace
+
+        _emb_span = _otel_trace.get_tracer("lumen.manual").start_span(
+            "embedding.generate",
+            attributes={
+                "embedding.model": self._model_name,
+                "embedding.call_kind": "sync_query",
+                "embedding.text_chars": len(text or ""),
+                "embedding.batch_size": 1,
+            },
+        )
+        _emb_t0 = time.monotonic()
+        try:
+            if ctx is None:
+                # Phase 1 Group A 2.5 (2026-09-03): 没有 ctx 时也走 retry,
+                # 跟有 ctx 行为一致(observability 可选,retry 不可选)。
+                # ``call_sync_with_retry`` 让 self._inner.embed_query transient
+                # 异常(httpx.ConnectError / TimeoutException / RemoteProtocolError)
+                # 重试 3 次 exponential 0.5/1/2s,reraise 原异常让上层 fail-fast。
+                try:
+                    result = call_sync_with_retry(
+                        lambda: self._inner.embed_query(text),
+                        func_name="embedding.embed_query",
+                    )
+                    _observe_embedding_duration(self._model_name, _emb_t0, "success")
+                    try:
+                        _emb_span.set_attribute("embedding.dim", len(result) if result else 0)
+                        _emb_span.set_attribute("embedding.duration_ms", int((time.monotonic() - _emb_t0) * 1000))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return result
+                except Exception:
+                    _observe_embedding_duration(self._model_name, _emb_t0, "error")
+                    raise
+
+            started = datetime.utcnow()
+            # Phase 1 Group A 2.5: retry 包 inner 调用,retry_count 写进 log。
             try:
                 result = call_sync_with_retry(
                     lambda: self._inner.embed_query(text),
                     func_name="embedding.embed_query",
                 )
-                _observe_embedding_duration(self._model_name, t0, "success")
+                self._write_log(
+                    ctx=ctx,
+                    text=text,
+                    is_batch=False,
+                    batch_size=None,
+                    embedding_dim=len(result) if result else 0,
+                    embedding_bytes=(len(result) * 4) if result else 0,
+                    started_at=started,
+                    duration_ms=int((time.monotonic() - _emb_t0) * 1000),
+                    status="success",
+                )
+                _observe_embedding_duration(self._model_name, _emb_t0, "success")
+                try:
+                    _emb_span.set_attribute("embedding.dim", len(result) if result else 0)
+                    _emb_span.set_attribute("embedding.duration_ms", int((time.monotonic() - _emb_t0) * 1000))
+                except Exception:  # noqa: BLE001
+                    pass
                 return result
-            except Exception:
-                _observe_embedding_duration(self._model_name, t0, "error")
+            except Exception as e:
+                self._write_log(
+                    ctx=ctx,
+                    text=text,
+                    is_batch=False,
+                    batch_size=None,
+                    embedding_dim=None,
+                    embedding_bytes=None,
+                    started_at=started,
+                    duration_ms=int((time.monotonic() - _emb_t0) * 1000),
+                    status="failure",
+                    error_type=type(e).__name__,
+                    error_message=str(e)[:1000],
+                )
+                _observe_embedding_duration(self._model_name, _emb_t0, "error")
+                try:
+                    from opentelemetry.trace import Status, StatusCode
+                    _emb_span.record_exception(e)
+                    _emb_span.set_status(Status(StatusCode.ERROR, str(e)[:200]))
+                    _emb_span.set_attribute("embedding.duration_ms", int((time.monotonic() - _emb_t0) * 1000))
+                except Exception:  # noqa: BLE001
+                    pass
                 raise
-
-        started = datetime.utcnow()
-        # Phase 1 Group A 2.5: retry 包 inner 调用,retry_count 写进 log。
-        try:
-            result = call_sync_with_retry(
-                lambda: self._inner.embed_query(text),
-                func_name="embedding.embed_query",
-            )
-            self._write_log(
-                ctx=ctx,
-                text=text,
-                is_batch=False,
-                batch_size=None,
-                embedding_dim=len(result) if result else 0,
-                embedding_bytes=(len(result) * 4) if result else 0,
-                started_at=started,
-                duration_ms=int((time.monotonic() - t0) * 1000),
-                status="success",
-            )
-            _observe_embedding_duration(self._model_name, t0, "success")
-            return result
-        except Exception as e:
-            self._write_log(
-                ctx=ctx,
-                text=text,
-                is_batch=False,
-                batch_size=None,
-                embedding_dim=None,
-                embedding_bytes=None,
-                started_at=started,
-                duration_ms=int((time.monotonic() - t0) * 1000),
-                status="failure",
-                error_type=type(e).__name__,
-                error_message=str(e)[:1000],
-            )
-            _observe_embedding_duration(self._model_name, t0, "error")
-            raise
+        finally:
+            try:
+                _emb_span.end()
+            except Exception:  # noqa: BLE001
+                pass
 
     # ---- sync embed_documents ----
 
@@ -276,60 +312,97 @@ class LoggingEmbeddings:
         ctx = get_embedding_context()
         # Phase 1 Group A 2.5: retry 包 inner 调用(sync batch path)。
         from lumen_services.retry import call_sync_with_retry
-        t0 = time.monotonic()
-        if ctx is None:
+        # Phase 1 Group B 4.4 Day 3 (2026-09-05): embed span for OTel trace。
+        from opentelemetry import trace as _otel_trace
+
+        _total_chars = sum(len(t or "") for t in (texts or []))
+        _emb_span = _otel_trace.get_tracer("lumen.manual").start_span(
+            "embedding.generate",
+            attributes={
+                "embedding.model": self._model_name,
+                "embedding.call_kind": "sync_documents",
+                "embedding.text_chars": _total_chars,
+                "embedding.batch_size": len(texts or []),
+            },
+        )
+        _emb_t0 = time.monotonic()
+        try:
+            if ctx is None:
+                try:
+                    result = call_sync_with_retry(
+                        lambda: self._inner.embed_documents(texts),
+                        func_name="embedding.embed_documents",
+                    )
+                    _observe_embedding_duration(self._model_name, _emb_t0, "success")
+                    try:
+                        dim = len(result[0]) if result and len(result) > 0 else 0
+                        _emb_span.set_attribute("embedding.dim", dim)
+                        _emb_span.set_attribute("embedding.duration_ms", int((time.monotonic() - _emb_t0) * 1000))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return result
+                except Exception:
+                    _observe_embedding_duration(self._model_name, _emb_t0, "error")
+                    raise
+
+            started = datetime.utcnow()
+            # Preview is the first text (typical case is a chunk batch from
+            # a single document). text_chars sums the whole batch so the
+            # caller can see total ingestion volume.
+            total_chars = _total_chars
+            first_preview = texts[0] if texts else ""
             try:
                 result = call_sync_with_retry(
                     lambda: self._inner.embed_documents(texts),
                     func_name="embedding.embed_documents",
                 )
-                _observe_embedding_duration(self._model_name, t0, "success")
+                dim = len(result[0]) if result and len(result) > 0 else 0
+                self._write_log_for_batch(
+                    ctx=ctx,
+                    preview=first_preview,
+                    total_chars=total_chars,
+                    batch_size=len(texts) if texts else 0,
+                    embedding_dim=dim,
+                    embedding_bytes=(dim * 4 * len(result)) if result else 0,
+                    started_at=started,
+                    duration_ms=int((time.monotonic() - _emb_t0) * 1000),
+                    status="success",
+                )
+                _observe_embedding_duration(self._model_name, _emb_t0, "success")
+                try:
+                    _emb_span.set_attribute("embedding.dim", dim)
+                    _emb_span.set_attribute("embedding.duration_ms", int((time.monotonic() - _emb_t0) * 1000))
+                except Exception:  # noqa: BLE001
+                    pass
                 return result
-            except Exception:
-                _observe_embedding_duration(self._model_name, t0, "error")
+            except Exception as e:
+                self._write_log_for_batch(
+                    ctx=ctx,
+                    preview=first_preview,
+                    total_chars=total_chars,
+                    batch_size=len(texts) if texts else 0,
+                    embedding_dim=None,
+                    embedding_bytes=None,
+                    started_at=started,
+                    duration_ms=int((time.monotonic() - _emb_t0) * 1000),
+                    status="failure",
+                    error_type=type(e).__name__,
+                    error_message=str(e)[:1000],
+                )
+                _observe_embedding_duration(self._model_name, _emb_t0, "error")
+                try:
+                    from opentelemetry.trace import Status, StatusCode
+                    _emb_span.record_exception(e)
+                    _emb_span.set_status(Status(StatusCode.ERROR, str(e)[:200]))
+                    _emb_span.set_attribute("embedding.duration_ms", int((time.monotonic() - _emb_t0) * 1000))
+                except Exception:  # noqa: BLE001
+                    pass
                 raise
-
-        started = datetime.utcnow()
-        # Preview is the first text (typical case is a chunk batch from
-        # a single document). text_chars sums the whole batch so the
-        # caller can see total ingestion volume.
-        total_chars = sum(len(t or "") for t in (texts or []))
-        first_preview = texts[0] if texts else ""
-        try:
-            result = call_sync_with_retry(
-                lambda: self._inner.embed_documents(texts),
-                func_name="embedding.embed_documents",
-            )
-            dim = len(result[0]) if result and len(result) > 0 else 0
-            self._write_log_for_batch(
-                ctx=ctx,
-                preview=first_preview,
-                total_chars=total_chars,
-                batch_size=len(texts) if texts else 0,
-                embedding_dim=dim,
-                embedding_bytes=(dim * 4 * len(result)) if result else 0,
-                started_at=started,
-                duration_ms=int((time.monotonic() - t0) * 1000),
-                status="success",
-            )
-            _observe_embedding_duration(self._model_name, t0, "success")
-            return result
-        except Exception as e:
-            self._write_log_for_batch(
-                ctx=ctx,
-                preview=first_preview,
-                total_chars=total_chars,
-                batch_size=len(texts) if texts else 0,
-                embedding_dim=None,
-                embedding_bytes=None,
-                started_at=started,
-                duration_ms=int((time.monotonic() - t0) * 1000),
-                status="failure",
-                error_type=type(e).__name__,
-                error_message=str(e)[:1000],
-            )
-            _observe_embedding_duration(self._model_name, t0, "error")
-            raise
+        finally:
+            try:
+                _emb_span.end()
+            except Exception:  # noqa: BLE001
+                pass
 
     # ---- async variants — pass through if inner supports it ----
 
@@ -338,116 +411,201 @@ class LoggingEmbeddings:
         aembed = getattr(self._inner, "aembed_query", None)
         # Phase 1 Group A 2.5: async retry 包 inner 调用。
         from lumen_services.retry import call_async_with_retry
-        t0 = time.monotonic()
-        if aembed is None:
-            # langchain_core.Embeddings provides a default sync fallback
-            return self.embed_query(text)
-        if ctx is None:
+        # Phase 1 Group B 4.4 Day 3 (2026-09-05): embed span for OTel trace。
+        from opentelemetry import trace as _otel_trace
+
+        _emb_span = _otel_trace.get_tracer("lumen.manual").start_span(
+            "embedding.generate",
+            attributes={
+                "embedding.model": self._model_name,
+                "embedding.call_kind": "async_query",
+                "embedding.text_chars": len(text or ""),
+                "embedding.batch_size": 1,
+            },
+        )
+        _emb_t0 = time.monotonic()
+        try:
+            if aembed is None:
+                # langchain_core.Embeddings provides a default sync fallback
+                result_sync = self.embed_query(text)
+                try:
+                    _emb_span.set_attribute("embedding.dim", len(result_sync) if result_sync else 0)
+                    _emb_span.set_attribute("embedding.duration_ms", int((time.monotonic() - _emb_t0) * 1000))
+                except Exception:  # noqa: BLE001
+                    pass
+                return result_sync
+            if ctx is None:
+                try:
+                    result = await call_async_with_retry(
+                        lambda: aembed(text),
+                        func_name="embedding.aembed_query",
+                    )
+                    _observe_embedding_duration(self._model_name, _emb_t0, "success")
+                    try:
+                        _emb_span.set_attribute("embedding.dim", len(result) if result else 0)
+                        _emb_span.set_attribute("embedding.duration_ms", int((time.monotonic() - _emb_t0) * 1000))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return result
+                except Exception:
+                    _observe_embedding_duration(self._model_name, _emb_t0, "error")
+                    raise
+
+            started = datetime.utcnow()
             try:
                 result = await call_async_with_retry(
                     lambda: aembed(text),
                     func_name="embedding.aembed_query",
                 )
-                _observe_embedding_duration(self._model_name, t0, "success")
+                self._write_log(
+                    ctx=ctx,
+                    text=text,
+                    is_batch=False,
+                    batch_size=None,
+                    embedding_dim=len(result) if result else 0,
+                    embedding_bytes=(len(result) * 4) if result else 0,
+                    started_at=started,
+                    duration_ms=int((time.monotonic() - _emb_t0) * 1000),
+                    status="success",
+                )
+                _observe_embedding_duration(self._model_name, _emb_t0, "success")
+                try:
+                    _emb_span.set_attribute("embedding.dim", len(result) if result else 0)
+                    _emb_span.set_attribute("embedding.duration_ms", int((time.monotonic() - _emb_t0) * 1000))
+                except Exception:  # noqa: BLE001
+                    pass
                 return result
-            except Exception:
-                _observe_embedding_duration(self._model_name, t0, "error")
+            except Exception as e:
+                self._write_log(
+                    ctx=ctx,
+                    text=text,
+                    is_batch=False,
+                    batch_size=None,
+                    embedding_dim=None,
+                    embedding_bytes=None,
+                    started_at=started,
+                    duration_ms=int((time.monotonic() - _emb_t0) * 1000),
+                    status="failure",
+                    error_type=type(e).__name__,
+                    error_message=str(e)[:1000],
+                )
+                _observe_embedding_duration(self._model_name, _emb_t0, "error")
+                try:
+                    from opentelemetry.trace import Status, StatusCode
+                    _emb_span.record_exception(e)
+                    _emb_span.set_status(Status(StatusCode.ERROR, str(e)[:200]))
+                    _emb_span.set_attribute("embedding.duration_ms", int((time.monotonic() - _emb_t0) * 1000))
+                except Exception:  # noqa: BLE001
+                    pass
                 raise
-
-        started = datetime.utcnow()
-        try:
-            result = await call_async_with_retry(
-                lambda: aembed(text),
-                func_name="embedding.aembed_query",
-            )
-            self._write_log(
-                ctx=ctx,
-                text=text,
-                is_batch=False,
-                batch_size=None,
-                embedding_dim=len(result) if result else 0,
-                embedding_bytes=(len(result) * 4) if result else 0,
-                started_at=started,
-                duration_ms=int((time.monotonic() - t0) * 1000),
-                status="success",
-            )
-            _observe_embedding_duration(self._model_name, t0, "success")
-            return result
-        except Exception as e:
-            self._write_log(
-                ctx=ctx,
-                text=text,
-                is_batch=False,
-                batch_size=None,
-                embedding_dim=None,
-                embedding_bytes=None,
-                started_at=started,
-                duration_ms=int((time.monotonic() - t0) * 1000),
-                status="failure",
-                error_type=type(e).__name__,
-                error_message=str(e)[:1000],
-            )
-            _observe_embedding_duration(self._model_name, t0, "error")
-            raise
+        finally:
+            try:
+                _emb_span.end()
+            except Exception:  # noqa: BLE001
+                pass
 
     async def aembed_documents(self, texts: List[str]) -> List[List[float]]:
         ctx = get_embedding_context()
         aembed = getattr(self._inner, "aembed_documents", None)
         # Phase 1 Group A 2.5: async retry 包 inner 调用。
         from lumen_services.retry import call_async_with_retry
-        t0 = time.monotonic()
-        if aembed is None:
-            return self.embed_documents(texts)
-        if ctx is None:
+        # Phase 1 Group B 4.4 Day 3 (2026-09-05): embed span for OTel trace。
+        from opentelemetry import trace as _otel_trace
+
+        _total_chars = sum(len(t or "") for t in (texts or []))
+        _emb_span = _otel_trace.get_tracer("lumen.manual").start_span(
+            "embedding.generate",
+            attributes={
+                "embedding.model": self._model_name,
+                "embedding.call_kind": "async_documents",
+                "embedding.text_chars": _total_chars,
+                "embedding.batch_size": len(texts or []),
+            },
+        )
+        _emb_t0 = time.monotonic()
+        try:
+            if aembed is None:
+                result_sync = self.embed_documents(texts)
+                try:
+                    dim = len(result_sync[0]) if result_sync and len(result_sync) > 0 else 0
+                    _emb_span.set_attribute("embedding.dim", dim)
+                    _emb_span.set_attribute("embedding.duration_ms", int((time.monotonic() - _emb_t0) * 1000))
+                except Exception:  # noqa: BLE001
+                    pass
+                return result_sync
+            if ctx is None:
+                try:
+                    result = await call_async_with_retry(
+                        lambda: aembed(texts),
+                        func_name="embedding.aembed_documents",
+                    )
+                    _observe_embedding_duration(self._model_name, _emb_t0, "success")
+                    try:
+                        dim = len(result[0]) if result and len(result) > 0 else 0
+                        _emb_span.set_attribute("embedding.dim", dim)
+                        _emb_span.set_attribute("embedding.duration_ms", int((time.monotonic() - _emb_t0) * 1000))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return result
+                except Exception:
+                    _observe_embedding_duration(self._model_name, _emb_t0, "error")
+                    raise
+
+            started = datetime.utcnow()
+            total_chars = _total_chars
+            first_preview = texts[0] if texts else ""
             try:
                 result = await call_async_with_retry(
                     lambda: aembed(texts),
                     func_name="embedding.aembed_documents",
                 )
-                _observe_embedding_duration(self._model_name, t0, "success")
+                dim = len(result[0]) if result and len(result) > 0 else 0
+                self._write_log_for_batch(
+                    ctx=ctx,
+                    preview=first_preview,
+                    total_chars=total_chars,
+                    batch_size=len(texts) if texts else 0,
+                    embedding_dim=dim,
+                    embedding_bytes=(dim * 4 * len(result)) if result else 0,
+                    started_at=started,
+                    duration_ms=int((time.monotonic() - _emb_t0) * 1000),
+                    status="success",
+                )
+                _observe_embedding_duration(self._model_name, _emb_t0, "success")
+                try:
+                    _emb_span.set_attribute("embedding.dim", dim)
+                    _emb_span.set_attribute("embedding.duration_ms", int((time.monotonic() - _emb_t0) * 1000))
+                except Exception:  # noqa: BLE001
+                    pass
                 return result
-            except Exception:
-                _observe_embedding_duration(self._model_name, t0, "error")
+            except Exception as e:
+                self._write_log_for_batch(
+                    ctx=ctx,
+                    preview=first_preview,
+                    total_chars=total_chars,
+                    batch_size=len(texts) if texts else 0,
+                    embedding_dim=None,
+                    embedding_bytes=None,
+                    started_at=started,
+                    duration_ms=int((time.monotonic() - _emb_t0) * 1000),
+                    status="failure",
+                    error_type=type(e).__name__,
+                    error_message=str(e)[:1000],
+                )
+                _observe_embedding_duration(self._model_name, _emb_t0, "error")
+                try:
+                    from opentelemetry.trace import Status, StatusCode
+                    _emb_span.record_exception(e)
+                    _emb_span.set_status(Status(StatusCode.ERROR, str(e)[:200]))
+                    _emb_span.set_attribute("embedding.duration_ms", int((time.monotonic() - _emb_t0) * 1000))
+                except Exception:  # noqa: BLE001
+                    pass
                 raise
-
-        started = datetime.utcnow()
-        total_chars = sum(len(t or "") for t in (texts or []))
-        first_preview = texts[0] if texts else ""
-        try:
-            result = await call_async_with_retry(
-                lambda: aembed(texts),
-                func_name="embedding.aembed_documents",
-            )
-            dim = len(result[0]) if result and len(result) > 0 else 0
-            self._write_log_for_batch(
-                ctx=ctx,
-                preview=first_preview,
-                total_chars=total_chars,
-                batch_size=len(texts) if texts else 0,
-                embedding_dim=dim,
-                embedding_bytes=(dim * 4 * len(result)) if result else 0,
-                started_at=started,
-                duration_ms=int((time.monotonic() - t0) * 1000),
-                status="success",
-            )
-            _observe_embedding_duration(self._model_name, t0, "success")
-            return result
-        except Exception as e:
-            self._write_log_for_batch(
-                ctx=ctx,
-                preview=first_preview,
-                total_chars=total_chars,
-                batch_size=len(texts) if texts else 0,
-                embedding_dim=None,
-                embedding_bytes=None,
-                started_at=started,
-                duration_ms=int((time.monotonic() - t0) * 1000),
-                status="failure",
-                error_type=type(e).__name__,
-                error_message=str(e)[:1000],
-            )
-            _observe_embedding_duration(self._model_name, t0, "error")
-            raise
+        finally:
+            try:
+                _emb_span.end()
+            except Exception:  # noqa: BLE001
+                pass
 
     # ---- write helpers ----
 

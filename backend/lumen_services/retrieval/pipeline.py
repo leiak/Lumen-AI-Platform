@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -230,8 +231,89 @@ class RetrievalPipeline:
                 FAISS-backed pipelines this kwarg is silently ignored
                 (FAISS has no multi_match / field^N concept).
         """
-        if not query or not query.strip():
-            return []
+        # Phase 1 Group B 4.4 Day 3 (2026-09-05): retrieval.search OTel span。
+        # 关键 attribute:doc_count / top_score / kb_id(从 collection_name 派生)
+        # / backend(FAISS / ES)。filter_expr 不解析(避免误把 tenant_id 暴露)、
+        # 只记长度作为 search-complexity 信号。
+        from opentelemetry import trace as _otel_trace
+
+        _kb_id: Optional[int] = None
+        # collection_name 形如 "kb_55_mc_3" — 抽 KB id
+        if self.collection_name.startswith("kb_"):
+            try:
+                _kb_id = int(self.collection_name.split("_")[1])
+            except (ValueError, IndexError):
+                _kb_id = None
+
+        _backend = "elasticsearch" if (
+            _ES_STORE_TYPE is not None
+            and isinstance(self.vector_store, _ES_STORE_TYPE)
+        ) else "faiss"
+
+        _search_span = _otel_trace.get_tracer("lumen.manual").start_span(
+            "retrieval.search",
+            attributes={
+                "retrieval.kb_id": _kb_id if _kb_id is not None else -1,
+                "retrieval.collection_name": self.collection_name,
+                "retrieval.backend": _backend,
+                "retrieval.k": k,
+                "retrieval.query_chars": len(query or ""),
+                "retrieval.has_filter": bool(filter_expr),
+                "retrieval.filter_chars": len(filter_expr or ""),
+                "retrieval.rerank_enabled": bool(
+                    self.rerank_enabled if rerank is None else rerank
+                ),
+            },
+        )
+        _search_t0 = time.monotonic()
+        try:
+            if not query or not query.strip():
+                try:
+                    _search_span.set_attribute("retrieval.doc_count", 0)
+                    _search_span.set_attribute("retrieval.top_score", 0.0)
+                    _search_span.set_attribute("retrieval.duration_ms", 0)
+                except Exception:  # noqa: BLE001
+                    pass
+                return []
+            return self._search_impl(
+                query=query,
+                k=k,
+                filter_expr=filter_expr,
+                rerank=rerank,
+                search_weights=search_weights,
+                _search_span=_search_span,
+                _search_t0=_search_t0,
+            )
+        except Exception as e:
+            try:
+                from opentelemetry.trace import Status, StatusCode
+                _search_span.record_exception(e)
+                _search_span.set_status(Status(StatusCode.ERROR, str(e)[:200]))
+                _search_span.set_attribute(
+                    "retrieval.duration_ms",
+                    int((time.monotonic() - _search_t0) * 1000),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+        finally:
+            try:
+                _search_span.end()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _search_impl(
+        self,
+        query: str,
+        k: int,
+        filter_expr: Optional[str],
+        rerank: Optional[bool],
+        search_weights: Optional[Dict[str, float]],
+        *,
+        _search_span: Any,
+        _search_t0: float,
+    ) -> List[Dict[str, Any]]:
+        """内部 search 实现,被外层 retrieval.search span 包。"""
 
         use_rerank = self.rerank_enabled if rerank is None else bool(rerank)
 
@@ -299,6 +381,27 @@ class RetrievalPipeline:
                 results = results[:k]
         else:
             results = results[:k]
+
+        # Phase 1 Group B 4.4 Day 3 (2026-09-05): 写 retrieval.search span
+        # 的关键 attribute:doc_count / top_score / duration_ms。
+        try:
+            _search_span.set_attribute("retrieval.doc_count", len(results))
+            # top_score:results 里 dict 可能含 "score" / "_score" / "rerank_score"
+            # 等多种 key;取 max 数值,没结果就 0。
+            top_score = 0.0
+            for r in results:
+                for k_score in ("score", "_score", "rerank_score", "rrf_score"):
+                    v = r.get(k_score) if isinstance(r, dict) else None
+                    if isinstance(v, (int, float)):
+                        top_score = max(top_score, float(v))
+                        break
+            _search_span.set_attribute("retrieval.top_score", top_score)
+            _search_span.set_attribute(
+                "retrieval.duration_ms",
+                int((time.monotonic() - _search_t0) * 1000),
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("retrieval.search span attr write failed; ignored", exc_info=True)
 
         return results
 

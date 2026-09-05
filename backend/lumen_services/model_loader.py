@@ -25,6 +25,7 @@ from lumen_services.llm_call_logging import (
     serialize_messages,
     serialize_tools,
 )
+from lumen_services.llm_tracing import record_chat_span, finish_chat_span
 from lumen_models.llm_call_log import LLMCallLog
 
 # Derived from `MODEL_PROVIDERS` (filtered by `protocol="openai_compat"`).
@@ -162,39 +163,61 @@ class LoggingChatModel:
         # 流式路径(stream / astream)不在这里 wrap —— generator 已开始 yield 后
         # 重试会重复发 content,违反 LLM 调用语义。
         from lumen_services.retry import call_sync_with_retry
-        if ctx is None:
-            return call_sync_with_retry(
-                lambda: self._inner.invoke(messages, **kwargs),
-                func_name="llm.invoke",
-            )
-
-        started = datetime.utcnow()
-        t0 = time.monotonic()
+        # Phase 1 Group B 4.4 Day 3 (2026-09-05): llm.chat span for OTel trace。
+        # invoke 是 sync 调用,容易包 — helper 模式(start + finish 配对)。
+        _llm_span, _llm_t0 = record_chat_span(
+            model=self._model_name,
+            call_kind="invoke",
+            messages_count=len(normalized),
+        )
         try:
-            response = call_sync_with_retry(
-                lambda: self._inner.invoke(messages, **kwargs),
-                func_name="llm.invoke",
-            )
-            self._write_log(
-                ctx=ctx,
-                messages=normalized,
-                response=response,
-                started_at=started,
-                duration_ms=int((time.monotonic() - t0) * 1000),
-                status="success",
-            )
-            return response
-        except Exception as e:
-            self._write_log(
-                ctx=ctx,
-                messages=normalized,
-                response=None,
-                started_at=started,
-                duration_ms=int((time.monotonic() - t0) * 1000),
-                status="failure",
-                error_type=type(e).__name__,
-                error_message=str(e)[:1000],
-            )
+            if ctx is None:
+                response = call_sync_with_retry(
+                    lambda: self._inner.invoke(messages, **kwargs),
+                    func_name="llm.invoke",
+                )
+                finish_chat_span(_llm_span, _llm_t0, response=response)
+                return response
+
+            started = datetime.utcnow()
+            t0 = time.monotonic()
+            try:
+                response = call_sync_with_retry(
+                    lambda: self._inner.invoke(messages, **kwargs),
+                    func_name="llm.invoke",
+                )
+                self._write_log(
+                    ctx=ctx,
+                    messages=normalized,
+                    response=response,
+                    started_at=started,
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                    status="success",
+                )
+                finish_chat_span(_llm_span, _llm_t0, response=response)
+                return response
+            except Exception as e:
+                self._write_log(
+                    ctx=ctx,
+                    messages=normalized,
+                    response=None,
+                    started_at=started,
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                    status="failure",
+                    error_type=type(e).__name__,
+                    error_message=str(e)[:1000],
+                )
+                finish_chat_span(_llm_span, _llm_t0, status="error", error=e)
+                raise
+        except Exception:
+            # ctx is None 路径直接抛时,也要 finish span。已经在上面 finish
+            # 过的不会二次 finish,因为 helper 内部 span.end() 后再次 set
+            # 会抛 InvalidSpanContext — try 包死兜底。
+            try:
+                if _llm_span.is_recording():
+                    finish_chat_span(_llm_span, _llm_t0, status="error")
+            except Exception:  # noqa: BLE001
+                pass
             raise
 
     # ---- async ainvoke ----
@@ -204,39 +227,57 @@ class LoggingChatModel:
         normalized = _normalize_messages(messages)
         # Phase 1 Group A 2.5: async retry 包 inner.ainvoke(同 invoke 注释)。
         from lumen_services.retry import call_async_with_retry
-        if ctx is None:
-            return await call_async_with_retry(
-                lambda: self._inner.ainvoke(messages, **kwargs),
-                func_name="llm.ainvoke",
-            )
-
-        started = datetime.utcnow()
-        t0 = time.monotonic()
+        # Phase 1 Group B 4.4 Day 3 (2026-09-05): llm.chat span for OTel trace。
+        _llm_span, _llm_t0 = record_chat_span(
+            model=self._model_name,
+            call_kind="ainvoke",
+            messages_count=len(normalized),
+        )
         try:
-            response = await call_async_with_retry(
-                lambda: self._inner.ainvoke(messages, **kwargs),
-                func_name="llm.ainvoke",
-            )
-            self._write_log(
-                ctx=ctx,
-                messages=normalized,
-                response=response,
-                started_at=started,
-                duration_ms=int((time.monotonic() - t0) * 1000),
-                status="success",
-            )
-            return response
-        except Exception as e:
-            self._write_log(
-                ctx=ctx,
-                messages=normalized,
-                response=None,
-                started_at=started,
-                duration_ms=int((time.monotonic() - t0) * 1000),
-                status="failure",
-                error_type=type(e).__name__,
-                error_message=str(e)[:1000],
-            )
+            if ctx is None:
+                response = await call_async_with_retry(
+                    lambda: self._inner.ainvoke(messages, **kwargs),
+                    func_name="llm.ainvoke",
+                )
+                finish_chat_span(_llm_span, _llm_t0, response=response)
+                return response
+
+            started = datetime.utcnow()
+            t0 = time.monotonic()
+            try:
+                response = await call_async_with_retry(
+                    lambda: self._inner.ainvoke(messages, **kwargs),
+                    func_name="llm.ainvoke",
+                )
+                self._write_log(
+                    ctx=ctx,
+                    messages=normalized,
+                    response=response,
+                    started_at=started,
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                    status="success",
+                )
+                finish_chat_span(_llm_span, _llm_t0, response=response)
+                return response
+            except Exception as e:
+                self._write_log(
+                    ctx=ctx,
+                    messages=normalized,
+                    response=None,
+                    started_at=started,
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                    status="failure",
+                    error_type=type(e).__name__,
+                    error_message=str(e)[:1000],
+                )
+                finish_chat_span(_llm_span, _llm_t0, status="error", error=e)
+                raise
+        except Exception:
+            try:
+                if _llm_span.is_recording():
+                    finish_chat_span(_llm_span, _llm_t0, status="error")
+            except Exception:  # noqa: BLE001
+                pass
             raise
 
     # ---- streaming ----
@@ -248,12 +289,43 @@ class LoggingChatModel:
         BaseMessageChunk stream they would have seen without logging.
         Inside the generator, we collect ``content`` + ``tool_calls`` so
         we have a complete picture to persist.
+
+        Phase 1 Group B 4.4 Day 3 (2026-09-05): wrapped with ``llm.chat``
+        OTel span via ``record_chat_span`` + ``finish_chat_span`` helper.
+        Span stays active across yield (similar to ``chat.stream``); on
+        each first chunk we capture ``llm.ttfb_ms``; on completion we
+        extract ``llm.tokens`` from response.usage_metadata.
         """
         ctx = get_call_context()
         normalized = _normalize_messages(messages)
+        # Phase 1 Group B 4.4 Day 3: llm.chat span
+        _llm_span, _llm_t0 = record_chat_span(
+            model=self._model_name,
+            call_kind="astream",
+            messages_count=len(normalized),
+        )
         if ctx is None:
-            async for chunk in self._inner.astream(messages, **kwargs):
-                yield chunk
+            # 无 ctx 透明路径 — 仍然起 span 写 metrics,但不写 DB row。
+            _ttfb_first: Optional[float] = None
+            _last_response: Optional[Any] = None
+            try:
+                async for chunk in self._inner.astream(messages, **kwargs):
+                    if _ttfb_first is None and getattr(chunk, "content", None):
+                        _ttfb_first = time.monotonic()
+                    _last_response = chunk
+                    yield chunk
+                finish_chat_span(
+                    _llm_span, _llm_t0,
+                    first_token_at=_ttfb_first,
+                    response=_last_response,
+                )
+            except Exception as e:
+                finish_chat_span(
+                    _llm_span, _llm_t0, status="error", error=e,
+                    first_token_at=_ttfb_first,
+                    response=_last_response,
+                )
+                raise
             return
 
         started = datetime.utcnow()
@@ -328,15 +400,50 @@ class LoggingChatModel:
             error_type=type(error).__name__ if error is not None else None,
             error_message=str(error)[:1000] if error is not None else None,
         )
+        # Phase 1 Group B 4.4 Day 3: llm.chat span 收尾(写 tokens / ttfb / status)
+        try:
+            finish_chat_span(
+                _llm_span, _llm_t0,
+                status="error" if error is not None else "success",
+                error=error,
+                response=synthetic,
+                first_token_at=first_token_at,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("astream: finish_chat_span raised; ignored", exc_info=True)
         if error is not None:
             raise error
 
     def stream(self, messages: Any, **kwargs):
-        """Sync streaming variant — same shape as astream but blocking."""
+        """Sync streaming variant — same shape as astream but blocking.
+
+        Phase 1 Group B 4.4 Day 3: 同样起 ``llm.chat`` span(call_kind="stream")。
+        """
         ctx = get_call_context()
         normalized = _normalize_messages(messages)
+        # Phase 1 Group B 4.4 Day 3: llm.chat span
+        _llm_span, _llm_t0 = record_chat_span(
+            model=self._model_name,
+            call_kind="stream",
+            messages_count=len(normalized),
+        )
         if ctx is None:
-            yield from self._inner.stream(messages, **kwargs)
+            _ttfb_first: Optional[float] = None
+            try:
+                for chunk in self._inner.stream(messages, **kwargs):
+                    if _ttfb_first is None and getattr(chunk, "content", None):
+                        _ttfb_first = time.monotonic()
+                    yield chunk
+                finish_chat_span(
+                    _llm_span, _llm_t0,
+                    first_token_at=_ttfb_first,
+                )
+            except Exception as e:
+                finish_chat_span(
+                    _llm_span, _llm_t0, status="error", error=e,
+                    first_token_at=_ttfb_first,
+                )
+                raise
             return
 
         started = datetime.utcnow()
@@ -381,6 +488,16 @@ class LoggingChatModel:
             error_type=type(error).__name__ if error is not None else None,
             error_message=str(error)[:1000] if error is not None else None,
         )
+        try:
+            finish_chat_span(
+                _llm_span, _llm_t0,
+                status="error" if error is not None else "success",
+                error=error,
+                response=last_response,
+                first_token_at=first_token_at,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("stream: finish_chat_span raised; ignored", exc_info=True)
         if error is not None:
             raise error
 
