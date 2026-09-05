@@ -663,16 +663,17 @@ async def health():
 #
 # - /live   → 进程活着,只要 uvicorn 在 serve 就 200。K8s livenessProbe
 #             用,挂了才需要重启;**不**查依赖,免得 DB 抖动误杀 pod。
-# - /ready  → 依赖全可用(Phase 0 查 MySQL + Redis;ES / MinIO / Ollama
-#             走 SPOF 容灾 Phase 1 再补)。任一不通返 503。
-#             K8s readinessProbe 用,从 service 摘流量。
+# - /ready  → 依赖全可用(MySQL + Redis + Storage + Ollama,ES 走开关)。
+#             任一不通返 503。K8s readinessProbe 用,从 service 摘流量。
+#             Phase 1 1.4 ship:5 probe 用 asyncio.gather 并行,串行 ~10s
+#             降到 max(timeout)≈2s;ES 走 `ES_ENABLED` 开关 — 默认关(项目
+#             当前主要用 FAISS,关时 probe 返 skipped=True 不阻塞)。
 # - /startup→ uvicorn 进程在跑但 startup_event(40+ ensure_* 迁移 +
 #             scheduler reload)还没跑完时返 503;跑完后返 200。
 #             K8s startupProbe 用,迁移没完不接 readinessProbe。
 #
 # 设计参考:roadmap §2 1.4 / Spring Boot Actuator 三态模型。
-# Phase 1 计划:加 ES cluster.health / MinIO HeadBucket / Ollama /api/tags
-# 进入 readiness 探活;Phase 1.3 后才接入 K8s 集群。
+# Phase 1 计划已 ship,Phase 2 接 K8s 集群(sidecar 探活 + 自动摘流量)。
 #
 # 注意:不依赖 auth,部署 ingress 上做白名单限制(K8s pod 内网可达即可)。
 
@@ -713,7 +714,20 @@ async def startup():
 
 @app.get("/ready", include_in_schema=False)
 async def ready():
-    """Readiness probe: dependencies available. 200 if all OK, 503 otherwise."""
+    """Readiness probe: dependencies available. 200 if all OK, 503 otherwise.
+
+    Phase 1 Group A 1.4 (2026-09-04):扩展到 5 个 probe,asyncio.gather 并行:
+      - MySQL(SELECT 1,SQLAlchemy sync 走 to_thread)
+      - Redis(PING,redis-py sync 走 to_thread)
+      - Storage(走 storage backend 自己的 health_check,Local 检查 rwx、
+        S3/MinIO 走 head_bucket,2s timeout)
+      - Ollama(GET /api/tags,async httpx)
+      - Elasticsearch(cluster.health,尊重 ES_ENABLED 开关 — 关时返
+        skipped=True 不阻塞,避免 FAISS-only 部署被 ES 拖死)
+
+    任一 probe 返回 {"ok": False} → 整体 degraded → 503。K8s readinessProbe
+    据此摘流量。各 probe 内部 try/except,永远不会向上抛异常。
+    """
     from fastapi.responses import JSONResponse
 
     # 未启动完直接 503(让 startupProbe 先决,不要 readinessProbe 提前 200)
@@ -723,40 +737,32 @@ async def ready():
             content={"status": "starting", "checks": {}},
         )
 
-    checks: dict = {}
+    # 并行跑 5 个 probe。return_exceptions=True 防御性兜底:即使 probe
+    # helper 自己有 bug 抛异常,readiness 也不会让其他 probe 的结果丢掉。
+    # 正常路径下各 probe 已 swallow exception,这里其实不会拿到 exception。
+    mysql_r, redis_r, storage_r, ollama_r, es_r = await asyncio.gather(
+        _probe_mysql(),
+        _probe_redis(),
+        _probe_storage(),
+        _probe_ollama(),
+        _probe_elasticsearch(),
+        return_exceptions=True,
+    )
 
-    # MySQL:走 SQLAlchemy engine,跟 rate_limit / storage health 同源。
-    # SELECT 1 是工业标准探活,不动业务数据,InnoDB 共享锁。
-    try:
-        from sqlalchemy import text
-        from lumen_core.database import engine
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        checks["mysql"] = {"ok": True}
-    except Exception as e:  # noqa: BLE001
-        checks["mysql"] = {"ok": False, "error": str(e)[:120]}
+    # 极端兜底:helper bug 真的抛了 → 转成 ok:False 让 readiness 503,
+    # 否则 debug 时看不到任何线索。
+    def _coerce(r):
+        if isinstance(r, BaseException):
+            return {"ok": False, "error": f"{type(r).__name__}: {r}"[:120]}
+        return r
 
-    # Redis:probe 一个临时 client(走 .env 的 REDIS_HOST/PORT,跟
-    # rate_limit 一致)。短超时防止 probe 自己卡死 readinessProbe。
-    # 不复用 rate_limit 内的 closure client(它们 scope 局部,且不一定
-    # 已建连);Phase 1 分布式锁起来再统一管理全局 registry。
-    try:
-        import redis as redis_lib  # local: keep top-level import lean
-        from lumen_core.config import settings
-        probe_client = redis_lib.Redis(
-            host=settings.REDIS_HOST,
-            port=settings.REDIS_PORT,
-            db=settings.REDIS_DB,
-            socket_connect_timeout=1,  # readiness 必须快
-            socket_timeout=1,
-            decode_responses=True,
-        )
-        probe_client.ping()
-        probe_client.close()
-        checks["redis"] = {"ok": True}
-    except Exception as e:  # noqa: BLE001
-        checks["redis"] = {"ok": False, "error": str(e)[:120]}
-
+    checks = {
+        "mysql": _coerce(mysql_r),
+        "redis": _coerce(redis_r),
+        "storage": _coerce(storage_r),
+        "ollama": _coerce(ollama_r),
+        "elasticsearch": _coerce(es_r),
+    }
     overall_ok = all(c["ok"] for c in checks.values())
     payload = {
         "status": "ready" if overall_ok else "degraded",
@@ -766,3 +772,141 @@ async def ready():
         status_code=200 if overall_ok else 503,
         content=payload,
     )
+
+
+# ===== Probe helpers (Phase 1 1.4 扩展) =====
+#
+# 每个 helper 必须:
+#   1. swallow 全部 exception,只返 dict(never raises)
+#   2. 带 timeout 避免 readiness 卡死
+#   3. 2-3s 内返回(否则 readinessProbe 频繁超时)
+#
+# 同步 client(MySQL/Redis/Storage/ES 的 elasticsearch-py 客户端都是
+# blocking)用 asyncio.to_thread 切到默认 ThreadPoolExecutor,不阻塞
+# event loop。async 路径(Ollama httpx)直接 await。
+#
+# 命名风格:probe = 资源名,内部 try/except 包一切,失败也返 ok:False + error。
+
+_PROBE_TIMEOUT_S = 2.5  # 单 probe 超时阈值,readiness 总耗时上限
+
+
+async def _probe_mysql() -> dict:
+    """MySQL probe:SELECT 1,SQLAlchemy engine。
+
+    SELECT 1 是工业标准探活,不动业务数据,InnoDB 共享锁级别最低,不影响
+    正常 query。
+    """
+    def _sync() -> None:
+        from sqlalchemy import text
+        from lumen_core.database import engine
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    try:
+        await asyncio.wait_for(asyncio.to_thread(_sync), timeout=_PROBE_TIMEOUT_S)
+        return {"ok": True}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:120]}
+
+
+async def _probe_redis() -> dict:
+    """Redis probe:PING,新建临时 client(不抢 rate_limit 的 connection)。
+
+    短超时防止 probe 自己卡 readinessProbe(原 K8s 默认 1s 探活,K8s 1.4+ 可调,
+    但 readiness 总耗时我们控制住 < 3s)。
+    """
+    def _sync() -> None:
+        import redis as redis_lib  # local: keep top-level import lean
+        from lumen_core.config import settings
+        probe_client = redis_lib.Redis(
+            host=settings.REDIS_HOST,
+            port=settings.REDIS_PORT,
+            db=settings.REDIS_DB,
+            socket_connect_timeout=1,
+            socket_timeout=1,
+            decode_responses=True,
+        )
+        try:
+            probe_client.ping()
+        finally:
+            probe_client.close()
+    try:
+        await asyncio.wait_for(asyncio.to_thread(_sync), timeout=_PROBE_TIMEOUT_S)
+        return {"ok": True}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:120]}
+
+
+async def _probe_storage() -> dict:
+    """Storage probe:走 backend 自己的 health_check()。
+
+    Local 模式检查 ./data 可读可写,S3/MinIO 模式 head_bucket。backend
+    已经统一返 ``{backend, ok, detail, latency_ms}`` 结构 — 我们把 ok 透传,
+    整 dict 并入 result,方便运维看到 backend 名 + 延迟。
+    """
+    def _sync() -> dict:
+        from lumen_services.storage import get_storage_backend
+        return get_storage_backend().health_check()
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_sync), timeout=_PROBE_TIMEOUT_S
+        )
+        return {
+            "ok": bool(result.get("ok")),
+            "backend": result.get("backend"),
+            "latency_ms": result.get("latency_ms"),
+            "detail": result.get("detail") if not result.get("ok") else None,
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:120]}
+
+
+async def _probe_ollama() -> dict:
+    """Ollama probe:GET /api/tags,Ollama 自身标准探活端点。
+
+    /api/tags 列出本地模型,不需要 auth,Ollama 进程死了就立刻 connection
+    refused。**默认端口 11434**(项目配置 OLLAMA_API_BASE,见 config.py)。
+    """
+    try:
+        import httpx  # local: 仅 readiness 路径需要,顶层 import 浪费 startup
+        from lumen_core.config import settings
+        base_url = settings.OLLAMA_API_BASE.rstrip("/")
+        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT_S) as client:
+            resp = await client.get(f"{base_url}/api/tags")
+            # 2xx 视为 ok;5xx / 4xx / connection error → 失败
+            resp.raise_for_status()
+        return {"ok": True}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:120]}
+
+
+async def _probe_elasticsearch() -> dict:
+    """ES probe:cluster.health,尊重 ``ES_ENABLED`` 开关。
+
+    ``ES_ENABLED=False`` 时项目用 FAISS,运维特意关 ES,readiness 不能因此
+    阻塞 — 返 ``skipped=True`` 且 ``ok=True``。开了就真探活,要求 status
+    in (green, yellow);red 集群返 degraded。
+    """
+    from lumen_core.config import settings
+    if not getattr(settings, "ES_ENABLED", False):
+        return {"ok": True, "skipped": True, "reason": "ES_ENABLED=false"}
+
+    def _sync() -> dict:
+        from elasticsearch import Elasticsearch
+        host = settings.ES_HOST
+        port = settings.ES_PORT
+        client = Elasticsearch(
+            hosts=[{"host": host, "port": port, "scheme": "http"}],
+            request_timeout=2,
+        )
+        return dict(client.cluster.health())  # {status, ...}
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_sync), timeout=_PROBE_TIMEOUT_S
+        )
+        status = result.get("status", "unknown")
+        return {
+            "ok": status in ("green", "yellow"),
+            "status": status,
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:120]}
