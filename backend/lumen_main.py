@@ -222,11 +222,17 @@ if setup_tracing(
 
         def _otel_atexit_flush() -> None:
             """atexit 兜底 flush:进程退出前最后 push 一次 OTel buffered span
-            + metric。
+            + metric + log。
 
             Phase 1 Group B 4.4 Day 6 (2026-09-06):Day 6 起 ``otel.force_flush``
             内部已串联 metric flush(SpanObserverMetricExporter → MeterProvider
             reader 走同一 flush 路径),这里一次调用同时推 span + metric。
+
+            Phase 1 Group B 4.4 Day 7 (2026-09-06):Day 7 起 ``otel.force_flush``
+            又串联 log flush(``lumen_core.otel_logs.force_flush`` 走
+            LoggerProvider + BatchLogRecordProcessor 同路径),所以同一次调用
+            同时推 span + metric + log。OTel log signal 默认 disabled
+            (``OTEL_LOG_EXPORTER`` 空),运维未开时内部 no-op,不影响主路径。
 
             force_flush 内部已 swallow 异常 + 返 bool,这里不用 try/except 包。
             """
@@ -419,6 +425,12 @@ async def _shutdown_cleanup(
     # 内部已串联 ``otel_metrics.force_flush``(SpanObserverMetricExporter
     # → PeriodicExportingMetricReader → OTLPMetricExporter),所以同一次
     # 调用同时推 buffered span + buffered metric。
+    #
+    # Phase 1 Group B 4.4 Day 7 (2026-09-06):Day 7 起 ``otel.force_flush``
+    # 又串联 ``otel_logs.force_flush``(LoggerProvider +
+    # BatchLogRecordProcessor + OTLPLogExporter),所以同一次调用同时推
+    # buffered span + buffered metric + buffered log。OTel log signal 默认
+    # disabled (``OTEL_LOG_EXPORTER`` 空),运维未开时内部 no-op,不影响主路径。
     #
     # 必须放在 engine.dispose() 之前:虽然本项目 span attribute 不引用 DB
     # session,但保留 flush-then-dispose 顺序作为通用约定,避免后续业务 span

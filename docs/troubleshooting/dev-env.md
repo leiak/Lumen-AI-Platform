@@ -23,6 +23,7 @@
 | OTel | Jaeger 看不到 trace / collector 端口冲突 | [§11 Jaeger + OTel Collector](#11-jaeger--otel-collector-phase-1-group-b-44-day-4-2026-09-05) |
 | OTel lifecycle | 进程退出丢最后几个 span / W3C trace 链路 | [§12 OTel Lifecycle + Proxy Bypass](#12-otel-lifecycle--proxy-bypass-phase-1-group-b-44-day-5-2026-09-06) |
 | OTel metrics | collector 看不到 `lumen_span_*` / span-derived 不工作 | [§13 OTel Span-derived Metrics](#13-otel-span-derived-metrics-phase-1-group-b-44-day-6-2026-09-06) |
+| OTel logs | collector 收不到 log / JSON log 没 `span_id` / 想接 Loki | [§14 OTel Log Signal + JSON Log Span 关联](#14-otel-log-signal--json-log-span-关联-phase-1-group-b-44-day-7-2026-09-06) |
 
 ---
 
@@ -535,6 +536,138 @@ curl -sG 'http://localhost:19090/api/v1/query' \
 - **`force_flush(timeout_millis=5000)` 是兜底**:OTLP exporter 默认 2s timeout,5s 留 buffer 余量。atexit 阶段调一次用 `timeout_millis=3000`(短一点,atexit 进程在退出,不能阻塞太久)。
 - **`Counter` / `Histogram` lazy init**(per label_tuple):OTel SDK Counter 是 per-label 实例,需要 `dict[Tuple[Tuple[str, str], ...], Counter]` 索引;每个新 (label_tuple) 第一次 `create_counter` 一次性创建,后续复用。**不会重复创建**,但 series 数要看 label cardinality。
 - **新增 / 改名 span attribute**:如果加进 `_ALLOWED_LABEL_KEYS`,cardinality 影响跟现有维度等同;如果**不加**,会被静默丢弃,业务 span 的新 attribute 不会反映到 metric。决策看是否值得扩 cardinality 守门。
+
+---
+
+## 14. OTel Log Signal + JSON Log Span 关联 (Phase 1 Group B 4.4 Day 7, 2026-09-06)
+
+> **TL;DR**:Day 7 加了 OTel logs signal pipeline(LoggerProvider + BatchLogRecordProcessor + OTLPLogExporter)+ 给 JSON log 自动 inject `span_id` + `trace_flags`,运维在 Loki / Grafana 能直接 `trace_id=<tid> span_id=<sid>` 跳到 Jaeger trace 对应 leaf span。**默认 disabled**(`OTEL_LOG_EXPORTER` 空值),开 OTel log signal 通常是为了接 Loki 场景(Day 8)。
+
+### 14.1 端到端启用
+
+跟 §11.2 / §13.1 一样的步骤:起 collector + 切 OTLP,只是 env 多一行 `OTEL_LOG_EXPORTER`。
+
+```bash
+# 1. 起 collector(同 §11.1)—— Day 7 collector 多了 logs pipeline
+cd backend && docker compose up -d lumen-platform-otel-collector
+
+# 2. 改 backend/.env
+cat >> backend/.env <<'EOF'
+OTEL_EXPORTER=otlp
+OTEL_ENDPOINT=http://localhost:4317
+OTEL_SAMPLE_RATIO=1.0
+OTEL_LOG_EXPORTER=otlp
+EOF
+
+# 3. 重启 uvicorn(load_dotenv 已在 lumen_main.py 顶部读 .env)
+# uvicorn 启动 log 应有:
+#   "OpenTelemetry tracing initialized: ..."
+#   "OpenTelemetry metrics initialized: ..."
+#   "OpenTelemetry logs initialized (OTLP otlp)"
+```
+
+**为什么 OTEL_LOG_EXPORTER 默认 disabled**:Phase 0 stdout JSON 是主通道,默认双通道会产生 2x 噪音(`docker logs lumen-platform-backend` 同一条 log 出现两次)。运维按需开 OTel log signal 通常是为了接 Loki / 走 OTLP 集中日志聚合,Day 8 会替换 debug exporter 为 loki exporter。
+
+### 14.2 验证 collector 收到 log record
+
+```bash
+# collector stdout 应该看到 log record(debug exporter 抽样 5/200)
+docker logs lumen-platform-otel-collector 2>&1 | grep -A 3 "lumen.logging.bridge" | tail -40
+# 期望:
+#   InstrumentationScope lumen.logging.bridge
+#   Resource labels: service.name=lumen-backend deployment.environment=dev
+#   SeverityText: INFO
+#   Body: xxx
+#   Attributes: trace_id=... span_id=... tenant_id=... user_id=...
+
+# collector :8889 暴露的 otelcol 自监控 metric(等 ~15s)
+curl -s http://localhost:8889/metrics | grep otelcol_exporter_sent_log_records
+# 期望:otelcol_exporter_sent_log_records{exporter="debug",...} N  (N > 0)
+```
+
+### 14.3 验证 JSON log 含 span_id / trace_flags
+
+Day 7 同时给**现有 stdout JSON** 加了 `span_id` + `trace_flags` 两个字段(`_ContextFilter` 自动从 OTel current span 抽)。**这条不依赖 `OTEL_LOG_EXPORTER` env**,默认就有。
+
+```bash
+# 1. 发一个 chat / health 请求触发 FastAPIInstrumentor 建 span
+curl -s http://localhost:11335/api/v1/health > /dev/null
+
+# 2. 看 backend stdout JSON(单行)
+docker logs lumen-platform-backend 2>&1 | tail -1 | python -c "
+import json, sys
+r = json.loads(sys.stdin.read())
+print('trace_id present:', 'trace_id' in r)
+print('span_id present:', 'span_id' in r)
+print('trace_flags present:', 'trace_flags' in r)
+print('span_id 16-hex:', len(r.get('span_id', '')) == 16)
+print('trace_flags int:', isinstance(r.get('trace_flags'), int))
+"
+# 期望:
+#   trace_id present: True
+#   span_id present: True
+#   trace_flags present: True
+#   span_id 16-hex: True
+#   trace_flags int: True
+
+# 3. span_id / trace_id 拿到后,跳 Jaeger 验证 leaf span
+# Jaeger UI: http://localhost:16686/trace/<trace_id>
+```
+
+### 14.4 跟现有 stdout JSON 的关系(双通道,互补)
+
+| 通道 | 实现 | 何时启用 | 用途 |
+|------|------|----------|------|
+| **stdout JSON**(Phase 0 Unit 5 4.1 起) | `_ContextJsonFormatter` → `sys.stdout` | 始终 | Promtail → Loki 抓 docker stdout;`docker logs` 直读;开发期 grep |
+| **OTel log signal**(Day 7) | `OTelLogBridgeHandler` → `Logger.emit(LogRecord)` → OTLPLogExporter → collector | `OTEL_LOG_EXPORTER` ∈ {`otlp`/`otlp_grpc`/`otlp_http`} | 结构化查询(按 trace_id / span_id / tenant_id 聚合);Day 8 接 Loki |
+
+同一 LogRecord 同时走两条通道,字段集合对齐(`trace_id` / `span_id` / `trace_flags` / `tenant_id` / `user_id`)。**两个通道字段**对齐便于 Loki 同时从 Promtail JSON 和 OTLP log 拿到的字段命名一致。
+
+### 14.5 跟 collector logs pipeline 的关系
+
+`monitoring/otel-collector.yml` Day 7 加了:
+
+```yaml
+exporters:
+  debug:
+    verbosity: normal
+    sampling_initial: 5      # 头 5 条全打
+    sampling_thereafter: 200  # 之后每 200 打 1 条
+
+service:
+  pipelines:
+    traces: ...
+    metrics: ...
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]    # Day 7 验证用,Day 8 替换为 loki
+```
+
+debug exporter 是 otelcol 内置,无新依赖,**头 5 条全打 + 之后抽样 1/200** 防 stdout 刷屏。Day 8 接 Loki 时把 `exporters: [debug]` 改成 `exporters: [loki]` + 加 loki exporter 配置即可。
+
+### 14.6 常见问题
+
+| 症状 | 排查 / 修法 |
+|------|------|
+| uvicorn 启动 log 没 "OpenTelemetry logs initialized" | (a) `OTEL_LOG_EXPORTER` 没设;(b) 拼错(如 `OTLP` 大写 → 落到 unknown mode → warning);(c) OTel 1.36 装好但 `setup_logs` 内部异常(看前后 `setup_logs failed: ...`) |
+| Collector `:8889/metrics` 有 `otelcol_receiver_accepted_log_records` 但 `otelcol_exporter_sent_log_records` 为 0 | exporter 卡 batch(`timeout: 100ms` 默认,5s 内必 flush)。等 5s 再 curl |
+| JSON stdout 有 `trace_id` 但没 `span_id` / `trace_flags` | (a) `_ContextFilter` 没被装载 → 检查 `setup_json_logging` 是否调过;(b) 当前没 OTel active span(没经过 FastAPI 入站 / 没用 `tracer.start_as_current_span`)→ 正常 |
+| `trace_flags` 是 0 不是 1 | 当前 span 没被 OTel sampler 选中(OTLP 默认 ParentBased(TraceIdRatioBased(...)) 按 `OTEL_SAMPLE_RATIO` 抽样)。`trace_flags=0` 表示 span 不写入 trace pipeline,日志仍会被 log signal 收(severity_filter 不看 trace_flags) |
+| `OTelLogBridgeHandler` 不挂载 | `setup_json_logging` 检查 `is_initialized()` 判定,只有 `OTEL_LOG_EXPORTER` 启用时才挂。改完 env 必须重启 uvicorn |
+| Loki 端按 trace_id 查不到 log | (a) Day 7 还没接 Loki,debug exporter 只写到 collector stdout;(b) 接 Loki 后从 Loki query `{service_name="lumen-backend"} \| json \| trace_id="<tid>"` 查 |
+| HTTPS_PROXY 警告刷屏 | 同 §12.3:unset `HTTPS_PROXY` / `GRPC_PROXY` env,或显式 `=""`。OTel gRPC exporter 默认走 `urllib.getproxies()` 拿 proxy,registry 上的 `127.0.0.1:10793` 会让它尝试走代理 |
+
+### 14.7 注意事项
+
+- **OTel SDK 1.36 bug**:`Logger.emit(API_LogRecord)` 内部不自动转 SDK LogRecord,OTLP exporter 访问 `log_record.resource` 直接 AttributeError(API LogRecord 没 `.resource`)。**Day 7 `OTelLogBridgeHandler.emit` 已用 SDK `LogRecord`**(`from opentelemetry.sdk._logs._internal import LogRecord`),同时 `context=get_current()` 参数(替代 deprecated `trace_id` / `span_id` / `trace_flags` 三个独立参数,1.35.0 起 deprecated)让 SDK 自动抽 W3C trace context。
+- **`force_flush` 串联**:`otel.force_flush()` 内部已 cascade 调 `otel_logs.force_flush(timeout_millis=...)`,`lumen_main._shutdown_cleanup` 跟 `_otel_atexit_flush` 都走统一入口,**Day 7 不需要新加 shutdown hook**。
+- **`reset_for_test` 必须同时清 `opentelemetry._logs._internal._LOGGER_PROVIDER` + `_LOGGER_PROVIDER_SET_ONCE._done`**:OTel SDK 用 `_once.Once` 守门 provider 只能设一次,不清 done flag 下一次 `setup_logs()` 被静默拒。镜像 Day 6 `MeterProvider` 套路。
+- **`get_span_id()` / `get_trace_flags()` 镜像 `get_trace_id()` 但无 contextvar 回退**:span_id 必须从 OTel current span 取,不能像 trace_id 那样用 contextvar 伪造(否则 W3C trace context 不连续,Jaeger 跳不过去)。
+- **`_BRIDGE_ATTR_KEYS` 5 个字段**:`trace_id` / `span_id` / `trace_flags` / `tenant_id` / `user_id`。全转 str(OTel LogRecord.attributes 必须是 primitive)。JSON + OTel LogRecord 两边字段集合一致便于 Loki 聚合。
+- **`BatchLogRecordProcessor` 间隔 5s**(比 metric 15s 短):日志要近实时,5s 出 collector 端够。Dev 默认值,prod 可调 30s 减 overhead。
+- **`OTEL_LOG_EXPORTER` 拼写**:`none` / `off` / `noop` / `disabled` / 空值都视为 disabled(给运维降噪余地),`otlp` / `otlp_grpc` / `otlp_http` 启用。**未知 mode 走 warning + disabled**(不抛异常,不破坏 uvicorn 启动)。
+- **OTLP gRPC 共用 `:4317`** Day 1 已 ship:trace / metric / log 三 signal 同端口同协议同 collector,Day 7 没新增端口。
 
 ---
 

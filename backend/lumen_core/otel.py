@@ -168,6 +168,21 @@ def _do_setup(
         except Exception as e:  # noqa: BLE001
             logger.debug("attach SpanObserverMetricExporter failed: %s", e)
 
+    # Phase 1 Group B 4.4 Day 7 (2026-09-06):挂 OTel log signal 到同一
+    # collector(OTLP mode 启用,console / none 不启用 —— 跟 metric 同套
+    # ``OTEL_EXPORTER`` 守门)。复用 Day 5 ``force_flush`` / atexit 生命周期
+    # —— otel.py ``force_flush`` / ``reset_for_test`` 串联 flush + reset。
+    # ``setup_logs`` 内部已 env gating (``OTEL_LOG_EXPORTER`` 独立 env,
+    # 默认 disabled,运维按需开),传 resource 让 log record 带 service.name
+    # / deployment.environment 跟 trace / metric 自动 join。
+    if _build_log_mode() == "otlp":
+        try:
+            from lumen_core.otel_logs import setup_logs as _setup_logs
+
+            _setup_logs(resource=resource)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("attach OTel log signal failed: %s", e)
+
     logger.info(
         "OpenTelemetry initialized: exporter=%s service=%s version=%s env=%s",
         exporter_mode,
@@ -430,6 +445,18 @@ def force_flush(timeout_millis: int = 5000) -> bool:
     except Exception:  # noqa: BLE001
         pass
 
+    # Phase 1 Group B 4.4 Day 7 (2026-09-06):metric flush 之后串联 log
+    # flush,确保 uvicorn shutdown 时 buffered log record 也推走。镜像
+    # ``lumen_core.otel_logs.force_flush`` 的 swallow 语义,失败不抛。
+    # 即使上面 span / metric flush 都失败 / 没初始化,也要尝试 log flush
+    # (独立 module,独立 LoggerProvider)。
+    try:
+        from lumen_core.otel_logs import force_flush as _logs_force_flush
+
+        _logs_force_flush(timeout_millis=timeout_millis)
+    except Exception:  # noqa: BLE001
+        pass
+
     return span_flushed
 
 
@@ -455,8 +482,9 @@ def reset_for_test() -> None:
     with _init_lock:
         if not _initialized:
             # 即使 _initialized=False(可能 conftest 触发的 lumen_main import
-            # 把它设过 True 后又被外部 reset 过),也要清掉 trace module 的
-            # module-level 状态,避免下一次 setup_tracing 被 _once 拒。
+            # 把它设过 True 后又被外部 reset 过),也要清掉 trace / metric /
+            # log module 的 module-level 状态,避免下一次 setup_tracing 被
+            # _once 拒。
             try:
                 from opentelemetry import trace
 
@@ -467,6 +495,23 @@ def reset_for_test() -> None:
                     once._done = False
             except Exception as e:  # noqa: BLE001
                 logger.debug("TracerProvider module-level reset failed: %s", e)
+            # Phase 1 Group B 4.4 Day 6 + Day 7 (2026-09-06):early branch
+            # 也清 metric + log module state,镜像 trace 模式。Day 6/7 设过
+            # 但 otel._initialized 又被外部重置过的话,不调内部 reset 路径
+            # 残留 _METER_PROVIDER / _LOGGER_PROVIDER 会让下次 setup 被
+            # _once.Once 拒。
+            try:
+                from lumen_core.otel_metrics import reset_for_test as _metrics_reset_early
+
+                _metrics_reset_early()
+            except Exception as e:  # noqa: BLE001
+                logger.debug("OTel metrics early reset failed: %s", e)
+            try:
+                from lumen_core.otel_logs import reset_for_test as _logs_reset_early
+
+                _logs_reset_early()
+            except Exception as e:  # noqa: BLE001
+                logger.debug("OTel logs early reset failed: %s", e)
             return
 
         try:
@@ -498,6 +543,16 @@ def reset_for_test() -> None:
         except Exception as e:  # noqa: BLE001
             logger.debug("OTel metrics reset_for_test failed: %s", e)
 
+        # Phase 1 Group B 4.4 Day 7 (2026-09-06):reset_for_test 串联 log
+        # reset(独立 module,独立 LoggerProvider)。镜像 metric 模式,无论
+        # Day 7 log 是否启过都调一次 — 内部 swallow 不存在的 state。
+        try:
+            from lumen_core.otel_logs import reset_for_test as _logs_reset
+
+            _logs_reset()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("OTel logs reset_for_test failed: %s", e)
+
         _initialized = False
 
 
@@ -509,6 +564,7 @@ __all__ = [
     "DEFAULT_SERVICE_NAME",
     "_build_sampler",
     "_build_metric_mode",
+    "_build_log_mode",
 ]
 
 
@@ -520,6 +576,24 @@ def _build_metric_mode() -> str:
     返回值:
       - ``"otlp"``:启 ``lumen_core.otel_metrics.setup_metrics()``(挂
         SpanObserverMetricExporter 到 TracerProvider)
+      - ``"disabled"``:不启(console / none / off / 空值 / 未知)
+    """
+    exporter_mode = (os.getenv("OTEL_EXPORTER") or "console").strip().lower()
+    if exporter_mode in ("otlp", "otlp_grpc", "otlp_http"):
+        return "otlp"
+    return "disabled"
+
+
+def _build_log_mode() -> str:
+    """Phase 1 Group B 4.4 Day 7 (2026-09-06):判断当前 ``OTEL_EXPORTER`` 是否
+    启 OTel log signal。
+
+    跟 ``_build_metric_mode()`` 镜像逻辑 —— 同样读 ``OTEL_EXPORTER``
+    (Day 7 没引入独立信号判断,共用同套 exporter mode):
+      - ``"otlp"``:启 ``lumen_core.otel_logs.setup_logs()``(挂 LoggerProvider
+        + BatchLogRecordProcessor + OTLPLogExporter)。**注意**:setup_logs
+        内部还会读 ``OTEL_LOG_EXPORTER`` 独立 env gate,运维可在 OTLP 模式下
+        不开 log signal(避免双通道 2x 噪音)
       - ``"disabled"``:不启(console / none / off / 空值 / 未知)
     """
     exporter_mode = (os.getenv("OTEL_EXPORTER") or "console").strip().lower()

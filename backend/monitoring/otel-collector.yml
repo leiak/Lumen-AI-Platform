@@ -1,4 +1,5 @@
 # Phase 1 Group B 4.4 Day 4 (2026-09-05): OTel Collector 配置。
+# Phase 1 Group B 4.4 Day 7 (2026-09-06): 加 logs pipeline + debug exporter。
 #
 # 启动参数 (在 docker-compose.yml 里):
 #   otelcol-contrib --config=/etc/otelcol-contrib/config.yaml
@@ -8,6 +9,8 @@
 #     → OTel Collector
 #       → jaeger exporter → lumen-platform-jaeger:14250 (gRPC ingest)
 #       → prometheus exporter → :8889/metrics (被 prometheus scrape)
+#       → debug exporter → collector stdout (Day 7 验证 log signal 收到;
+#         未来 Day 8 接 Loki 替换)
 #
 # 设计要点:
 #   1. traces 直接走 jaeger exporter (port 14250, jaeger gRPC),不走
@@ -23,6 +26,12 @@
 #   5. service.telemetry.metrics.level=detailed 让 otelcol 暴露
 #      完整的 receiver/processor/exporter 内部 metric (默认 basic
 #      只暴露进程级 CPU/内存)。dev 调试需要 detailed。
+#   6. **Day 7 logs pipeline** (2026-09-06):receivers=[otlp] + processors=
+#      [memory_limiter, batch] + exporters=[debug]。debug exporter 是
+#      otelcol 内置,无需新依赖,只把 log record 写到 collector stdout
+#      供 dev 验证 (sampling_initial=5 + sampling_thereafter=200 控制
+#      抽样,避免 stdout 刷屏)。**Day 8 接 Loki 替换 debug 为 loki
+#      exporter**。
 #
 # 端口约定 (避免与同机其他服务冲突):
 #   - 4317 / 4318 OTLP (同 lumen-platform-jaeger,dev 调试用)
@@ -66,6 +75,16 @@ exporters:
     resource_to_telemetry_conversion:
       enabled: true
 
+  # Phase 1 Group B 4.4 Day 7 (2026-09-06): debug exporter —— dev 验证
+  # collector 收到 log record;未来 Day 8 接 Loki 时替换为 loki exporter。
+  # verbosity=normal 输出 body + trace_id + span_id + attributes;
+  # sampling_initial=5 / sampling_thereafter=200 抽样(头 5 条全打,
+  # 之后每 200 条打 1 条),防止 dev collector stdout 刷屏。
+  debug:
+    verbosity: normal
+    sampling_initial: 5
+    sampling_thereafter: 200
+
 extensions:
   - health_check
 
@@ -90,3 +109,9 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [prometheus]
+    # Phase 1 Group B 4.4 Day 7 (2026-09-06): logs pipeline — 收 OTel log
+    # signal,转 debug exporter 验证;Day 8 接 Loki 替换。
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]

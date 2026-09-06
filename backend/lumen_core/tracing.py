@@ -129,6 +129,68 @@ def ensure_trace_id() -> str:
     return tid
 
 
+# ---- Phase 1 Group B 4.4 Day 7 (2026-09-06): span_id + trace_flags helpers ----
+
+
+def get_span_id() -> Optional[str]:
+    """当前 OTel span 的 span_id(16-hex format,W3C trace context 兼容)。
+
+    跟 ``get_trace_id()`` 镜像 API 形态 —— 但**没有** contextvar 回退:
+    span_id 必须从 OTel current span 取,不能像 trace_id 那样用 contextvar
+    伪造(否则 W3C trace context 不连续)。无 active span / span context
+    invalid 时返 None,调用方按"省略 JSON 字段"处理。
+
+    16-hex format 跟 W3C trace context 一致,Jaeger / Loki / Grafana 都识别,
+    让运维在 Loki 里 ``trace_id=<tid> span_id=<sid>`` 直接跳到 Jaeger
+    trace 对应 leaf span。
+
+    用法(``lumen_core.logging_config._ContextFilter`` Day 7 加):
+        sid = get_span_id()
+        if sid: record.span_id = sid
+    """
+    try:
+        from opentelemetry import trace as _otel_trace
+    except ImportError:
+        return None
+    try:
+        span = _otel_trace.get_current_span()
+        sc = span.get_span_context()
+        if sc and sc.is_valid:
+            return format(sc.span_id, "016x")
+    except Exception:  # noqa: BLE001
+        # OTel 任何异常都 swallow,bridge 不能拖垮业务
+        pass
+    return None
+
+
+def get_trace_flags() -> Optional[int]:
+    """当前 OTel span 的 trace flags(int,SAMPLED=0x01)。
+
+    跟 ``get_trace_id()`` / ``get_span_id()`` 镜像 API 形态,无 active span
+    时返 None。W3C trace context 第 3 字段 `flags`,``0x01`` = SAMPLED
+    (即 span 被 OTel SDK 实际写入 trace pipeline)。
+
+    当前 JSON 日志字段用 int —— 跟 OTel semantic conventions 一致;Grafana
+    Loki 标签过滤 ``trace_flags=1`` 可筛"实际采样的 span"。
+
+    用法(``lumen_core.logging_config._ContextFilter`` Day 7 加):
+        flags = get_trace_flags()
+        if flags is not None: record.trace_flags = flags
+    """
+    try:
+        from opentelemetry import trace as _otel_trace
+    except ImportError:
+        return None
+    try:
+        span = _otel_trace.get_current_span()
+        sc = span.get_span_context()
+        if sc and sc.is_valid:
+            return int(sc.trace_flags)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 # ---- 测试 teardown ----
 
 
@@ -148,6 +210,8 @@ __all__ = [
     "new_trace_id",
     "set_trace_id",
     "get_trace_id",
+    "get_span_id",
+    "get_trace_flags",
     "clear_trace_id",
     "ensure_trace_id",
     "reset_for_test",
