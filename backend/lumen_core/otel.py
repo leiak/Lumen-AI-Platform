@@ -154,6 +154,20 @@ def _do_setup(
     _instrument_sqlalchemy()
     _instrument_celery()
 
+    # Phase 1 Group B 4.4 Day 6 (2026-09-06):挂 SpanObserverMetricExporter
+    # 到当前 TracerProvider,让每条 span 派生 Prometheus Counter +
+    # Histogram。仅 OTLP mode 启,console / none 不启(无 ConsoleMetricExporter,
+    # 日志噪声)。复用 Day 5 ``force_flush`` / atexit 生命周期 —— 同一份
+    # processor 在 otel.py ``force_flush`` / ``reset_for_test`` 串联 flush
+    # 即可。
+    if _build_metric_mode() == "otlp":
+        try:
+            from lumen_core.otel_metrics import setup_metrics
+
+            setup_metrics()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("attach SpanObserverMetricExporter failed: %s", e)
+
     logger.info(
         "OpenTelemetry initialized: exporter=%s service=%s version=%s env=%s",
         exporter_mode,
@@ -393,17 +407,30 @@ def force_flush(timeout_millis: int = 5000) -> bool:
         True if force_flush was called; False if not initialized / no-op
         provider / exception raised (swallowed)。
     """
+    span_flushed = False
     try:
         from opentelemetry import trace
 
         provider = trace.get_tracer_provider()
         if hasattr(provider, "force_flush"):
             provider.force_flush(timeout_millis=timeout_millis)
-            return True
-        return False
+            span_flushed = True
     except Exception as e:  # noqa: BLE001
         logger.warning("OTel force_flush failed: %s", e)
-        return False
+
+    # Phase 1 Group B 4.4 Day 6 (2026-09-06):span flush 之后串联 metric
+    # flush,确保 uvicorn shutdown 时 buffered metric 也推走。即使上面 span
+    # flush 失败 / 没初始化,也要尝试 metric flush(独立 module,独立
+    # MeterProvider)。镜像 ``lumen_core.otel_metrics.force_flush`` 的
+    # swallow 语义,失败不抛。
+    try:
+        from lumen_core.otel_metrics import force_flush as _metrics_force_flush
+
+        _metrics_force_flush(timeout_millis=timeout_millis)
+    except Exception:  # noqa: BLE001
+        pass
+
+    return span_flushed
 
 
 def reset_for_test() -> None:
@@ -461,6 +488,16 @@ def reset_for_test() -> None:
         except Exception as e:  # noqa: BLE001
             logger.debug("HTTPXClientInstrumentor uninstrument failed: %s", e)
 
+        # Phase 1 Group B 4.4 Day 6 (2026-09-06):reset_for_test 串联 metric
+        # reset(独立 module,独立 MeterProvider)。无论 Day 6 metric 是否
+        # 启过,都调一次 — 内部 swallow 不存在的 state。
+        try:
+            from lumen_core.otel_metrics import reset_for_test as _metrics_reset
+
+            _metrics_reset()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("OTel metrics reset_for_test failed: %s", e)
+
         _initialized = False
 
 
@@ -471,4 +508,21 @@ __all__ = [
     "force_flush",
     "DEFAULT_SERVICE_NAME",
     "_build_sampler",
+    "_build_metric_mode",
 ]
+
+
+def _build_metric_mode() -> str:
+    """Phase 1 Group B 4.4 Day 6 (2026-09-06):判断当前 ``OTEL_EXPORTER`` 是否
+    启 span-derived metric。
+
+    决策:跟 ``_build_sampler()`` 同位置的 helper,无副作用,只读 env。
+    返回值:
+      - ``"otlp"``:启 ``lumen_core.otel_metrics.setup_metrics()``(挂
+        SpanObserverMetricExporter 到 TracerProvider)
+      - ``"disabled"``:不启(console / none / off / 空值 / 未知)
+    """
+    exporter_mode = (os.getenv("OTEL_EXPORTER") or "console").strip().lower()
+    if exporter_mode in ("otlp", "otlp_grpc", "otlp_http"):
+        return "otlp"
+    return "disabled"

@@ -22,6 +22,7 @@
 | MinIO | 端口冲突 / multipart 卡 / endpoint 504 | [§10 MinIO](#10-minio-m381-follow-up-2026-08-31) |
 | OTel | Jaeger 看不到 trace / collector 端口冲突 | [§11 Jaeger + OTel Collector](#11-jaeger--otel-collector-phase-1-group-b-44-day-4-2026-09-05) |
 | OTel lifecycle | 进程退出丢最后几个 span / W3C trace 链路 | [§12 OTel Lifecycle + Proxy Bypass](#12-otel-lifecycle--proxy-bypass-phase-1-group-b-44-day-5-2026-09-06) |
+| OTel metrics | collector 看不到 `lumen_span_*` / span-derived 不工作 | [§13 OTel Span-derived Metrics](#13-otel-span-derived-metrics-phase-1-group-b-44-day-6-2026-09-06) |
 
 ---
 
@@ -448,6 +449,92 @@ docker logs lumen-platform-celery-doc 2>&1 | grep -i otel
 - **`force_flush()` 内部已 swallow 异常**:shutdown 阶段 collector 已挂 / 网络断,`force_flush` 返 False 不抛,绝不阻断进程退出。详见 `lumen_core.otel.force_flush` docstring。
 - **`HTTPXClientInstrumentor` 自动 instrument 0 配置**:setup_tracing() 内部 `_instrument_httpx()` 已调,新 httpx client 不用任何 hooks。`X-Trace-Id` 仍兼容 (TraceIdMiddleware 写 ctxvar → `get_trace_id()` 兜底)。
 - **boto3 `proxies={}` 不影响 retries / signing**:botocore retries / signature_version / s3 addressing_style 全保留,只是不查 proxy。详见 `lumen_services/storage/s3_backend.py:_bypass_proxy_kwargs` docstring。
+
+---
+
+## 13. OTel Span-derived Metrics (Phase 1 Group B 4.4 Day 6, 2026-09-06)
+
+Day 4 ship 了 OTel trace pipeline,Day 5 ship 了 lifecycle + proxy 防御。Day 6 把每条 span **派生**到 Prometheus —— `lumen.span.events` Counter + `lumen.span.duration` Histogram,PromQL 一秒看到 "哪个 span 在某段时间内变慢 / 报错率上升",不用再翻上千个 trace。
+
+### 13.1 端到端启用
+
+跟 §11.2 一样的步骤:起 collector + 切 OTLP。Day 6 没新增配置,只是 OTLP 模式下 metric 自动启动(由 `lumen_core.otel._do_setup` 级联调 `lumen_core.otel_metrics.setup_metrics()`)。
+
+```bash
+# 1. 起 collector(同 §11.1)
+cd backend && docker compose up -d lumen-platform-otel-collector
+
+# 2. 切 backend 到 OTLP + 重启 uvicorn(同 §11.2)
+# backend/.env:
+#   OTEL_EXPORTER=otlp
+#   OTEL_ENDPOINT=http://localhost:4317
+#   OTEL_SAMPLE_RATIO=1.0
+# 改完重启 uvicorn
+
+# 3. 验证:uvicorn 启动 log 应有:
+# "OpenTelemetry metrics initialized: exporter=otlp endpoint=http://localhost:4317 service=lumen-backend env=dev"
+```
+
+### 13.2 验证 collector 收到 metric
+
+```bash
+# 1. OTel Collector :8889 暴露的 metric
+curl -s http://localhost:8889/metrics | grep lumen_span_events_total
+# 期望:lumen_span_events_total{...service_name="lumen-backend"...,span_name="chat.stream"} 1.0
+
+# 2. Prometheus 已 scrape 到(等 1 个 scrape_interval=15s)
+curl -s 'http://localhost:19090/api/v1/query?query=lumen_span_events_total' | python -m json.tool | head -30
+
+# 3. RPS PromQL(按 span_name 看请求速率)
+curl -sG 'http://localhost:19090/api/v1/query' \
+  --data-urlencode 'query=sum by (span_name) (rate(lumen_span_events_total{service_name="lumen-backend"}[5m]))' \
+  | python -m json.tool | head -30
+
+# 4. P95 延迟 PromQL
+curl -sG 'http://localhost:19090/api/v1/query' \
+  --data-urlencode 'query=histogram_quantile(0.95, sum by (span_name, le) (rate(lumen_span_duration_seconds_bucket{service_name="lumen-backend"}[5m])))' \
+  | python -m json.tool | head -30
+```
+
+### 13.3 跟 prometheus_client metric 的关系(互补,不替代)
+
+| 维度 | prometheus_client(`lumen_core.metrics`) | OTel span-derived(`lumen_core.otel_metrics`) |
+|------|------------------------------------------|--------------------------------------------|
+| 数据源 | 业务代码主动 `.inc()` / `.observe()` | OTel SDK 在 `SpanProcessor.on_end` 被动观察 |
+| 命名空间 | `lumen_llm_calls_total` / `lumen_embedding_duration_seconds` / `http_requests_total` | `lumen_span_events` / `lumen_span_duration` |
+| 何时启用 | uvicorn 启动 + `lumen_api/middleware/prometheus.py` 装好 | `OTEL_EXPORTER=otlp/otlp_grpc/otlp_http` 时启,console / none 不启 |
+| 关联能力 | 独立 PromQL,无法跟 trace_id 直接 join | 自动带 `service.name` / `trace_id` join,跟 Jaeger 同源 |
+| 典型用途 | 业务 KPI(LLM 调用次数、token 用量、SLO 预算) | 延迟分布(P50/P95/P99)、未知 span 排查、跨业务路径覆盖率 |
+| 总 series | < 50(prometheus_client 业务 metric + HTTP 中间件) | < 670(15 维 allowlist × 12 known span_name) |
+
+**为什么不替换**:两类数据源不同 — prometheus_client 是业务代码累计值,OTel 是被动观察 span 终态。新加的 OTel metric 是**补充**,不是替代。`http_requests_total` 仍由 `lumen_api/middleware/prometheus.py` 维护,`lumen_llm_calls_total` 仍走 prometheus_client。
+
+### 13.4 Cardinality 守门(防 series 爆炸)
+
+12 维 allowlist:`span.kind` / `http.request.method` / `http.response.status_code`(5 段分类) / `llm.call_kind` / `embedding.call_kind` / `chat.status` / `llm.status` / `retrieval.backend` / `retrieval.rerank_enabled` / `retrieval.has_filter` / `workflow.status` / `workflow.node.status` / `workflow.node.type` / `db.system` / `messaging.system`。
+
+**总 series 估算 < 670**(各 span 维度稀疏,workflow.node 最重 1×5×3×22=330,其他大多 < 50)。OTel SDK 默认 100K / Prometheus 建议 10K 都达标。
+
+**Span name 白名单**(`_KNOWN_SPAN_NAMES`,12 个):`chat.stream` / `chat.endpoint` / `embedding.generate` / `retrieval.search` / `workflow.run` / `workflow.node` / `llm.chat` / `http.client` / `http.server` / `celery.task` / `sqlalchemy.orm` / `pymysql.connect`。**白名单外的 span_name 自动 collapse 到 `"other"`**,防止业务方拼 typo 产生 cardinality 爆增。**新增 `@traced_span(name="...")` 时必须同步扩这个 frozenset**,否则会被 collapse。
+
+### 13.5 常见问题
+
+| 症状 | 排查 / 修法 |
+|------|------|
+| Collector `:8889/metrics` 没 `lumen_span_*` | (a) 没改 `OTEL_EXPORTER=otlp`;(b) uvicorn 没重启;(c) 启动 log 没 "OpenTelemetry metrics initialized"(失败 fallback 不抛) |
+| Prometheus 有 `lumen_span_*` 但全是 0 | uvicorn 启动了但没业务 span 流过。`curl /api/v1/health` 几次或发个 chat 请求,等 1 个 scrape_interval(15s) |
+| `span_name="other"` 大量出现 | 业务代码用了新的 `@traced_span(name=...)` 但没扩 `_KNOWN_SPAN_NAMES`(见 `lumen_core/otel_metrics.py`)。修:加进 frozenset 重启 |
+| `http.response.status_code="UNSET"` 大量出现 | span 是 client / internal 视角,没经过 FastAPI 入站,没 HTTP status。正常 — 仅 server span 该有 |
+| 测试时 `force_flush` 后 metric 没新增 | `InMemoryMetricReader` 走 `force_flush` 才会触发 aggregation。Python `for-loop` 直推数据用完就被 GC,要用 `meter.force_flush()` |
+| HTTPS_PROXY 警告刷屏 | 同 §12.3:unset `HTTPS_PROXY` / `GRPC_PROXY` env,或显式 `=""` |
+
+### 13.6 注意事项
+
+- **`PeriodicExportingMetricReader` 间隔 15s 对齐 Prometheus scrape_interval**:意味着最坏情况业务 span end 后要等 15s 才有 metric。Prometheus PromQL `rate()` / `histogram_quantile()` 默认查 5m 窗口,够用。**不要降间隔**(collector 压力大 + OTel exporter 不批量)。
+- **`shutdown_on_exit=False`**:`MeterProvider` 的 daemon thread 在 Python `atexit` 时会被强杀,跟 Day 5 batch span processor 同坑(强制关闭会丢最后几个 metric)。我们走 `lumen_main._shutdown_cleanup` + `_otel_atexit_flush` 主动 `force_flush`,不依赖 daemon 兜底。
+- **`force_flush(timeout_millis=5000)` 是兜底**:OTLP exporter 默认 2s timeout,5s 留 buffer 余量。atexit 阶段调一次用 `timeout_millis=3000`(短一点,atexit 进程在退出,不能阻塞太久)。
+- **`Counter` / `Histogram` lazy init**(per label_tuple):OTel SDK Counter 是 per-label 实例,需要 `dict[Tuple[Tuple[str, str], ...], Counter]` 索引;每个新 (label_tuple) 第一次 `create_counter` 一次性创建,后续复用。**不会重复创建**,但 series 数要看 label cardinality。
+- **新增 / 改名 span attribute**:如果加进 `_ALLOWED_LABEL_KEYS`,cardinality 影响跟现有维度等同;如果**不加**,会被静默丢弃,业务 span 的新 attribute 不会反映到 metric。决策看是否值得扩 cardinality 守门。
 
 ---
 

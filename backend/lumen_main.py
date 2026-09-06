@@ -221,9 +221,14 @@ if setup_tracing(
         from lumen_core.otel import force_flush as _otel_force_flush
 
         def _otel_atexit_flush() -> None:
-            """atexit 兜底 flush:进程退出前最后 push 一次 OTel buffered span。
+            """atexit 兜底 flush:进程退出前最后 push 一次 OTel buffered span
+            + metric。
 
-            force_flush 内部已 swallow 异常 + 返 False,这里不用 try/except 包。
+            Phase 1 Group B 4.4 Day 6 (2026-09-06):Day 6 起 ``otel.force_flush``
+            内部已串联 metric flush(SpanObserverMetricExporter → MeterProvider
+            reader 走同一 flush 路径),这里一次调用同时推 span + metric。
+
+            force_flush 内部已 swallow 异常 + 返 bool,这里不用 try/except 包。
             """
             _otel_force_flush(timeout_millis=3000)
 
@@ -409,6 +414,12 @@ async def _shutdown_cleanup(
     # 会丢最后 ~5s buffered span。OTel 官方推荐:shutdown 时 force_flush 把
     # 所有 buffered spans 一次性推给 collector,避免 trace 链尾端断尾。5s
     # timeout 对齐 OTLP gRPC exporter 默认值。
+    #
+    # Phase 1 Group B 4.4 Day 6 (2026-09-06):Day 6 起 ``otel.force_flush``
+    # 内部已串联 ``otel_metrics.force_flush``(SpanObserverMetricExporter
+    # → PeriodicExportingMetricReader → OTLPMetricExporter),所以同一次
+    # 调用同时推 buffered span + buffered metric。
+    #
     # 必须放在 engine.dispose() 之前:虽然本项目 span attribute 不引用 DB
     # session,但保留 flush-then-dispose 顺序作为通用约定,避免后续业务 span
     # 加 DB state 属性时漏改。force_flush 内部 swallow 异常 + 返 False,
