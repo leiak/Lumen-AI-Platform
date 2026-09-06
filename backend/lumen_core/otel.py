@@ -251,6 +251,18 @@ def _build_exporter(exporter_mode: str):
     """按 exporter_mode 返对应 SpanExporter 实例。
 
     失败抛异常(_do_setup catch 后转 logger.warning)。
+
+    **Phase 1 Group B 4.4 Day 5 (2026-09-06):HTTPS_PROXY 防御**:
+    OTLP gRPC exporter 内部走 grpc.insecure_channel,自动读 ``HTTPS_PROXY``
+    / ``GRPC_PROXY`` env 走代理。生产环境(proxy 出口) OTLP exporter 走
+    代理 → collector 后端看不到来源 IP,且增加一跳延迟。
+
+    当前 OTel SDK 1.36 没暴露 ``trust_env=False`` 参数给 OTLP gRPC exporter
+    (httpx 有),所以**项目层检测 + warn**,让运维在 deploy 时显式 disable
+    proxy。修法:export ``GRPC_PROXY=""`` 或 ``HTTPS_PROXY=""`` 在 lumen 进程
+    启动环境里(或不设这两个 env,默认不走代理)。
+
+    详见 ``docs/troubleshooting/dev-env.md §11 Jaeger + OTel Collector``。
     """
     from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 
@@ -258,6 +270,19 @@ def _build_exporter(exporter_mode: str):
         return ConsoleSpanExporter()
 
     if exporter_mode in ("otlp", "otlp_grpc"):
+        # Phase 1 Group B 4.4 Day 5: HTTPS_PROXY 检测。dev 本机可能没设
+        # proxy,但生产 / K8s 集群可能 export HTTPS_PROXY=http://proxy:8080,
+        # gRPC channel 会自动走代理,导致 OTLP 上报到 collector 走错路径。
+        if os.getenv("HTTPS_PROXY") or os.getenv("https_proxy") or os.getenv("GRPC_PROXY"):
+            logger.warning(
+                "HTTPS_PROXY/GRPC_PROXY env detected (value=%s/%s/%s); "
+                "OTLP gRPC exporter will route through proxy. To bypass, set "
+                "GRPC_PROXY=\"\" / HTTPS_PROXY=\"\" in the lumen process env.",
+                os.getenv("HTTPS_PROXY"),
+                os.getenv("https_proxy"),
+                os.getenv("GRPC_PROXY"),
+            )
+
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
             OTLPSpanExporter,
         )
@@ -340,6 +365,47 @@ def is_initialized() -> bool:
     return _initialized
 
 
+def force_flush(timeout_millis: int = 5000) -> bool:
+    """Phase 1 Group B 4.4 Day 5 (2026-09-06):强制 flush 当前 TracerProvider 的 buffered span。
+
+    **为什么需要**:``BatchSpanProcessor`` 默认 5s flush 间隔 —— uvicorn
+    收 SIGTERM / SIGINT 立刻退出时,最后 ~5s 的 span 还在 batch queue 里没
+    推走,直接丢失。OTel 官方推荐:shutdown 时显式 ``force_flush()`` 一次性
+    把 buffered spans 推到 collector / console exporter。
+
+    **调用方**:
+    - ``lumen_main._shutdown_cleanup()`` —— lifespan shutdown finally 块
+    - ``lumen_main._otel_atexit_flush()`` —— atexit 双保险兜底
+
+    **失败 swallow**:flush 失败(collector 已挂 / 网络断 / SDK 内部 NPE)
+    只返 False,不抛异常 —— shutdown 阶段已经要清理一堆资源,不让 OTel
+    阻断 process exit。返回 bool 让调用方记日志 / 决定是否需要 metrics。
+
+    **OTEL_EXPORTER=none 时** TracerProvider 是 ``ProxyTracerProvider``
+    无 ``force_flush`` 方法,这里 ``hasattr`` 检查 + 返 False,跟
+    ``setup_tracing()`` 返 False 的"未启用"语义对齐。
+
+    Args:
+        timeout_millis: 单次 flush 最大等待。5000 对齐 OTLP gRPC exporter
+            默认 5s timeout;atexit 调用方传 3000 避免阻塞进程退出太久。
+
+    Returns:
+        True if force_flush was called; False if not initialized / no-op
+        provider / exception raised (swallowed)。
+    """
+    try:
+        from opentelemetry import trace
+
+        provider = trace.get_tracer_provider()
+        if hasattr(provider, "force_flush"):
+            provider.force_flush(timeout_millis=timeout_millis)
+            return True
+        return False
+    except Exception as e:  # noqa: BLE001
+        logger.warning("OTel force_flush failed: %s", e)
+        return False
+
+
 def reset_for_test() -> None:
     """测试间隔离:清掉 global TracerProvider + httpx instrument。
 
@@ -402,6 +468,7 @@ __all__ = [
     "setup_tracing",
     "is_initialized",
     "reset_for_test",
+    "force_flush",
     "DEFAULT_SERVICE_NAME",
     "_build_sampler",
 ]

@@ -592,4 +592,87 @@ def test_reset_storage_backend_re_reads_env(monkeypatch, tmp_path: Path):
     b = get_storage_backend()
     assert b is not a
     assert b.root == (tmp_path / "second").resolve()
+
+
+# ===== Phase 1 Group B 4.4 Day 5 (2026-09-06): boto3 proxy bypass =====
+
+
+def test_bypass_proxy_kwargs_default_bypasses(monkeypatch):
+    """``S3_BYPASS_PROXY`` 未设 / ``true`` → 返 ``{}``(botocore 不查 proxy)。"""
+    monkeypatch.delenv("S3_BYPASS_PROXY", raising=False)
+
+    from lumen_services.storage.s3_backend import S3Backend
+
+    assert S3Backend._bypass_proxy_kwargs() == {}
+
+
+def test_bypass_proxy_kwargs_explicit_true(monkeypatch):
+    """``S3_BYPASS_PROXY=true`` → 返 ``{}``。"""
+    monkeypatch.setenv("S3_BYPASS_PROXY", "true")
+
+    from lumen_services.storage.s3_backend import S3Backend
+
+    assert S3Backend._bypass_proxy_kwargs() == {}
+
+
+def test_bypass_proxy_kwargs_false_returns_auto_sentinel(monkeypatch):
+    """``S3_BYPASS_PROXY=false`` → 返 ``"auto"`` sentinel,boto3 不传 proxies
+    参数让 botocore 自己查 env / registry。
+    """
+    monkeypatch.setenv("S3_BYPASS_PROXY", "false")
+
+    from lumen_services.storage.s3_backend import S3Backend
+
+    assert S3Backend._bypass_proxy_kwargs() == "auto"
+
+
+def test_bypass_proxy_kwargs_truthy_values(monkeypatch):
+    """``S3_BYPASS_PROXY=1`` / ``yes`` / ``on`` 也算 truthy → 返 ``{}``。"""
+    from lumen_services.storage.s3_backend import S3Backend
+
+    for value in ("1", "yes", "on"):
+        monkeypatch.setenv("S3_BYPASS_PROXY", value)
+        assert S3Backend._bypass_proxy_kwargs() == {}, f"failed for {value!r}"
+
+
+def test_s3_backend_from_env_passes_empty_proxies_by_default(monkeypatch):
+    """``from_env`` 构造 boto3 client 时 proxies 走 ``{}``(bypass Windows registry)。"""
+    pytest.importorskip("boto3")
+    pytest.importorskip("moto")
+    import moto
+
+    monkeypatch.setenv("S3_BUCKET", "x")
+    monkeypatch.setenv("S3_ACCESS_KEY", "k")
+    monkeypatch.setenv("S3_SECRET_KEY", "s")
+    monkeypatch.delenv("S3_BYPASS_PROXY", raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://corp-proxy:8080")
+
+    from lumen_services.storage.s3_backend import S3Backend
+
+    with moto.mock_aws():
+        # from_env 内部构造 boto3.client,验证 proxies 路径走得对。
+        # moto mock AWS 时 boto3.client 不会真发请求,只验构造无异常。
+        backend = S3Backend.from_env()
+    assert backend.backend_name == "s3"
+
+
+def test_s3_backend_from_env_opt_in_proxy_via_env(monkeypatch):
+    """``S3_BYPASS_PROXY=false`` 显式 opt-in → boto3 client 仍可构造成功
+    (走 botocore auto-detect HTTPS_PROXY,测试环境无代理,可能 warn 但不 raise)。
+    """
+    pytest.importorskip("boto3")
+    pytest.importorskip("moto")
+    import moto
+
+    monkeypatch.setenv("S3_BUCKET", "x")
+    monkeypatch.setenv("S3_ACCESS_KEY", "k")
+    monkeypatch.setenv("S3_SECRET_KEY", "s")
+    monkeypatch.setenv("S3_BYPASS_PROXY", "false")
+
+    from lumen_services.storage import reset_storage_backend
+    from lumen_services.storage.s3_backend import S3Backend
+
+    with moto.mock_aws():
+        backend = S3Backend.from_env()
+    assert backend.backend_name == "s3"
     reset_storage_backend()

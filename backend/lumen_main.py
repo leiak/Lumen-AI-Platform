@@ -203,6 +203,31 @@ if setup_tracing(
     # OTEL_EXPORTER=none 时不挂中间件,免得 FastAPIInstrumentor 报"NoOp tracer"
     # warning + 0 收益开销。
     FastAPIInstrumentor.instrument_app(app)
+    # Phase 1 Group B 4.4 Day 5 (2026-09-06): atexit 双保险 OTel flush。
+    # lifespan shutdown 已 force_flush(见 _shutdown_cleanup),但 SIGKILL
+    # (taskkill /F) / OOM 时 lifespan 根本不跑 —— 最后一批 span 必丢。
+    # atexit 在 Python 正常 interpreter exit 时触发(SIGTERM 走 graceful
+    # shutdown,atexit 仍触发;SIGKILL 跳过 atexit,但那场景任何机制都救不了)。
+    # force_flush 再兜底一次,3s timeout(短一点:atexit 阶段进程在退出,
+    # 不能阻塞太久)。
+    #
+    # 跳过 console exporter:console 写 stdout,pytest / uvicorn --reload 关闭
+    # 子进程时 sys.stdout 已 close,force_flush 内部 OTel SDK logger.exception
+    # 写 stderr 又失败,污染 pytest 退出日志。OTLP exporter 走网络 I/O,
+    # 不依赖 stdio,保留 atexit 价值。
+    _otel_exporter = (os.getenv("OTEL_EXPORTER") or "console").strip().lower()
+    if _otel_exporter not in ("none", "off", "", "noop", "disabled", "console"):
+        import atexit as _otel_atexit
+        from lumen_core.otel import force_flush as _otel_force_flush
+
+        def _otel_atexit_flush() -> None:
+            """atexit 兜底 flush:进程退出前最后 push 一次 OTel buffered span。
+
+            force_flush 内部已 swallow 异常 + 返 False,这里不用 try/except 包。
+            """
+            _otel_force_flush(timeout_millis=3000)
+
+        _otel_atexit.register(_otel_atexit_flush)
 
 # Phase 0 Unit 2 (2026-09-02):启动期标志。
 # K8s readiness / startup probe 用,/startup 返 503 表示 uvicorn 进程在
@@ -379,6 +404,18 @@ async def _shutdown_cleanup(
             _shutdown_logger.getLogger(__name__).warning(
                 "slo_budget_calculator shutdown error: %s", e,
             )
+    # Phase 1 Group B 4.4 Day 5 (2026-09-06): OTel BatchSpanProcessor 强制 flush。
+    # BatchSpanProcessor 默认 5s flush 间隔 —— uvicorn 收 SIGTERM 立刻退出
+    # 会丢最后 ~5s buffered span。OTel 官方推荐:shutdown 时 force_flush 把
+    # 所有 buffered spans 一次性推给 collector,避免 trace 链尾端断尾。5s
+    # timeout 对齐 OTLP gRPC exporter 默认值。
+    # 必须放在 engine.dispose() 之前:虽然本项目 span attribute 不引用 DB
+    # session,但保留 flush-then-dispose 顺序作为通用约定,避免后续业务 span
+    # 加 DB state 属性时漏改。force_flush 内部 swallow 异常 + 返 False,
+    # 这里不需 try/except 包。
+    from lumen_core.otel import force_flush
+
+    force_flush(timeout_millis=5000)
     # 关闭 SQLAlchemy 连接池,避免 taskkill / SIGTERM 后 MySQL 留 Sleep
     # 连接持 MDL 导致下个 uvicorn 启动时 ensure_* ALTER 卡 MDL 等候链
     # (2026-06-08 第 5 次重启时踩到,KILL 孤儿连接后才恢复)。

@@ -21,6 +21,7 @@
 | 兜底 | 全栈重启 | [§9 兜底](#9-兜底) |
 | MinIO | 端口冲突 / multipart 卡 / endpoint 504 | [§10 MinIO](#10-minio-m381-follow-up-2026-08-31) |
 | OTel | Jaeger 看不到 trace / collector 端口冲突 | [§11 Jaeger + OTel Collector](#11-jaeger--otel-collector-phase-1-group-b-44-day-4-2026-09-05) |
+| OTel lifecycle | 进程退出丢最后几个 span / W3C trace 链路 | [§12 OTel Lifecycle + Proxy Bypass](#12-otel-lifecycle--proxy-bypass-phase-1-group-b-44-day-5-2026-09-06) |
 
 ---
 
@@ -268,7 +269,7 @@ python -m scripts.bench_minio --doc-size 10MB --docs-per-tenant 20 --concurrency
 
 - **默认凭据 `minioadmin/minioadmin` 只用于 dev**。生产必须改 + 启用 MinIO KMS。
 - **`STORAGE_BACKEND` 运行时切换** 不支持(工厂是 singleton,改 env 必须重启 uvicorn)。
-- **`boto3` Windows registry proxy bypass** 未处理(参考 `httpx-proxy-bypass-2026-08-31.md`,production Linux `HTTPS_PROXY` 出去代理需要 follow-up)。
+- **`boto3` Windows registry proxy bypass** ✅ **Phase 1 Group B 4.4 Day 5 (2026-09-06) 已 ship**:`S3Backend._bypass_proxy_kwargs()` 默认 `S3_BYPASS_PROXY=true` 走 `proxies={}` 让 botocore 不查 Windows registry / `HTTPS_PROXY`。生产 / K8s 集群真要走代理,设 `S3_BYPASS_PROXY=false` 走 botocore auto-detect。详见 §12.3。
 
 ---
 
@@ -343,7 +344,110 @@ cd backend && python -m scripts.validate_otel_collector --send-test-span
 - **`docker compose restart` 不重读 `env_file`**(同 M27 easyocr / M38.1.x docker 修):改完 `backend/.env.docker.example` 必须 `docker compose up -d --force-recreate --no-deps celery_worker_doc celery_worker_ppt celery_worker_eval` 才生效。
 - **otel-collector 容器内存限 512MB**(dev OOM guard):突发流量超 50% 内存(256MB)时 memory_limiter 触发 spike 拒收。生产可调大或改用 K8s HPA。
 - **`OTEL_SAMPLE_RATIO` 在 dev 1.0 是设计选择**:调试阶段保留全量 trace 排查问题方便,prod 高流量场景**必须**降到 0.05~0.1,否则 collector / jaeger 内存爆炸。
-- **`boto3 Windows registry proxy bypass` 未处理**(同 §10 MinIO 注意事项):本机 dev 不影响,production Linux `HTTPS_PROXY` 出去代理需要 follow-up。
+- **`boto3` Windows registry proxy bypass** ✅ **Day 5 (2026-09-06) 已 ship**(详见 §12.3):`S3Backend.from_env()` 默认 `proxies={}` 让 botocore 不查 Windows registry。生产 Linux 出口代理场景设 `S3_BYPASS_PROXY=false` opt-in。
+
+---
+
+## 12. OTel Lifecycle + Proxy Bypass (Phase 1 Group B 4.4 Day 5, 2026-09-06)
+
+Day 4 ship 了 collector + Jaeger + Prometheus scrape 链路。Day 5 ship 4 个 follow-up,全是 "Day 4 跑通后才暴露的运维坑":进程退出丢最后几个 span / 自研 `X-Trace-Id` header 跟 OTel W3C `traceparent` 双写冲突 / boto3 走 Windows registry 代理 / OTLP exporter 走 Linux HTTPS_PROXY 出口。
+
+### 12.1 Shutdown flush 双保险 (uvicorn lifespan + atexit)
+
+**问题**:`BatchSpanProcessor` 默认 5s flush 间隔,uvicorn 收 SIGTERM 立刻退出时,buffered span 直接丢。Jaeger UI 上 trace tree 总是缺最后 ~5s 的叶子 span。
+
+**修法**(双保险):
+
+1. **lifespan shutdown finally 块** (`lumen_main._shutdown_cleanup`):`_shutdown_cleanup` 在 scheduler.stop + celery_queue_monitor.cancel + slo_budget_calculator.cancel 之后、`engine.dispose()` 之前,调 `lumen_core.otel.force_flush(timeout_millis=5000)`。5s 对齐 OTLP gRPC exporter 默认 timeout。
+2. **atexit 注册** (`lumen_main._otel_atexit_flush`):只在 `OTEL_EXPORTER` 是 OTLP exporter (非 `none` / `console`) 时注册。`console` exporter 写 stdout,pytest / uvicorn 子进程退出时 sys.stdout 已 close,SDK 内部 logger.exception 会再抛 stderr closed → 污染退出日志。OTLP 走网络 I/O,保留 atexit 价值。
+
+**为什么不在 flush 之前 engine.dispose()**:保留 flush-then-dispose 顺序作为通用约定,后续业务 span 加 DB state 属性时不用回头改顺序。
+
+**验证**:
+```bash
+# 起 collector + 切 OTLP(见 §11.2)+ 发请求 → Ctrl+C → 看 collector 最后几个 span 是否落盘
+cd backend && docker compose up -d lumen-platform-otel-collector lumen-platform-jaeger
+# 改 .env: OTEL_EXPORTER=otlp, 重启 uvicorn
+# curl /api/v1/health 几次 → Ctrl+C uvicorn → tail docker logs lumen-platform-otel-collector
+# 应该看到 otelcol_exporter_sent_spans{exporter="jaeger"} 计数含最后几个 span
+```
+
+### 12.2 `lumen_services.httpx_trace` deprecated (用 W3C traceparent)
+
+**问题**:Day 1 ship 的 `traced_event_hooks()` / `traced_async_event_hooks()` 给 httpx client 注入自研 `X-Trace-Id` header。Day 1 同时 ship 了 `HTTPXClientInstrumentor` 自动注 W3C `traceparent` header。两套机制并存,新代码不知道用哪套。
+
+**修法**:`lumen_services/httpx_trace.py` 全模块标 deprecated:
+- 模块 docstring 顶部写 `.. deprecated::` + 指向 HTTPXClientInstrumentor
+- `traced_event_hooks()` / `traced_async_event_hooks()` 各自 docstring 加 `.. deprecated::`
+- 调用方 import 时 `_warned_deprecation` 模块级守门,只发一次 `DeprecationWarning`,避免 pytest -W error 炸所有调用点
+
+**迁移**:
+```python
+# 旧(已 deprecated):
+from lumen_services.httpx_trace import traced_event_hooks
+client = httpx.Client(event_hooks=traced_event_hooks())
+
+# 新:什么都不用做,setup_tracing() 已 instrument httpx
+client = httpx.Client()  # 自动带 W3C traceparent
+```
+
+`X-Trace-Id` header 旧客户端不识别 `traceparent` 还能 join,删除 `httpx_trace` 后老 client 看不到 trace_id —— 不删,只标 deprecated。
+
+### 12.3 boto3 / OTLP HTTPS_PROXY 防御
+
+**问题**:
+- **boto3 (S3Backend)**: Windows registry `HKCU\...\Internet Settings\ProxyServer=127.0.0.1:10793` 默认被 botocore 读,直连 `localhost:29000` (MinIO) → 走代理 → 代理对 internal IP 无路由 → `ConnectionError`。
+- **OTLP gRPC exporter**: gRPC channel 自动读 `HTTPS_PROXY` / `GRPC_PROXY` env 走代理。生产 / K8s 集群 S3 endpoint 在代理后面的话,collector 看到的是代理 IP 不是 pod IP。
+
+**修法**:
+
+| 组件 | 函数 | 默认行为 | opt-in 代理 |
+|------|------|---------|------------|
+| boto3 (S3Backend) | `S3Backend._bypass_proxy_kwargs()` | 返 `{}`(botocore 不查 proxy) | `S3_BYPASS_PROXY=false` → "auto" sentinel,botocore 自己查 |
+| OTLP gRPC exporter | `_build_exporter("otlp")` | 检测 `HTTPS_PROXY` env,logger.warning 提醒 | `GRPC_PROXY=""` / `HTTPS_PROXY=""` 显式 unset |
+
+**生产 Linux 出口代理场景**: `lumen` 进程启动前:
+```bash
+unset HTTPS_PROXY
+unset GRPC_PROXY
+# 或者显式设空
+GRPC_PROXY="" HTTPS_PROXY="" uvicorn lumen_main:app ...
+```
+
+### 12.4 Celery worker trace 关联验证
+
+**踩坑**(跨进程 trace 链路最常见断点):
+
+celery worker 跟 uvicorn 进程不在同一 docker network / env,OTLP exporter 没装,导致 worker 看不到 uvicorn 的 trace —— Jaeger UI 上 worker task span 是孤立的,parent span 为空。
+
+**验证**:
+```bash
+# 1. celery 容器 env 必须有 OTEL_EXPORTER + OTEL_ENDPOINT
+docker exec lumen-platform-celery-doc env | grep -E "OTEL_"
+
+# 2. celery worker stdout 应有 "[otel] BatchSpanProcessor" 日志
+docker logs lumen-platform-celery-doc 2>&1 | grep -i otel
+
+# 3. 发个 KB 上传 → 看 Jaeger UI trace tree 应含 worker span 作为 child
+# (不是孤立 root span)
+```
+
+**修法**(若 1 不通过):celery container env 没 OTEL_*,改 `backend/.env.docker.example` + `docker compose up -d --force-recreate --no-deps celery_worker_doc celery_worker_ppt celery_worker_eval` 重建。
+
+### 12.5 常见问题
+
+| 症状 | 排查 / 修法 |
+|------|------|
+| uvicorn 退出后 Jaeger UI 上 trace 缺最后 ~5s | Day 5 双保险应已 ship。验:`lumen_main._shutdown_cleanup` 有 force_flush 调用、`lumen_main._otel_atexit_flush` 已 atexit 注册(OTLP 模式下)。dev console exporter 不发最后 5s 是已知行为(写 stdout,跟 pytest 退出冲突) |
+| Celery worker trace 是孤立 root span,parent 为空 | §12.4。celery 容器 OTEL env 缺失 |
+| MinIO 上传 `ConnectionError: 127.0.0.1:10793` | §12.3。`S3Backend` 默认 `proxies={}` 应已 ship,验 `_bypass_proxy_kwargs() == {}`。老 uvicorn 实例可能缓存了旧 S3Backend singleton,重启 11335 |
+| OTLP exporter 走代理 (Linux prod) | §12.3。unset `HTTPS_PROXY` / `GRPC_PROXY` 或显式 `=""` |
+
+### 12.6 注意事项
+
+- **`force_flush()` 内部已 swallow 异常**:shutdown 阶段 collector 已挂 / 网络断,`force_flush` 返 False 不抛,绝不阻断进程退出。详见 `lumen_core.otel.force_flush` docstring。
+- **`HTTPXClientInstrumentor` 自动 instrument 0 配置**:setup_tracing() 内部 `_instrument_httpx()` 已调,新 httpx client 不用任何 hooks。`X-Trace-Id` 仍兼容 (TraceIdMiddleware 写 ctxvar → `get_trace_id()` 兜底)。
+- **boto3 `proxies={}` 不影响 retries / signing**:botocore retries / signature_version / s3 addressing_style 全保留,只是不查 proxy。详见 `lumen_services/storage/s3_backend.py:_bypass_proxy_kwargs` docstring。
 
 ---
 

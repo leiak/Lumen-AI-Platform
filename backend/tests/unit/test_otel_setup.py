@@ -7,11 +7,15 @@
 - reset_for_test() 清干净 + 允许重新 setup
 - resource 属性从 env / 函数入参 / 默认值 3 层正确解析
 - _get_git_sha() 失败时返 None(不阻塞)
+- _build_sampler() 读 OTEL_SAMPLE_RATIO + 边界值(Day 4 ship)
+- force_flush() timeout 透传 + 异常 swallow(Day 5 ship)
 """
 import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -306,3 +310,164 @@ def test_build_sampler_setup_tracing_applies_sampler(monkeypatch):
 
     provider = trace.get_tracer_provider()
     assert provider.sampler is ALWAYS_OFF
+
+
+# ===== Phase 1 Group B 4.4 Day 5 (2026-09-06): force_flush =====
+
+
+def test_force_flush_calls_provider_with_timeout(monkeypatch):
+    """force_flush() 调当前 TracerProvider.force_flush(timeout_millis),返 True。
+
+    模拟 setup_tracing() 后的状态:TracerProvider 是有 force_flush 方法
+    的 SDK Provider(非 ProxyTracerProvider)。验证 timeout_millis 透传。
+    """
+    monkeypatch.setenv("OTEL_EXPORTER", "console")
+    otel.setup_tracing()
+
+    fake_provider = MagicMock()
+    fake_provider.force_flush = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "opentelemetry.trace.get_tracer_provider",
+        lambda: fake_provider,
+    )
+
+    result = otel.force_flush(timeout_millis=3000)
+
+    assert result is True
+    fake_provider.force_flush.assert_called_once_with(timeout_millis=3000)
+
+
+def test_force_flush_returns_false_when_provider_no_force_flush(monkeypatch):
+    """OTEL_EXPORTER=none 时 TracerProvider 是 ProxyTracerProvider 无
+    force_flush —— force_flush() 返 False,不抛。
+    """
+    fake_provider = MagicMock(spec=[])  # 无 force_flush 属性
+    monkeypatch.setattr(
+        "opentelemetry.trace.get_tracer_provider",
+        lambda: fake_provider,
+    )
+
+    result = otel.force_flush(timeout_millis=5000)
+
+    assert result is False
+
+
+def test_force_flush_swallows_provider_exception(monkeypatch):
+    """force_flush() 内部抛异常时 swallow,返 False,不向上传播。
+
+    兜底语义:shutdown / atexit 阶段绝不让 OTel flush 失败阻断进程退出。
+    """
+    fake_provider = MagicMock()
+    fake_provider.force_flush = MagicMock(
+        side_effect=RuntimeError("simulated collector unreachable"),
+    )
+    monkeypatch.setattr(
+        "opentelemetry.trace.get_tracer_provider",
+        lambda: fake_provider,
+    )
+
+    result = otel.force_flush(timeout_millis=5000)
+
+    assert result is False
+    fake_provider.force_flush.assert_called_once_with(timeout_millis=5000)
+
+
+def test_force_flush_swallows_get_tracer_provider_exception(monkeypatch):
+    """极端情况:get_tracer_provider() 自己抛异常 —— 仍 swallow,返 False。
+
+    不太可能发生(OTel 内部 stability 保证),但作为防御性兜底:
+    pytest 偶发环境问题 / monkeypatch 错配不该让测试本身挂。
+    """
+    def _raise():
+        raise RuntimeError("opentelemetry not installed")
+    monkeypatch.setattr(
+        "opentelemetry.trace.get_tracer_provider",
+        _raise,
+    )
+
+    result = otel.force_flush(timeout_millis=5000)
+
+    assert result is False
+
+
+def test_force_flush_default_timeout_is_5000ms(monkeypatch):
+    """force_flush() 不传 timeout_millis → 默认 5000(对齐 OTLP gRPC exporter)。"""
+    fake_provider = MagicMock()
+    fake_provider.force_flush = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "opentelemetry.trace.get_tracer_provider",
+        lambda: fake_provider,
+    )
+
+    otel.force_flush()
+
+    fake_provider.force_flush.assert_called_once_with(timeout_millis=5000)
+
+
+# ===== Phase 1 Group B 4.4 Day 5 (2026-09-06): HTTPS_PROXY 防御 =====
+
+
+def test_build_exporter_otlp_warns_when_https_proxy_set(monkeypatch, caplog):
+    """OTLP gRPC exporter 启动时检测到 HTTPS_PROXY env → logger.warning。
+
+    修法:export GRPC_PROXY="" / HTTPS_PROXY="" 禁用 proxy(OTel SDK 1.36
+    gRPC channel 没暴露 trust_env=False)。
+    """
+    import logging as _logging
+
+    monkeypatch.setenv("OTEL_EXPORTER", "otlp")
+    monkeypatch.setenv("OTEL_ENDPOINT", "http://collector:4317")
+    monkeypatch.setenv("HTTPS_PROXY", "http://corp-proxy:8080")
+
+    with caplog.at_level(_logging.WARNING, logger="lumen_core.otel"):
+        try:
+            otel._build_exporter("otlp")
+        except Exception:
+            # OTLPSpanExporter 实例化可能因 grpc lib 缺失抛错,
+            # 但我们只关心 proxy warning 已经发出
+            pass
+
+    # 验证 warning 出现
+    warnings = [r.message for r in caplog.records if r.levelno == _logging.WARNING]
+    assert any(
+        "HTTPS_PROXY" in msg or "proxy" in msg.lower() for msg in warnings
+    ), f"expected proxy warning, got: {warnings}"
+
+
+def test_build_exporter_otlp_no_warning_without_proxy(monkeypatch, caplog):
+    """无 proxy env → 不发 warning(避免 dev 本机污染日志)。"""
+    import logging as _logging
+
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.delenv("GRPC_PROXY", raising=False)
+    monkeypatch.setenv("OTEL_EXPORTER", "otlp")
+    monkeypatch.setenv("OTEL_ENDPOINT", "http://collector:4317")
+
+    with caplog.at_level(_logging.WARNING, logger="lumen_core.otel"):
+        try:
+            otel._build_exporter("otlp")
+        except Exception:
+            pass
+
+    proxy_warnings = [
+        r.message for r in caplog.records
+        if r.levelno == _logging.WARNING and "proxy" in r.message.lower()
+    ]
+    assert proxy_warnings == [], f"unexpected proxy warning: {proxy_warnings}"
+
+
+def test_build_exporter_console_no_proxy_check(monkeypatch, caplog):
+    """console exporter 不查 HTTPS_PROXY(写 stdout,跟 proxy 无关)。"""
+    import logging as _logging
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://corp-proxy:8080")
+
+    with caplog.at_level(_logging.WARNING, logger="lumen_core.otel"):
+        otel._build_exporter("console")
+
+    proxy_warnings = [
+        r.message for r in caplog.records
+        if r.levelno == _logging.WARNING and "proxy" in r.message.lower()
+    ]
+    assert proxy_warnings == [], f"console exporter shouldn't check proxy: {proxy_warnings}"

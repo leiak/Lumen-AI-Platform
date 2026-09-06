@@ -55,6 +55,27 @@ class S3Backend(StorageBackend):
 
     # -- factory --------------------------------------------------------
 
+    @staticmethod
+    def _bypass_proxy_kwargs() -> dict[str, object] | str:
+        """Phase 1 Group B 4.4 Day 5 (2026-09-06):boto3 proxy bypass 控制。
+
+        默认返 ``{}``(botocore "无 proxy" — 不查 Windows registry / HTTPS_PROXY)。
+        设 ``S3_BYPASS_PROXY=false`` 返 ``"auto"`` sentinel,让 BotoConfig 不传
+        ``proxies`` 参数,botocore 自己查 env / registry。
+
+        为什么 bypass 默认开:Windows registry ``HKCU\\...\\Internet Settings\\
+        ProxyServer`` 默认被 botocore 读,直连 localhost:29000 (MinIO) 会绕代理
+        失败(代理对 internal IP 无路由)。跟 httpx fix
+        ``_bypass_proxy_client_kwargs()`` 同语义。
+
+        为什么支持 opt-out:生产 / K8s 集群如果 S3 endpoint 在代理后面,显式
+        ``S3_BYPASS_PROXY=false`` 让 botocore 自己解析代理配置。
+        """
+        bypass = os.getenv("S3_BYPASS_PROXY", "true").strip().lower()
+        if bypass in {"0", "false", "no", "off"}:
+            return "auto"  # sentinel:不传 proxies 参数
+        return {}  # botocore "无 proxy"
+
     @classmethod
     def from_env(cls) -> "S3Backend":
         """Build from ``S3_*`` env vars. Raises
@@ -86,11 +107,25 @@ class S3Backend(StorageBackend):
                 "S3_ACCESS_KEY and S3_SECRET_KEY env vars are required"
             )
 
-        config = BotoConfig(
-            signature_version="s3v4",
-            s3={"addressing_style": "path" if path_style else "virtual"},
-            retries={"max_attempts": 3, "mode": "standard"},
-        )
+        config_kwargs: dict[str, object] = {
+            "signature_version": "s3v4",
+            "s3": {"addressing_style": "path" if path_style else "virtual"},
+            "retries": {"max_attempts": 3, "mode": "standard"},
+        }
+        # Phase 1 Group B 4.4 Day 5 (2026-09-06):boto3 proxy bypass。
+        # 默认 ``proxies={}`` 禁掉 Windows registry / ``HTTPS_PROXY``
+        # env 走的代理。S3 backend 目标是 MinIO (localhost:29000) 或
+        # AWS S3 直连,都不需要企业出口代理;走代理反而会让本地
+        # MinIO 连不上(代理对 internal IP 无路由)。
+        #
+        # 对应 httpx 修法(``model_loader._bypass_proxy_client_kwargs``
+        # → ``proxy=None, trust_env=False``),保持项目"内部 HTTP
+        # client 默认 bypass 代理"的一致语义。生产 / K8s 集群如果
+        # 真要走代理,设 ``S3_BYPASS_PROXY=false`` 走 botocore auto-detect。
+        proxy_mode = cls._bypass_proxy_kwargs()
+        if proxy_mode != "auto":
+            config_kwargs["proxies"] = proxy_mode
+        config = BotoConfig(**config_kwargs)
         client = boto3.client(
             "s3",
             endpoint_url=endpoint,
