@@ -23,6 +23,11 @@ from sqlalchemy.orm import Session
 from lumen_core.config import settings
 from lumen_models.external_app import ExternalVisitor
 
+# 2.1 C.10:token 签发写入 audit_logs 时用的 action 值。签发侧
+# (external/auth.py)写、统计侧(external_apps.py 的 /usage)读,常量共享
+# 避免字符串拼错 —— 那种 bug 不报错,只会让 token_issues_7d 静默恒为 0。
+TOKEN_ISSUED_ACTION = "external_app.token_issued"
+
 
 # ---------------------------------------------------------------------------
 # Origin matching

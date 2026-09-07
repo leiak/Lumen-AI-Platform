@@ -27,6 +27,8 @@ from lumen_schemas.external_apps import (
     ExternalAppCreate, ExternalAppUpdate,
     ExternalAppResponse, ExternalAppCreated, ExternalAppUsage,
 )
+from lumen_services.external_auth_service import TOKEN_ISSUED_ACTION
+from lumen_services.logging_service import AuditLog
 
 router = APIRouter(prefix="/external-apps", tags=["external-apps"])
 
@@ -258,11 +260,39 @@ async def get_usage(
     total_conversations = db.query(func.count(Conversation.id)).filter(
         Conversation.external_app_id == a.id,
     ).scalar() or 0
-    # token_issues_7d — not tracked in MVP; return 0 (TODO: add audit table)
+    # token_issues_7d / last_7d_daily: 从 audit_logs 真算(2.1 C.10)。
+    # /api/v1/external/auth/token 签发时写入 ``action=TOKEN_ISSUED_ACTION`` 的
+    # audit row,这里按 ``resource_id=str(a.id)`` 7d 窗口聚合。命中
+    # ``idx_audit_action_time(action, created_at)`` 索引,常数时间。
+    token_issues_7d = db.query(func.count(AuditLog.id)).filter(
+        AuditLog.action == TOKEN_ISSUED_ACTION,
+        AuditLog.resource_id == str(a.id),
+        AuditLog.created_at >= cutoff,
+    ).scalar() or 0
+    # 按 ``func.date(created_at)`` 分桶(MySQL DATE 函数)。返回的是
+    # (date_str, count) 元组列表,空桶补 0,旧 → 新 7 个槽对齐到 UTC 自然日。
+    today = datetime.utcnow().date()
+    day_buckets = {
+        (today - timedelta(days=i)).isoformat(): 0 for i in range(7)
+    }
+    for day_obj, count in db.query(
+        func.date(AuditLog.created_at).label("d"),
+        func.count(AuditLog.id).label("c"),
+    ).filter(
+        AuditLog.action == TOKEN_ISSUED_ACTION,
+        AuditLog.resource_id == str(a.id),
+        AuditLog.created_at >= cutoff,
+    ).group_by("d").all():
+        # MySQL DATE → Python datetime.date;用 isoformat 跟 dict key 对齐
+        day_key = day_obj.isoformat() if hasattr(day_obj, "isoformat") else str(day_obj)
+        if day_key in day_buckets:
+            day_buckets[day_key] = int(count)
+    # 按"最早 → 最新"排,正好 7 个槽
+    last_7d_daily = [day_buckets[(today - timedelta(days=i)).isoformat()] for i in range(6, -1, -1)]
     return SingleResponse(data=ExternalAppUsage(
         last_used_at=a.last_used_at.isoformat() if a.last_used_at else None,
         active_visitors_7d=active_visitors,
         total_conversations=total_conversations,
-        token_issues_7d=0,
-        last_7d_daily=[0] * 7,
+        token_issues_7d=int(token_issues_7d),
+        last_7d_daily=last_7d_daily,
     ))

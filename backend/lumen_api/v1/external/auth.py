@@ -29,6 +29,7 @@ import check_rate_limit, ...`` binds the function name at import time and
 would make the monkey-patch a silent no-op.
 
 """
+import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -44,6 +45,10 @@ from lumen_schemas.external import ExternalAgentKBRef, ExternalAgentSummary, Tok
 # IMPORTANT: import as a module (not as named symbols) so the rate-limit
 # monkey-patch in the test sees the patched function. See module docstring.
 from lumen_services import external_auth_service as auth_svc
+from lumen_services.external_auth_service import TOKEN_ISSUED_ACTION
+from lumen_services.logging_service import AuditLog
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -93,6 +98,22 @@ def issue_token(
 
     visitor = auth_svc.upsert_visitor(db, app.id, req.visitor_id)
     app.last_used_at = datetime.utcnow()
+    # 2.1 C.10:签发记录落 audit_logs,让 /external-apps/{id}/usage 的
+    # token_issues_7d 有真实数据源(之前写死 0)。跟 visitor upsert 同一个
+    # commit,不额外增加往返;写失败不该挡住 token 签发,所以吞掉异常。
+    try:
+        db.add(AuditLog(
+            tenant_id=app.tenant_id,
+            action=TOKEN_ISSUED_ACTION,
+            resource_type="external_app",
+            resource_id=str(app.id),
+            details={"visitor_id": visitor.id, "visitor_uuid": req.visitor_id},
+            ip_address=(request.client.host if request.client else None),
+            user_agent=(request.headers.get("user-agent") or None),
+            status="success",
+        ))
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("外部 token 签发审计写入失败 app_id=%s", app.id)
     db.commit()
     db.refresh(visitor)
 
