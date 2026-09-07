@@ -29,6 +29,7 @@
 """
 import sys
 import inspect
+from unittest.mock import patch
 
 import pytest
 
@@ -104,6 +105,43 @@ def test_celery_app_can_coexist_with_document_tasks_import():
     assert process_document_task.name == "process_document"
     # 任务注册到 celery_app.tasks(include 触发 import 后)
     assert "process_document" in celery_app.tasks
+
+
+def test_worker_shutdown_handler_flushes_otel():
+    """2.1 C.11 回归: celery worker 退出时必须 force_flush OTel buffered span。
+
+    之前 uvicorn 路径有 atexit + lifespan shutdown(Phase 1 ship),但 celery
+    worker 路径漏了 —— SIGTERM 收 worker 时最后 ~5s buffered span 全丢。
+    本测试用 mock 验证 ``_on_worker_shutdown`` 真的调 force_flush,带
+    timeout_millis=3000(shorter than uvicorn 的 5000,因为 worker 退出阶段
+    不应阻塞太久)。
+    """
+    from lumen_tasks import celery_app as celery_mod
+
+    assert hasattr(celery_mod, "_on_worker_shutdown"), (
+        "celery_app.py 必须定义 _on_worker_shutdown handler "
+        "(2.1 C.11 OTel force_flush on worker shutdown)"
+    )
+
+    # handler 在函数体内 lazy import force_flush,所以 patch target 是
+    # `lumen_core.otel.force_flush`,不是 celery_app 内部的本地引用。
+    with patch("lumen_core.otel.force_flush") as mock_flush:
+        celery_mod._on_worker_shutdown()
+        mock_flush.assert_called_once_with(timeout_millis=3000)
+
+
+def test_worker_shutdown_handler_swallows_force_flush_exceptions():
+    """shutdown 阶段不能抛 —— force_flush 内部虽然 swallow,但兜底再包一层
+    万一 import 或 attribute 出错也不能让 worker exit code != 0。
+    """
+    from lumen_tasks import celery_app as celery_mod
+
+    with patch(
+        "lumen_core.otel.force_flush",
+        side_effect=RuntimeError("simulated SDK bug"),
+    ):
+        # 不抛 → handler 内部 try/except 兜住
+        celery_mod._on_worker_shutdown()
 
 
 if __name__ == "__main__":

@@ -74,7 +74,7 @@ celery_app.conf.update(
 # 装在 celery_app module 顶部 import 时不会触发,只有 worker 进程 fork
 # 出来才会 emit worker_init —— 这跟 FastAPI startup_event 必须在 lifespan
 # 里跑同理(模块顶层 import 不等于 worker 启动)。
-from celery.signals import worker_init  # noqa: E402
+from celery.signals import worker_init, worker_shutdown  # noqa: E402
 
 
 @worker_init.connect
@@ -106,6 +106,35 @@ def _on_worker_init(**_kwargs) -> None:
 
     install_celery_signals()
     install_dlq_signal()
+
+
+@worker_shutdown.connect
+def _on_worker_shutdown(**_kwargs) -> None:
+    """worker 退出钩子:flush OTel buffered span / metric / log。
+
+    2.1 C.11 补的:之前 celery worker 收 SIGTERM / 正常 shutdown 时,BatchSpanProcessor
+    默认 5s flush 窗口里还没推走的 span 直接丢失 —— task 跑完 / 失败前的最后
+    几个关键 span 看不到。镜像 ``lumen_main._otel_atexit_flush`` 的语义,
+    force_flush 内部已 swallow 异常 + 串联 metric + log flush。
+
+    与 uvicorn 路径区别:
+    - uvicorn ``_otel_atexit_flush`` 跳过 console exporter(pytest 子进程
+      stdout 已 close,force_flush 写 stderr 失败污染 pytest 输出)。
+    - celery worker 没 pytest 噪音问题,console mode 也 flush —— worker
+      进程的 stdout 在 graceful exit 时仍可写,开发期 console 输出全丢很
+      不友好。
+    """
+    try:
+        from lumen_core.otel import force_flush as _otel_force_flush
+
+        _otel_force_flush(timeout_millis=3000)
+    except Exception:  # noqa: BLE001
+        # shutdown 阶段不能抛,吞掉所有异常让 worker 干净退出
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "celery worker_shutdown OTel force_flush 失败", exc_info=True,
+        )
 
 
 # Task registration 现在由 Celery 的 ``include`` 处理。worker 启动时
