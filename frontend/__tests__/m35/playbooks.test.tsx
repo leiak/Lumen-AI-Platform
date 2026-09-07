@@ -13,7 +13,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { TestWrapper } from "./test-utils";
-import { message } from "antd";
 
 const mockListPlaybooks = vi.fn();
 const mockGetPlaybook = vi.fn();
@@ -84,12 +83,6 @@ describe("PlaybooksPage", () => {
     mockImportPlaybookYaml.mockReset();
     // Default list -> empty
     mockListPlaybooks.mockResolvedValue(listResult([]));
-    // Stub App.useApp() message spy (the antd `message` module is what
-    // would be the fallback if App.useApp() is unavailable, which it
-    // isn't, but the spy keeps console clean).
-    vi.spyOn(message, "error").mockImplementation((() => ({})) as any);
-    vi.spyOn(message, "warning").mockImplementation((() => ({})) as any);
-    vi.spyOn(message, "success").mockImplementation((() => ({})) as any);
   });
 
   it("renders list rows and shows built-in tag + disables actions for built-ins", async () => {

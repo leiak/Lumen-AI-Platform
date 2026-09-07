@@ -3,7 +3,7 @@
 // uninstall happy path + error path.
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import { ConfigProvider, App, message } from "antd";
+import { ConfigProvider, App } from "antd";
 
 // Mock the services module so we don't hit the network.
 const mockListInstalled = vi.fn();
@@ -63,8 +63,6 @@ describe("InstalledSkillsPage", () => {
     mockUninstallSkill.mockReset();
     mockBatchUninstall.mockReset();  // M20
     mockPush.mockReset();
-    vi.spyOn(message, "success").mockImplementation((() => ({})) as any);
-    vi.spyOn(message, "error").mockImplementation((() => ({})) as any);
   });
 
   it("renders the empty state when no skills are installed", async () => {
