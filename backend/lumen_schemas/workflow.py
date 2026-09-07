@@ -49,6 +49,13 @@ class WorkflowResponse(WorkflowBase):
     tenant_id: int
     is_active: bool
     created_at: datetime
+    # M30d 2.0 (2026-09-07): echoed on every PUT so the designer's
+    # useAutoSave can send it back as the If-Match header on the next
+    # save. Without this field the frontend can never seed
+    # ``lastKnownUpdatedAt`` and the optimistic-lock guard stays
+    # inert — the backend then happily accepts concurrent last-write-wins
+    # clobbers instead of 409.
+    updated_at: Optional[datetime] = None
     # Canvas data the frontend designer paints. Typed as a free-form
     # dict (not ``WorkflowDefinition``) so any extra node-config keys
     # we add later don't get silently stripped by Pydantic. The DB
