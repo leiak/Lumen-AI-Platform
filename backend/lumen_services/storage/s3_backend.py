@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import BinaryIO, Dict, Iterator, Optional
 
 from .base import StorageBackend
+from lumen_core.boto3_bypass import boto3_bypass_proxy_kwargs
 
 # M38.1 follow-up (2026-08-31): 单次 PUT / multipart 自动分流的阈值(5 MiB)。
 # 与 S3 单次 PUT 上限 5 GB 的安全距离充足;5 MiB 也是 multipart part_size
@@ -59,15 +60,17 @@ class S3Backend(StorageBackend):
     @staticmethod
     def _bypass_proxy_kwargs() -> dict[str, object] | str:
         """Phase 1 Group B 4.4 Day 5 (2026-09-06):boto3 proxy bypass 控制。
+        2.1 C.2 (2026-09-07):统一走 ``lumen_core.boto3_bypass`` helper,跟
+        httpx_bypass 决策表对齐 —— env-aware,生产 HTTPS_PROXY 设了就走代理。
 
-        默认返 ``{}``(botocore "无 proxy" — 不查 Windows registry / HTTPS_PROXY)。
-        设 ``S3_BYPASS_PROXY=false`` 返 ``"auto"`` sentinel,让 BotoConfig 不传
-        ``proxies`` 参数,botocore 自己查 env / registry。
-
-        为什么 bypass 默认开:Windows registry ``HKCU\\...\\Internet Settings\\
-        ProxyServer`` 默认被 botocore 读,直连 localhost:29000 (MinIO) 会绕代理
-        失败(代理对 internal IP 无路由)。跟 httpx fix
-        ``_bypass_proxy_client_kwargs()`` 同语义。
+        决策:
+        - 默认 (dev / 无 proxy env):返 ``{"proxies": {}}``(botocore "无 proxy"
+          — 不查 Windows registry / HTTPS_PROXY)。直连 MinIO / localhost:29000
+          必须 bypass,代理对 internal IP 无路由返回 502。
+        - 设了 ``HTTPS_PROXY`` / ``HTTP_PROXY`` env:返 ``{}`` sentinel,
+          BotoConfig 不传 ``proxies``,botocore 自己查 env。
+        - ``S3_BYPASS_PROXY=false``:显式 opt-out 走 auto(等同 env 有设)。
+        - ``LUMEN_FORCE_PROXY_BYPASS=1``:强制 bypass(无视 env,本地调试用)。
 
         为什么支持 opt-out:生产 / K8s 集群如果 S3 endpoint 在代理后面,显式
         ``S3_BYPASS_PROXY=false`` 让 botocore 自己解析代理配置。
@@ -75,7 +78,8 @@ class S3Backend(StorageBackend):
         bypass = os.getenv("S3_BYPASS_PROXY", "true").strip().lower()
         if bypass in {"0", "false", "no", "off"}:
             return "auto"  # sentinel:不传 proxies 参数
-        return {}  # botocore "无 proxy"
+        # 默认走 boto3_bypass 共享 helper(env-aware)
+        return boto3_bypass_proxy_kwargs()
 
     @classmethod
     def from_env(cls) -> "S3Backend":
