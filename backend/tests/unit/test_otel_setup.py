@@ -405,33 +405,74 @@ def test_force_flush_default_timeout_is_5000ms(monkeypatch):
 
 
 # ===== Phase 1 Group B 4.4 Day 5 (2026-09-06): HTTPS_PROXY 防御 =====
+# 2.0 A9.5 (2026-09-07) 升级:OTEL_EXPORTER_TRUST_ENV env 开关
+# (默认 false → 实际 bypass proxy env,不再仅 warn)
 
 
-def test_build_exporter_otlp_warns_when_https_proxy_set(monkeypatch, caplog):
-    """OTLP gRPC exporter 启动时检测到 HTTPS_PROXY env → logger.warning。
-
-    修法:export GRPC_PROXY="" / HTTPS_PROXY="" 禁用 proxy(OTel SDK 1.36
-    gRPC channel 没暴露 trust_env=False)。
+def test_build_exporter_otlp_bypasses_proxy_by_default(monkeypatch, caplog):
+    """2.0 A9.5:OTEL_EXPORTER_TRUST_ENV 默认 false → HTTPS_PROXY 静默
+    bypass(包成 _ProxyBypassSpanExporter),不再发 warning(避免 dev 本机
+    没设 proxy 时的 noise)。生产 / K8s 集群真要走代理需显式 opt-in。
     """
     import logging as _logging
 
     monkeypatch.setenv("OTEL_EXPORTER", "otlp")
     monkeypatch.setenv("OTEL_ENDPOINT", "http://collector:4317")
     monkeypatch.setenv("HTTPS_PROXY", "http://corp-proxy:8080")
+    monkeypatch.delenv("OTEL_EXPORTER_TRUST_ENV", raising=False)
 
     with caplog.at_level(_logging.WARNING, logger="lumen_core.otel"):
         try:
-            otel._build_exporter("otlp")
+            exporter = otel._build_exporter("otlp")
         except Exception:
             # OTLPSpanExporter 实例化可能因 grpc lib 缺失抛错,
-            # 但我们只关心 proxy warning 已经发出
-            pass
+            # 但我们只关心 wrapper 已经包好
+            return
 
-    # 验证 warning 出现
+    # 默认 bypass:返 _ProxyBypassSpanExporter 包装
+    assert isinstance(exporter, otel._ProxyBypassSpanExporter), (
+        f"default trust_env=false should wrap exporter, got {type(exporter)}"
+    )
+    assert exporter._enabled is True
+
+    # 验证无 proxy warning(dev 本机不应该被这条 noise 污染)
+    proxy_warnings = [
+        r.message for r in caplog.records
+        if r.levelno == _logging.WARNING and "proxy" in r.message.lower()
+    ]
+    assert proxy_warnings == [], (
+        f"bypass mode should be silent, got warnings: {proxy_warnings}"
+    )
+
+
+def test_build_exporter_otlp_warns_when_trust_env_true(monkeypatch, caplog):
+    """2.0 A9.5:OTEL_EXPORTER_TRUST_ENV=true + HTTPS_PROXY 显式 opt-in
+    走代理 → warning 提示 + 不包 wrapper(SDK 自己读 env)。
+    """
+    import logging as _logging
+
+    monkeypatch.setenv("OTEL_EXPORTER", "otlp")
+    monkeypatch.setenv("OTEL_ENDPOINT", "http://collector:4317")
+    monkeypatch.setenv("HTTPS_PROXY", "http://corp-proxy:8080")
+    monkeypatch.setenv("OTEL_EXPORTER_TRUST_ENV", "true")
+
+    with caplog.at_level(_logging.WARNING, logger="lumen_core.otel"):
+        try:
+            exporter = otel._build_exporter("otlp")
+        except Exception:
+            return
+
+    # 验证 warning 出现(运维显式 opt-in 走代理,提醒一下)
     warnings = [r.message for r in caplog.records if r.levelno == _logging.WARNING]
     assert any(
         "HTTPS_PROXY" in msg or "proxy" in msg.lower() for msg in warnings
     ), f"expected proxy warning, got: {warnings}"
+
+    # trust_env=true → 不包 wrapper(SDK 走原 exporter)
+    if isinstance(exporter, otel._ProxyBypassSpanExporter):
+        assert exporter._enabled is False, (
+            "trust_env=true should produce disabled wrapper or no wrapper"
+        )
 
 
 def test_build_exporter_otlp_no_warning_without_proxy(monkeypatch, caplog):
@@ -471,3 +512,148 @@ def test_build_exporter_console_no_proxy_check(monkeypatch, caplog):
         if r.levelno == _logging.WARNING and "proxy" in r.message.lower()
     ]
     assert proxy_warnings == [], f"console exporter shouldn't check proxy: {proxy_warnings}"
+
+
+# ===== 2.0 A9.5 (2026-09-07): OTEL_EXPORTER_TRUST_ENV env 解析 + bypass context =====
+
+
+def test_otlp_trust_env_default_false(monkeypatch):
+    """未设 OTEL_EXPORTER_TRUST_ENV → 默认 false(同 S3_BYPASS_PROXY 默认行为)。"""
+    monkeypatch.delenv("OTEL_EXPORTER_TRUST_ENV", raising=False)
+    assert otel._otlp_trust_env_enabled() is False
+
+
+def test_otlp_trust_env_explicit_true(monkeypatch):
+    """OTEL_EXPORTER_TRUST_ENV=true → 返 True(走原行为)。"""
+    monkeypatch.setenv("OTEL_EXPORTER_TRUST_ENV", "true")
+    assert otel._otlp_trust_env_enabled() is True
+
+
+def test_otlp_trust_env_alias_yes_on_1(monkeypatch):
+    """yes / on / 1 都视作 True(统一 truthy 解析模式,跟 OTLP sample 一致)。"""
+    for v in ("yes", "on", "1", "True", "TRUE"):
+        monkeypatch.setenv("OTEL_EXPORTER_TRUST_ENV", v)
+        assert otel._otlp_trust_env_enabled() is True, f"failed for {v!r}"
+
+
+def test_otlp_trust_env_alias_no_off_0(monkeypatch):
+    """no / off / 0 都视作 False(显式 opt-out)。"""
+    for v in ("no", "off", "0", "False", "FALSE"):
+        monkeypatch.setenv("OTEL_EXPORTER_TRUST_ENV", v)
+        assert otel._otlp_trust_env_enabled() is False, f"failed for {v!r}"
+
+
+def test_otlp_trust_env_invalid_falls_back_to_false(monkeypatch, caplog):
+    """非真值字符串(abc / 2 / random)→ fallback false + warning,绝不让 setup 挂。"""
+    import logging as _logging
+
+    monkeypatch.setenv("OTEL_EXPORTER_TRUST_ENV", "abc")
+    with caplog.at_level(_logging.WARNING, logger="lumen_core.otel"):
+        result = otel._otlp_trust_env_enabled()
+    assert result is False
+    assert any(
+        "OTEL_EXPORTER_TRUST_ENV" in r.message for r in caplog.records
+    ), f"expected warning, got: {[r.message for r in caplog.records]}"
+
+
+def test_otlp_proxy_bypass_context_unsets_env(monkeypatch):
+    """bypass context 进入时 HTTPS_PROXY / https_proxy / GRPC_PROXY 全部
+    pop,退出时原值恢复(同 finally 模式,即使内部抛异常也保证恢复)。
+    """
+    monkeypatch.setenv("HTTPS_PROXY", "http://corp:8080")
+    monkeypatch.setenv("https_proxy", "http://corp:8080")
+    monkeypatch.setenv("GRPC_PROXY", "http://corp:8080")
+    monkeypatch.delenv("NO_PROXY", raising=False)  # 无关 env 不动
+
+    with otel._otlp_proxy_bypass_context():
+        assert "HTTPS_PROXY" not in os.environ
+        assert "https_proxy" not in os.environ
+        assert "GRPC_PROXY" not in os.environ
+
+    # 退出后恢复
+    assert os.environ["HTTPS_PROXY"] == "http://corp:8080"
+    assert os.environ["https_proxy"] == "http://corp:8080"
+    assert os.environ["GRPC_PROXY"] == "http://corp:8080"
+
+
+def test_otlp_proxy_bypass_context_restores_on_exception(monkeypatch):
+    """context 内部 raise 时 env 仍恢复(绝不让 bypass leak 到后续代码)。"""
+    monkeypatch.setenv("HTTPS_PROXY", "http://corp:8080")
+
+    try:
+        with otel._otlp_proxy_bypass_context():
+            assert "HTTPS_PROXY" not in os.environ
+            raise RuntimeError("simulated export failure")
+    except RuntimeError:
+        pass
+
+    # 异常后 env 仍恢复
+    assert os.environ.get("HTTPS_PROXY") == "http://corp:8080", (
+        "bypass context must restore env even on exception"
+    )
+
+
+def test_otlp_proxy_bypass_context_no_env_set_is_noop(monkeypatch):
+    """未设 proxy env 时 bypass context 是 noop(不抛、不留 stale state)。"""
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.delenv("GRPC_PROXY", raising=False)
+
+    with otel._otlp_proxy_bypass_context():
+        # 内部状态应为空
+        pass
+    # 退出后 env 仍 unset
+    assert "HTTPS_PROXY" not in os.environ
+    assert "https_proxy" not in os.environ
+    assert "GRPC_PROXY" not in os.environ
+
+
+def test_proxy_bypass_exporter_export_unsets_env(monkeypatch):
+    """_ProxyBypassSpanExporter.export 调用时临时 unset proxy env,
+    调用后恢复;inner export 被调用过即可(duck-type verify)。
+    """
+    monkeypatch.setenv("HTTPS_PROXY", "http://corp:8080")
+
+    captured: dict = {}
+
+    class _FakeExporter:
+        def export(self, spans):
+            # export 调用瞬间,proxy env 应该被 unset
+            captured["inside"] = "HTTPS_PROXY" not in os.environ
+            return None
+
+        def shutdown(self):
+            pass
+
+        def force_flush(self, timeout_millis=30000):
+            return True
+
+    wrapper = otel._ProxyBypassSpanExporter(_FakeExporter(), enabled=True)
+    wrapper.export([])
+
+    assert captured["inside"] is True
+    # export 返回后恢复
+    assert os.environ["HTTPS_PROXY"] == "http://corp:8080"
+
+
+def test_proxy_bypass_exporter_disabled_passthrough(monkeypatch):
+    """enabled=False 走 trust_env=true 模式 → inner export 直接调,
+    proxy env 不动(让 SDK 走代理)。
+    """
+    monkeypatch.setenv("HTTPS_PROXY", "http://corp:8080")
+
+    captured: dict = {}
+
+    class _FakeExporter:
+        def export(self, spans):
+            captured["inside"] = "HTTPS_PROXY" in os.environ
+            return None
+
+        def shutdown(self):
+            pass
+
+    wrapper = otel._ProxyBypassSpanExporter(_FakeExporter(), enabled=False)
+    wrapper.export([])
+
+    assert captured["inside"] is True
+    assert os.environ["HTTPS_PROXY"] == "http://corp:8080"

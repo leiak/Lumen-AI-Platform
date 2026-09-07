@@ -29,6 +29,11 @@ OTel SDK + instrumentation 直接补这 3 块。
   - ``OTEL_SAMPLE_RATIO``: 0.0~1.0 root span 采样比例。0.0 / 1.0 边界
     走 ``ALWAYS_OFF`` / ``ALWAYS_ON`` 避开 ``TraceIdRatioBased`` ratio
     arg 报错(Day 4 ship)。
+  - ``OTEL_EXPORTER_TRUST_ENV``: 2.0 A9.5 新加(默认 ``false``)。``false`` 时
+    OTLP exporter 实际发起 export 时临时 unset ``HTTPS_PROXY`` /
+    ``https_proxy`` / ``GRPC_PROXY`` env(出口代理对 collector 内网 IP
+    无路由,跟 boto3 ``S3_BYPASS_PROXY`` 同模式);``true`` 时让 OTel SDK
+    沿用进程 proxy 设置。生产 / K8s 集群显式设 ``true`` 走代理。
   - ``DEPLOYMENT_ENV``: ``dev`` / ``staging`` / ``prod``(默认 ``dev``)
 
 **踩坑**:
@@ -36,9 +41,8 @@ OTel SDK + instrumentation 直接补这 3 块。
   ``_initialized`` 守门避免
 - ``BatchSpanProcessor`` 在 uvicorn shutdown 时未 flush 可能丢最后几个
   span;Phase 1 Day 5 末尾加 atexit / lifespan shutdown flush
-- 旧 ``lumen_services.httpx_trace`` 模块 + ``HTTPXClientInstrumentor`` 双
-  写 ``X-Trace-Id`` / ``traceparent`` header;两者不冲突(不同 header 名),
-  但 Day 5 计划把 ``httpx_trace`` 标 deprecated(已 ship 代码保留兼容)
+- 2.0 起 ``lumen_services.httpx_trace`` 模块删除(A9.1),统一走
+  ``HTTPXClientInstrumentor`` 自动 W3C ``traceparent``
 - ``OTEL_SAMPLE_RATIO`` 写 ``"1"`` / ``"1.0"`` / ``"0.05"`` 都接受,但
   ``"abc"`` 这种非数字 fallback 1.0 + logger.warning,绝不让 SDK 崩
 """
@@ -47,7 +51,8 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import Optional
+from contextlib import contextmanager
+from typing import Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +62,13 @@ _initialized: bool = False
 _init_lock = threading.Lock()
 
 DEFAULT_SERVICE_NAME = "lumen-backend"
+
+# 2.0 A9.5 (2026-09-07):OTLP exporter 在发起 export 之前要读的 proxy env 名单。
+# gRPC channel 读 ``GRPC_PROXY``,HTTP exporter 内部走 ``requests`` 读
+# ``HTTPS_PROXY`` / ``https_proxy``。临时 unset 这 3 个 env 即对 SDK 等价于
+# ``trust_env=False``,绕开 Windows registry / 出口代理对 collector 内网 IP
+# 无路由的问题(同 S3_BYPASS_PROXY / httpx_bypass 同模式)。
+_PROXY_ENV_KEYS: tuple[str, ...] = ("HTTPS_PROXY", "https_proxy", "GRPC_PROXY")
 
 
 def setup_tracing(
@@ -286,10 +298,20 @@ def _build_exporter(exporter_mode: str):
     / ``GRPC_PROXY`` env 走代理。生产环境(proxy 出口) OTLP exporter 走
     代理 → collector 后端看不到来源 IP,且增加一跳延迟。
 
-    当前 OTel SDK 1.36 没暴露 ``trust_env=False`` 参数给 OTLP gRPC exporter
-    (httpx 有),所以**项目层检测 + warn**,让运维在 deploy 时显式 disable
-    proxy。修法:export ``GRPC_PROXY=""`` 或 ``HTTPS_PROXY=""`` 在 lumen 进程
-    启动环境里(或不设这两个 env,默认不走代理)。
+    **2.0 A9.5 (2026-09-07):OTEL_EXPORTER_TRUST_ENV env 开关**:
+    - 默认 ``false`` —— ``_otlp_proxy_bypass_context()`` 在每次 OTLP export
+      实际发起时临时 unset ``HTTPS_PROXY`` / ``https_proxy`` / ``GRPC_PROXY``
+      env,等价于对 SDK 设 ``trust_env=False``。Windows registry
+      ``HKCU\\...\\Internet Settings\\ProxyServer`` 跟 boto3 / httpx
+      同根因,unset env 不影响 Windows registry(registry 读取走
+      ``urllib.getproxies`` → WinHttp IE proxy),本 fix 主要解决
+      显式 export 的 ``HTTPS_PROXY`` / ``GRPC_PROXY`` env。
+    - ``OTEL_EXPORTER_TRUST_ENV=true`` —— 走传统行为(检测到 env 就 warning,
+      不 unset)。生产 / K8s 集群显式 opt-in 走代理。
+
+    **OTel SDK 1.36 没暴露 trust_env 参数给 OTLP exporter**(httpx 有),所以
+    走 env 临时 unset 模式:BatchSpanProcessor 调 export 时,我们的 wrapper
+    在那一刻 unproxy,export 返回后恢复 env。这影响 gRPC + HTTP 两个 exporter。
 
     详见 ``docs/troubleshooting/dev-env.md §11 Jaeger + OTel Collector``。
     """
@@ -298,20 +320,33 @@ def _build_exporter(exporter_mode: str):
     if exporter_mode == "console":
         return ConsoleSpanExporter()
 
-    if exporter_mode in ("otlp", "otlp_grpc"):
-        # Phase 1 Group B 4.4 Day 5: HTTPS_PROXY 检测。dev 本机可能没设
-        # proxy,但生产 / K8s 集群可能 export HTTPS_PROXY=http://proxy:8080,
-        # gRPC channel 会自动走代理,导致 OTLP 上报到 collector 走错路径。
-        if os.getenv("HTTPS_PROXY") or os.getenv("https_proxy") or os.getenv("GRPC_PROXY"):
-            logger.warning(
-                "HTTPS_PROXY/GRPC_PROXY env detected (value=%s/%s/%s); "
-                "OTLP gRPC exporter will route through proxy. To bypass, set "
-                "GRPC_PROXY=\"\" / HTTPS_PROXY=\"\" in the lumen process env.",
-                os.getenv("HTTPS_PROXY"),
-                os.getenv("https_proxy"),
-                os.getenv("GRPC_PROXY"),
-            )
+    # 2.0 A9.5:用 wrapper 包住 OTLP exporter,export 调用时按 env 决定
+    # 是否临时 unset proxy env。console 模式写 stdout 不需要 wrapper。
+    trust_env = _otlp_trust_env_enabled()
+    if not trust_env:
+        exporter = _build_otlp_exporter_inner(exporter_mode)
+        return _ProxyBypassSpanExporter(exporter, enabled=True)
 
+    # trust_env=True:保留原行为(检测 + warning,运维自己设 GRPC_PROXY="" /
+    # HTTPS_PROXY="" disable)。
+    if _any_proxy_env_set():
+        logger.warning(
+            "OTEL_EXPORTER_TRUST_ENV=true and proxy env detected "
+            "(HTTPS_PROXY=%r https_proxy=%r GRPC_PROXY=%r); OTLP exporter will "
+            "route through the configured proxy.",
+            os.getenv("HTTPS_PROXY"),
+            os.getenv("https_proxy"),
+            os.getenv("GRPC_PROXY"),
+        )
+    return _build_otlp_exporter_inner(exporter_mode)
+
+
+def _build_otlp_exporter_inner(exporter_mode: str):
+    """Build the actual OTLP exporter (gRPC or HTTP). Inner helper
+    for :func:`_build_exporter` so the trust_env wrapper logic stays
+    in one place. Raises on import error (caller's setup_tracing
+    already wraps with try/except)."""
+    if exporter_mode in ("otlp", "otlp_grpc"):
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
             OTLPSpanExporter,
         )
@@ -335,9 +370,98 @@ def _build_exporter(exporter_mode: str):
         )
         return HTTPOTLPSpanExporter(endpoint=endpoint, timeout=2)
 
-    # 未知值兜底走 console + warning
-    logger.warning("Unknown OTEL_EXPORTER=%r,falling back to console", exporter_mode)
-    return ConsoleSpanExporter()
+    raise ValueError(f"not an OTLP exporter mode: {exporter_mode!r}")
+
+
+def _otlp_trust_env_enabled() -> bool:
+    """Phase 1 Group B 4.4 Day 5+ follow-up / 2.0 A9.5:读 ``OTEL_EXPORTER_TRUST_ENV`` env。
+
+    返回 True 时 OTLP exporter 走传统行为(检测 proxy env + warning,不动
+    env 状态);返回 False 时(默认)每次 export 调用临时 unset proxy env
+    实现 trust_env=False 等价语义。
+
+    Default ``false`` 跟 ``S3_BYPASS_PROXY`` / httpx bypass proxy 模式
+    一致:Windows registry 默认 proxy 对 collector / MinIO 这种 internal
+    IP 无路由,bypass 默认开;生产 / K8s 集群真要走代理显式 opt-in ``true``。
+    """
+    raw = os.getenv("OTEL_EXPORTER_TRUST_ENV", "false").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"", "0", "false", "no", "off"}:
+        return False
+    logger.warning(
+        "OTEL_EXPORTER_TRUST_ENV=%r invalid, falling back to false (bypass proxy)", raw,
+    )
+    return False
+
+
+def _any_proxy_env_set() -> bool:
+    """Any of ``HTTPS_PROXY`` / ``https_proxy`` / ``GRPC_PROXY`` set?"""
+    return any(os.getenv(k) for k in _PROXY_ENV_KEYS)
+
+
+@contextmanager
+def _otlp_proxy_bypass_context() -> Iterator[None]:
+    """临时 unset ``HTTPS_PROXY`` / ``https_proxy`` / ``GRPC_PROXY`` env 的
+    上下文管理器。SDK 在 with 块内发起 export 不会读这些 env → 等价
+    ``trust_env=False``。with 退出时恢复原值,不影响同进程其他模块。
+
+    跟 :class:`_ProxyBypassSpanExporter` 配对:wrapper 在 export() 入口
+    进 context,出口退 context。即使 export 抛异常,contextmanager
+    保证 env 恢复(否则后续代码会"看到"env 被改,污染全局状态)。
+    """
+    saved: dict[str, Optional[str]] = {}
+    for key in _PROXY_ENV_KEYS:
+        if key in os.environ:
+            saved[key] = os.environ.pop(key)
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            os.environ[key] = value
+
+
+class _ProxyBypassSpanExporter:
+    """SpanExporter 包装层:export 调底层 exporter 时进
+    :func:`_otlp_proxy_bypass_context` 实现 trust_env=False 等价语义。
+
+    为什么不直接传 trust_env=False 给 OTLPSpanExporter:
+    - 当前 OTel SDK 1.36 的 OTLPSpanExporter(gRPC / HTTP)都没暴露
+      trust_env 参数(gRPC channel 自动读 GRPC_PROXY env,HTTP 走
+      requests 读 HTTPS_PROXY env)
+    - 走 wrapper 一次性解决两个 exporter,SDK 升级时只删 wrapper 即可
+
+    跟 ``_emit_deprecation_warning`` 同样的模式:ProcessPoolExecutor
+    里 httpx 看到 trust_env=False,gRPC 看到我们 unset env 后再
+    channel,行为对齐。
+
+    shim() 方法必须有,因为 OTel SDK SpanExporter 是 ABC;我们走
+    duck-typing 而非继承(避免 SDK 升级 ABI 变化),但保留 __class__
+    让 ``isinstance(exporter, _ProxyBypassSpanExporter)`` 仍可用。
+    """
+
+    def __init__(self, inner, enabled: bool) -> None:
+        self._inner = inner
+        self._enabled = enabled
+
+    def export(self, spans):  # type: ignore[no-untyped-def]
+        if not self._enabled:
+            return self._inner.export(spans)
+        with _otlp_proxy_bypass_context():
+            return self._inner.export(spans)
+
+    def shutdown(self) -> None:
+        return self._inner.shutdown()
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:  # type: ignore[no-untyped-def]
+        if not self._enabled:
+            return self._inner.force_flush(timeout_millis=timeout_millis)
+        with _otlp_proxy_bypass_context():
+            return self._inner.force_flush(timeout_millis=timeout_millis)
+
+    def __getattr__(self, name: str):
+        # Forward unknown attrs (eg. ``_class__``, ``__repr__``) to inner.
+        return getattr(self._inner, name)
 
 
 def _build_sampler():
@@ -565,6 +689,9 @@ __all__ = [
     "_build_sampler",
     "_build_metric_mode",
     "_build_log_mode",
+    "_otlp_trust_env_enabled",
+    "_otlp_proxy_bypass_context",
+    "_ProxyBypassSpanExporter",
 ]
 
 
