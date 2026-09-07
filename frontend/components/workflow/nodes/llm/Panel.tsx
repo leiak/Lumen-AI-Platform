@@ -161,7 +161,7 @@ export function LLMPanel({ node, nodes, edges, onChange }: PanelProps) {
               mode="multiple"
               allowClear
               virtual={false}
-              placeholder="从已装技能中选择(最多5个)"
+              placeholder="从本租户已装技能中选择(最多5个)"
               value={cfg.skill_ids || []}
               onChange={(v) => update({ skill_ids: (v as number[]).slice(0, 5) })}
               options={installedOptions}

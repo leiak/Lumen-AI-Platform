@@ -130,7 +130,9 @@ describe("LLMPanel — skill picker", () => {
       { wrapper: TestWrapper }
     );
     await waitFor(() => {
-      expect(screen.getByText("从本租户已装技能中选择")).toBeTruthy();
+      // 用正则做前缀匹配:placeholder 末尾还带「(最多5个)」上限提示,
+      // 精确字符串断言会随提示文案变动而失效。
+      expect(screen.getByText(/从本租户已装技能中选择/)).toBeTruthy();
     });
   });
 });
