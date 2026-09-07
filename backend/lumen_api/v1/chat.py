@@ -687,7 +687,9 @@ async def delete_conversation(
 ):
     """Soft-delete a conversation. Sets deleted_at; row preserved for future restore.
 
-    TODO(future): add scheduled job to hard-delete rows where deleted_at < utcnow() - 30d
+    2.1 C.1: hard-delete 由 ``lumen_services.chat_retention.purge_old_chat_conversations``
+    cron job 每天 02:37 跑,30d 窗口。audit_logs / llm_call_logs /
+    embedding_call_logs 的 conversation_id 引用同时 NULL out(避免 orphan reference)。
     TODO(future): consider clearing MemoryService entries for this conv (out of scope here)
     """
     conv = verify_conversation(conv_id, current_user, db)

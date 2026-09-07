@@ -622,6 +622,12 @@ async def _lifespan(app: FastAPI):
         # at 02:17 (hard) and 02:27 (soft) per the M27 spec.
         from lumen_services.retention_scheduler import register_retention_jobs
         register_retention_jobs()
+        # 2.1 C.1: register chat retention cron job on the SAME scheduler.
+        # 30d 窗口 hard-delete soft-deleted conversations,audit_logs /
+        # llm_call_logs / embedding_call_logs 的 conversation_id 引用同时
+        # NULL out。每 02:37 跑(避开 02:17 retention hard + 02:27 retention soft)。
+        from lumen_services.chat_retention_scheduler import register_chat_retention_jobs
+        register_chat_retention_jobs()
         import logging as _lifespan_logger
         _lifespan_logger.getLogger(__name__).info(
             "scheduler started (WORKER_RANK=%s RUN_SCHEDULER=%s)",
