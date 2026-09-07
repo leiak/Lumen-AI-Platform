@@ -1272,6 +1272,46 @@ def ensure_global_memories_conversation_id() -> None:
         )
 
 
+def ensure_messages_time_index() -> None:
+    """2.1 C.9: 为 ``messages`` 加复合索引 ``(conversation_id, created_at)``。
+
+    ``lumen_services.aggregate_service.tenant_user_growth`` 的
+    ``top_active_tenants`` 现在要真算每租户的 messages 数:
+
+        SELECT c.tenant_id, COUNT(m.id)
+        FROM messages m
+        JOIN conversations c ON c.id = m.conversation_id
+        WHERE c.tenant_id IN (...) AND m.created_at >= :since
+        GROUP BY c.tenant_id
+
+    已有 ``messages.conversation_id`` 单列索引,但没法在时间窗口过滤时用
+    index-only scan —— MySQL 拿到所有 messages for conversation 后还得
+    排序/filter created_at。复合索引 ``(conversation_id, created_at)`` 让
+    planner 一次走完 join + time filter,百万行 messages 表上从 O(n log n)
+    sort 降到 O(k) index seek。
+
+    **为什么不用 ``(tenant_id, conversation_id)``**(plan 文本里写的):
+    messages 表**没有 tenant_id 列**(tenant 信息在 conversations 上),
+    强行加 tenant_id 索引得冗余存 tenant 信息;而 conversations.tenant_id
+    单列索引 + 复合 ``(conversation_id, created_at)`` 已经足够 join + 过滤。
+
+    On any failure(MySQL MDL / 磁盘满),log + return,下次启动 retry。
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        with engine.begin() as conn:
+            if not _index_exists("messages", "idx_messages_conv_created"):
+                conn.execute(text(
+                    "CREATE INDEX idx_messages_conv_created "
+                    "ON messages (conversation_id, created_at)"
+                ))
+    except Exception:
+        logger.exception(
+            "ensure_messages_time_index failed; will retry on next startup"
+        )
+
+
 def ensure_marketplace_type_column() -> None:
     """M16 migration: add ``type`` and ``type_config`` columns to
     ``skill_marketplace``.

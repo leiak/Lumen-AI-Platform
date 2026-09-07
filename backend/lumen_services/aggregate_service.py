@@ -259,6 +259,7 @@ class AggregateService:
     def tenant_user_growth(self, window: timedelta) -> dict:
         from lumen_models.tenant import Tenant
         from lumen_models.user import User
+        from lumen_models.chat import Conversation, Message
         from lumen_services.logging_service import AuditLog
         from sqlalchemy import func
         from datetime import datetime
@@ -286,9 +287,34 @@ class AggregateService:
             .limit(5)
             .all()
         )
+
+        # 2.1 C.9: 真算每租户的 messages 数(同 since 窗口)。messages 表没
+        # tenant_id 列(tenant 在 conversations 上),所以走 JOIN。命中
+        # ``idx_messages_conv_created`` + ``conversations.tenant_id`` 复合。
+        # 之前 P1 写死 messages=None,dashboard 一直 0。
+        msg_by_tenant: dict[int, int] = {}
+        if top_rows:
+            tenant_ids = [r[0] for r in top_rows]
+            msg_rows = (
+                self.db.query(
+                    Conversation.tenant_id,
+                    func.count(Message.id).label("msg_c"),
+                )
+                .join(Message, Message.conversation_id == Conversation.id)
+                .filter(Conversation.tenant_id.in_(tenant_ids))
+                .filter(Message.created_at >= since)
+                .group_by(Conversation.tenant_id)
+                .all()
+            )
+            msg_by_tenant = {tid: int(c) for tid, c in msg_rows}
+
         top_active_tenants = [
-            # messages: None — chat message count not yet implemented, P1 uses audit_logs calls only
-            {"tenant_id": r[0], "calls": int(r[1]), "messages": None} for r in top_rows
+            {
+                "tenant_id": r[0],
+                "calls": int(r[1]),
+                "messages": msg_by_tenant.get(r[0], 0),
+            }
+            for r in top_rows
         ]
 
         return {

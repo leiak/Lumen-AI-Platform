@@ -35,6 +35,7 @@ from lumen_core.database import (
     ensure_model_configs_purpose_flags,
     ensure_embedding_model_config_migrated,
     ensure_global_memories_conversation_id,
+    ensure_messages_time_index,  # 2.1 C.9: aggregate_service Top active tenants 真算 messages
     ensure_marketplace_type_column,
     ensure_agent_kb_retrieval_config,  # M21
     ensure_model_configs_image_flag,  # M22
@@ -527,6 +528,7 @@ async def _lifespan(app: FastAPI):
     ensure_model_configs_purpose_flags()
     ensure_embedding_model_config_migrated()
     ensure_global_memories_conversation_id()
+    ensure_messages_time_index()  # 2.1 C.9: aggregate_service 真算 messages
     ensure_marketplace_type_column()
     ensure_agent_kb_retrieval_config()  # M21: agents.kb_retrieval_config
     ensure_model_configs_image_flag()  # M22: model_configs.is_image_generation
