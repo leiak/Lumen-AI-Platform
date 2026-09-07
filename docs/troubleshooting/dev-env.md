@@ -393,7 +393,7 @@ client = httpx.Client(event_hooks=traced_event_hooks())
 client = httpx.Client()  # 自动带 W3C traceparent
 ```
 
-`X-Trace-Id` header 旧客户端不识别 `traceparent` 还能 join,删除 `httpx_trace` 后老 client 看不到 trace_id —— 不删,只标 deprecated。
+`X-Trace-Id` header 旧客户端不识别 `traceparent` 还能 join —— 这是 2.0 之前的临时保留理由。2.0 起正式删除 `lumen_services/httpx_trace` 模块(2.0 release spec §A9.1):`HTTPXClientInstrumentor` 是 W3C Trace Context 规范,所有 httpx 客户端零配置就带 `traceparent`,自研 `X-Trace-Id` 旧客户端兼容性收益低于维护成本。**升级到 2.0 后**:如需 trace_id join,改用 W3C `traceparent` header。仓库内 `X-Trace-Id` 入站 header 仍由 `lumen_api/middleware/trace_id.py` 接受(向后兼容遗留 client),但出站 OTel 链路只写 `traceparent`。
 
 ### 12.3 boto3 / OTLP HTTPS_PROXY 防御
 
