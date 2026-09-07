@@ -15,6 +15,7 @@ Configuration is read from environment variables (see spec §4).
 """
 from __future__ import annotations
 
+import mimetypes
 import os
 import time
 from io import BytesIO
@@ -140,6 +141,21 @@ class S3Backend(StorageBackend):
 
     # -- interface ------------------------------------------------------
 
+    @staticmethod
+    def _effective_content_type(key: str, content_type: Optional[str]) -> Optional[str]:
+        """Resolve the ``ContentType`` header for an upload.
+
+        调用方显式传的 ``content_type`` 优先;没传时按对象 key 的扩展名
+        推断。不推断的话 S3 / MinIO 一律存成 ``binary/octet-stream``,
+        浏览器拿到 presigned URL 只会触发下载而不是 inline 预览 —— KB
+        文档预览、公众号素材缩略图、视频 ``<video>`` 播放都会退化。
+        推不出来时返回 ``None``,让 S3 用自己的默认值。
+        """
+        if content_type:
+            return content_type
+        guessed, _encoding = mimetypes.guess_type(key)
+        return guessed
+
     def put_object(
         self,
         key: str,
@@ -156,8 +172,9 @@ class S3Backend(StorageBackend):
                 safe, BytesIO(bytes(data)), content_type=content_type,
             )
         kwargs: Dict[str, object] = {"Bucket": self.bucket, "Key": safe, "Body": data}
-        if content_type:
-            kwargs["ContentType"] = content_type
+        effective_type = self._effective_content_type(safe, content_type)
+        if effective_type:
+            kwargs["ContentType"] = effective_type
         self.client.put_object(**kwargs)
         return f"s3://{self.bucket}/{safe}"
 
@@ -198,8 +215,9 @@ class S3Backend(StorageBackend):
         else:
             return self.put_object(safe, b"", content_type=content_type)
         create_kwargs: Dict[str, object] = {"Bucket": self.bucket, "Key": safe}
-        if content_type:
-            create_kwargs["ContentType"] = content_type
+        effective_type = self._effective_content_type(safe, content_type)
+        if effective_type:
+            create_kwargs["ContentType"] = effective_type
         create_resp = self.client.create_multipart_upload(**create_kwargs)
         upload_id = create_resp["UploadId"]
         parts: list = []

@@ -315,6 +315,60 @@ def test_s3_backend_put_object_multipart_aborts_on_failure(s3_backend, monkeypat
     assert "UploadId" in abort_kwargs
 
 
+# --- 5b. ContentType 推断(2.1 C.3) ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key,expected",
+    [
+        ("uploads/1/2/doc.pdf", "application/pdf"),
+        ("uploads/1/2/note.txt", "text/plain"),
+        ("uploads/1/2/pic.png", "image/png"),
+        ("uploads/1/2/pic.jpg", "image/jpeg"),
+        ("uploads/1/2/clip.mp4", "video/mp4"),
+    ],
+)
+def test_s3_backend_put_object_guesses_content_type(s3_backend, key, expected):
+    """单次 PUT 路径按扩展名推断 ContentType。
+
+    不推断的话 MinIO / S3 存成 binary/octet-stream,浏览器只会下载,
+    presigned URL 的 inline 预览失效。
+    """
+    s3_backend.put_object(key, b"payload")
+    head = s3_backend.client.head_object(Bucket=s3_backend.bucket, Key=key)
+    assert head["ContentType"] == expected
+
+
+def test_s3_backend_put_object_explicit_content_type_wins(s3_backend):
+    """调用方显式传的 content_type 优先于扩展名推断。"""
+    s3_backend.put_object(
+        "uploads/1/2/weird.txt", b"payload", content_type="application/json",
+    )
+    head = s3_backend.client.head_object(
+        Bucket=s3_backend.bucket, Key="uploads/1/2/weird.txt",
+    )
+    assert head["ContentType"] == "application/json"
+
+
+def test_s3_backend_put_object_unknown_extension_leaves_s3_default(s3_backend):
+    """推不出来时不传 ContentType,让 S3 用自己的默认值。"""
+    s3_backend.put_object("uploads/1/2/blob.lumenx", b"payload")
+    head = s3_backend.client.head_object(
+        Bucket=s3_backend.bucket, Key="uploads/1/2/blob.lumenx",
+    )
+    assert head["ContentType"] in {"binary/octet-stream", "application/octet-stream"}
+
+
+def test_s3_backend_multipart_guesses_content_type(s3_backend):
+    """multipart 路径同样推断 ContentType(≥ 5 MiB 的图片 / 视频最常见)。"""
+    payload = b"x" * (6 * 1024 * 1024)
+    s3_backend.put_object("uploads/1/2/movie.mp4", payload)
+    head = s3_backend.client.head_object(
+        Bucket=s3_backend.bucket, Key="uploads/1/2/movie.mp4",
+    )
+    assert head["ContentType"] == "video/mp4"
+
+
 # --- 6. list_objects (M38.1 follow-up 2026-08-31) --------------------------
 
 
