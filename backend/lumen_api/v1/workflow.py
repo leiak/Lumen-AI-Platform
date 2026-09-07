@@ -20,6 +20,7 @@ from lumen_schemas.workflow import (
 from lumen_schemas.common import SingleResponse, PaginatedResponse
 from lumen_services.workflow_service import WorkflowConflictError, WorkflowService
 from lumen_services.workflow_scheduler import get_scheduler_service
+from lumen_api.deprecation import mark_deprecated
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
 
@@ -316,7 +317,18 @@ async def cancel_run(
 
 # M30d: resume / retry. The new run uses the same input_data as the
 # original; the old run is left in its terminal state for audit.
-@router.post("/{workflow_id}/runs/{run_id}/resume", response_model=SingleResponse[WorkflowRunResponse])
+#
+# M30d 2.0 (2026-09-07): marked deprecated during the 2.0 compatibility
+# window. Use ``/continue`` for the smarter "skip completed nodes"
+# semantic. The Deprecation header is set via the dependency so the
+# signal is visible without any change to the endpoint body.
+@router.post(
+    "/{workflow_id}/runs/{run_id}/resume",
+    response_model=SingleResponse[WorkflowRunResponse],
+    dependencies=[
+        Depends(mark_deprecated("/workflows/{workflow_id}/runs/{run_id}/resume"))
+    ],
+)
 async def resume_run(
     workflow_id: int,
     run_id: int,
