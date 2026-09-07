@@ -8,13 +8,14 @@ from sqlalchemy.orm import Session
 from lumen_core.database import get_db
 from lumen_api.v1.auth import get_current_user
 from lumen_models.user import User
-from lumen_models.workflow import Workflow, WorkflowRun, WorkflowNodeRun, WorkflowSchedule
+from lumen_models.workflow import Workflow, WorkflowRun, WorkflowNodeRun, WorkflowSchedule, WorkflowVersion
 from lumen_schemas.workflow import (
     WorkflowCreate, WorkflowUpdate, WorkflowResponse,
     WorkflowRunRequest, WorkflowRunResponse,
     WorkflowNodeRunResponse,
     WorkflowScheduleCreate, WorkflowScheduleUpdate,
     WorkflowScheduleResponse,
+    WorkflowVersionRead,
 )
 from lumen_schemas.common import SingleResponse, PaginatedResponse
 from lumen_services.workflow_service import WorkflowService
@@ -382,6 +383,83 @@ async def list_run_node_runs(
     return SingleResponse(
         data=[WorkflowNodeRunResponse.model_validate(n) for n in node_runs]
     )
+
+
+# M30b 2.0 (2026-09-07): single run GET, used by /dashboard/workflow/runs/[id]
+# sub-page. The sub-page URL only carries the run_id, so we look the run
+# up across the caller's tenant by joining on Workflow.tenant_id. This
+# is a 3-line endpoint that the sub-page can hit directly without
+# knowing the parent workflow_id.
+@router.get("/runs/{run_id}", response_model=SingleResponse[WorkflowRunResponse])
+async def get_workflow_run(
+    run_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """M30b 2.0: fetch a single WorkflowRun by id, tenant-scoped via
+    its parent workflow. 404 if the run doesn't exist OR its workflow
+    doesn't belong to the caller.
+    """
+    run = (
+        db.query(WorkflowRun)
+        .join(Workflow, Workflow.id == WorkflowRun.workflow_id)
+        .filter(
+            WorkflowRun.id == run_id,
+            Workflow.tenant_id == current_user.tenant_id,
+        )
+        .first()
+    )
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return SingleResponse(data=WorkflowRunResponse.model_validate(run))
+
+
+# M30b 2.0 (2026-09-07): workflow definition version history. 2.0 ships
+# the schema + list endpoints; "保存即 version +1" 触发写入推迟到 2.1。
+# 读取路径足够给前端做一个 read-only 版本浏览器,版本之间的 diff 也
+# 用本 endpoint 提供的 definition_snapshot 即可。
+@router.get(
+    "/{workflow_id}/versions",
+    response_model=SingleResponse[List[WorkflowVersionRead]],
+)
+async def list_workflow_versions(
+    workflow_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List all version snapshots of a workflow, newest first.
+
+    Returns ``[]`` when the workflow is unknown to this tenant — the
+    404 is intentionally hidden behind the list to avoid leaking
+    workflow id existence across tenants.
+    """
+    service = WorkflowService()
+    rows = service.list_versions(db, workflow_id, current_user.tenant_id)
+    return SingleResponse(
+        data=[WorkflowVersionRead.model_validate(r) for r in rows]
+    )
+
+
+@router.get(
+    "/{workflow_id}/versions/{version_id}",
+    response_model=SingleResponse[WorkflowVersionRead],
+)
+async def get_workflow_version(
+    workflow_id: int,
+    version_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Fetch a single version snapshot. 404 when the workflow is
+    unknown OR the version id doesn't belong to it.
+    """
+    service = WorkflowService()
+    row = service.get_version(
+        db, workflow_id, version_id, current_user.tenant_id
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return SingleResponse(data=WorkflowVersionRead.model_validate(row))
 
 
 # Schedule endpoints

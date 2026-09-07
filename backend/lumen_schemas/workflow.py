@@ -97,6 +97,20 @@ class WorkflowNodeRunResponse(BaseModel):
         from_attributes = True
 
 
+# M30b 2.0: workflow version history (read-only in 2.0; write in 2.1).
+class WorkflowVersionRead(BaseModel):
+    id: int
+    workflow_id: int
+    version: int
+    definition_snapshot: Dict[str, Any]
+    change_summary: Optional[str] = None
+    created_by_user_id: Optional[int] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 # Schedule schemas
 class WorkflowScheduleBase(BaseModel):
     name: str

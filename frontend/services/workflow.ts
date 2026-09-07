@@ -37,7 +37,11 @@ export interface WorkflowRun {
   id: number;
   workflow_id: number;
   status: string;
-  trigger_source?: "manual" | "scheduled" | null;
+  // M30b / M30d 2.0 (2026-09-07): added "resume" + "continue" to the
+  // discriminator. ``resume`` is the legacy "retry with same inputs"
+  // semantic; ``continue`` is the new "skip completed nodes" path.
+  // Manual / scheduled are the original two from M30a.
+  trigger_source?: "manual" | "scheduled" | "resume" | "continue" | null;
   input_data?: Record<string, any>;
   output_data?: Record<string, any>;
   error_message?: string;
@@ -139,7 +143,31 @@ export const workflowApi = {
     api.get<ApiResponse<WorkflowNodeRun[]>>(
       `/workflows/${workflowId}/runs/${runId}/nodes`
     ),
+  // M30b 2.0 (2026-09-07): single run GET, used by /runs/[id] sub-page.
+  getRun: (runId: number) =>
+    api.get<ApiResponse<WorkflowRun>>(`/workflows/runs/${runId}`),
+  // M30b 2.0 (2026-09-07): workflow version history endpoints.
+  // 2.0 ships read-only — list + get single version. 2.1 will add
+  // the write trigger ("保存即 version +1") at the service layer.
+  listVersions: (workflowId: number) =>
+    api.get<ApiResponse<WorkflowVersion[]>>(`/workflows/${workflowId}/versions`),
+  getVersion: (workflowId: number, versionId: number) =>
+    api.get<ApiResponse<WorkflowVersion>>(
+      `/workflows/${workflowId}/versions/${versionId}`
+    ),
 };
+
+// M30b 2.0 (2026-09-07): workflow version row shape.
+// Mirrors backend `WorkflowVersionRead` (lumen_schemas/workflow.py:101-110).
+export interface WorkflowVersion {
+  id: number;
+  workflow_id: number;
+  version: number;
+  definition_snapshot: { nodes: any[]; edges: any[] };
+  change_summary?: string | null;
+  created_by_user_id?: number | null;
+  created_at: string;
+}
 
 /** v2 node config — the structured shape that BaseNodeData expects. */
 export interface NodeConfigV2 {

@@ -25,6 +25,7 @@ from lumen_core.database import (
     ensure_document_chunks_embedding_status,
     ensure_workflow_model_refs_migrated,
     ensure_workflow_v2_migrated,
+    ensure_workflow_versions_table,  # M30b 2.0: workflow_versions 表
     ensure_documents_created_by,
     ensure_conversations_deleted_at,
     ensure_conversations_team_id,
@@ -97,6 +98,9 @@ from lumen_core.database import (
     ensure_customer_field_definitions_unique_dedup,
     # M38.1: documents.asset_storage_key + storage_backend 列 + 索引
     ensure_documents_storage_columns,
+    # M30b 2.0 (2026-09-07): workflow_versions 表 + 唯一索引。
+    # 顺序:workflow 表先迁完 (ensure_workflow_v2_migrated 在 line 489) 再建版本表。
+    ensure_workflow_versions_table,
     # M38.2: workspaces / document_folders 表 + knowledge_bases.workspace_id
     # / documents.folder_id 列。Order matters — workspace/folder 表先建,
     # 后两步才能 ALTER 加 FK 列。
@@ -136,7 +140,7 @@ from lumen_models.skill import Skill
 from lumen_models.tenant import Tenant
 from lumen_models.user import User
 from lumen_models.vision_training import VisionClassification, VisionImage
-from lumen_models.workflow import Workflow, WorkflowRun, WorkflowSchedule
+from lumen_models.workflow import Workflow, WorkflowRun, WorkflowSchedule, WorkflowVersion  # M30b 2.0: 版本表注册到 Base.metadata
 from lumen_models.workflow_template import WorkflowTemplate
 from lumen_models.mcp import MCPServer, MCPTool, MCPToolExecution  # MCP models
 from lumen_models.skill_marketplace import SkillMarketplace, InstalledSkill  # Skill marketplace models
@@ -487,6 +491,7 @@ async def _lifespan(app: FastAPI):
     ensure_document_chunks_embedding_status()
     ensure_workflow_model_refs_migrated()
     ensure_workflow_v2_migrated()
+    ensure_workflow_versions_table()  # M30b 2.0: workflow_versions 表
     ensure_notifications_table()
     ensure_documents_created_by()
     ensure_documents_storage_columns()  # M38.1: storage backend abstraction

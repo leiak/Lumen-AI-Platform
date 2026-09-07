@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
-from lumen_models.workflow import Workflow, WorkflowRun
+from lumen_models.workflow import Workflow, WorkflowRun, WorkflowVersion
 from lumen_schemas.workflow import WorkflowCreate, WorkflowDefinition, WorkflowUpdate
 
 if TYPE_CHECKING:
@@ -385,6 +385,26 @@ class WorkflowService:
         db.refresh(run)
         return run
 
+    def get_run(
+        self, db: Session, run_id: int, tenant_id: int
+    ) -> Optional[WorkflowRun]:
+        """M30b 2.0 (2026-09-07): fetch a single run by id, tenant-scoped
+        via its parent workflow.
+
+        The sub-page ``/dashboard/workflow/runs/[id]`` only knows the
+        run id, not the parent workflow id. This method joins on
+        ``Workflow.tenant_id`` so the lookup stays safe across tenants.
+        """
+        return (
+            db.query(WorkflowRun)
+            .join(Workflow, Workflow.id == WorkflowRun.workflow_id)
+            .filter(
+                WorkflowRun.id == run_id,
+                Workflow.tenant_id == tenant_id,
+            )
+            .first()
+        )
+
     async def resume_run(
         self, db: Session, workflow_id: int, run_id: int, tenant_id: int
     ) -> Optional[WorkflowRun]:
@@ -418,4 +438,46 @@ class WorkflowService:
             tenant_id,
             old_run.input_data or {},
             trigger_source="resume",  # distinguish from manual / scheduled
+        )
+
+    # ------------------------------------------------------------------
+    # M30b 2.0: workflow version history (read-only in 2.0).
+    # ------------------------------------------------------------------
+
+    def list_versions(
+        self, db: Session, workflow_id: int, tenant_id: int
+    ) -> List[WorkflowVersion]:
+        """Return all version rows for a workflow, newest first.
+
+        Returns an empty list when the workflow doesn't exist OR when it
+        has no version rows (the bootstrap baseline row is written by
+        ``bootstrap_workflow_versions`` in 2.1). 2.0 ships the schema +
+        list endpoint only.
+        """
+        workflow = self.get_workflow(db, workflow_id, tenant_id)
+        if not workflow:
+            return []
+        return (
+            db.query(WorkflowVersion)
+            .filter(WorkflowVersion.workflow_id == workflow_id)
+            .order_by(WorkflowVersion.version.desc())
+            .all()
+        )
+
+    def get_version(
+        self, db: Session, workflow_id: int, version_id: int, tenant_id: int
+    ) -> Optional[WorkflowVersion]:
+        """Fetch a single version by its PK, scoped via the parent workflow
+        for tenant isolation.
+        """
+        workflow = self.get_workflow(db, workflow_id, tenant_id)
+        if not workflow:
+            return None
+        return (
+            db.query(WorkflowVersion)
+            .filter(
+                WorkflowVersion.workflow_id == workflow_id,
+                WorkflowVersion.id == version_id,
+            )
+            .first()
         )

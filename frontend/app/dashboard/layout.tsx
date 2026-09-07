@@ -125,24 +125,22 @@ const menuItems = [
     name: "记忆管理",
     icon: <ClockCircleOutlined />,
   },
+  // M30b 2.0 (2026-09-07): 工作流拆 4 子页 + sidebar 4 menu items。
+  // parent path = /dashboard/workflow 即 list 页(ProLayout child[0]
+  // = parent path 是硬限制,见 layout.tsx:54 注释 — eval 子菜单同款模式)。
+  // 模板中心 / 运行历史 / 版本快照 全部作为 child 整合进 parent,
+  // 删除之前 2026-06-18 立的 sibling 模板中心(因为 ProLayout parent +
+  // child 模式 + drawer 内容被拆出来后,子路由 4 个比 sibling 1 个体验更好)。
   {
     path: "/dashboard/workflow",
     name: "工作流",
     icon: <ShareAltOutlined />,
-  },
-  {
-    // M30 ship follow-up (2026-06-18): previously this lived as a
-    // child of "工作流", but AntD ProLayout with children turns the
-    // parent into a collapse toggle — clicking "工作流" expanded
-    // the submenu but never navigated to the list page (the comment
-    // claimed otherwise). Promote it to a sibling so the sidebar
-    // has two independent entries: 工作流 → list, 模板中心 →
-    // templates gallery. The two pages now link to each other
-    // directly (button in the page top bar) so the user never has
-    // to come back through the sidebar to switch.
-    path: "/dashboard/workflow/templates",
-    name: "模板中心",
-    icon: <AppstoreOutlined />,
+    children: [
+      { path: "/dashboard/workflow", name: "工作流列表" },
+      { path: "/dashboard/workflow/runs", name: "运行历史" },
+      { path: "/dashboard/workflow/templates", name: "模板中心" },
+      { path: "/dashboard/workflow/versions", name: "版本快照" },
+    ],
   },
   {
     path: "/dashboard/mcp",

@@ -82,6 +82,36 @@ class WorkflowNodeRun(BaseModel):
         return f"<WorkflowNodeRun(run_id={self.run_id}, node_id={self.node_id}, status={self.status})>"
 
 
+class WorkflowVersion(BaseModel):
+    """M30b 2.0 (2026-09-07): workflow definition version history.
+
+    2.0 only adds the schema + list endpoint; the "保存即 version +1" trigger
+    lands in 2.1. Bootstrap seeds one baseline row per workflow so the UI can
+    render diff placeholders without 404.
+    """
+    __tablename__ = "workflow_versions"
+
+    workflow_id = Column(Integer, ForeignKey("workflows.id"), nullable=False, index=True)
+    # Monotonic per workflow, starting from 1.
+    version = Column(Integer, nullable=False)
+    # Full JSON snapshot of ``Workflow.definition`` at the time of the
+    # version.  Stored as JSON for cross-version diff rendering; the
+    # cost is bounded because the executor keeps definitions under a
+    # few hundred KB even for large graphs.
+    definition_snapshot = Column(JSON, nullable=False)
+    # Optional human-readable change summary, set by the user or the
+    # system. ``nullable=True`` to match the bootstrap baseline row.
+    change_summary = Column(String(500), nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    workflow = relationship("Workflow", backref="versions")
+
+    __table_args__ = (
+        # 同一 workflow 内 version 唯一;不同 workflow 可独立计数。
+        Index("idx_workflow_version_unique", "workflow_id", "version", unique=True),
+    )
+
+
 class WorkflowSchedule(BaseModel):
     """Stores scheduled execution configurations for workflows"""
     __tablename__ = "workflow_schedules"

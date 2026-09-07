@@ -8,6 +8,7 @@ import {
   CloudUploadOutlined,
   PlayCircleOutlined,
   DeleteOutlined,
+  BranchesOutlined,
 } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { useRouter } from "next/navigation";
@@ -69,7 +70,7 @@ export function WorkflowTable({
     {
       title: "操作",
       key: "action",
-      width: 380,
+      width: 420,
       render: (_, record) => (
         <Space wrap>
           <Tooltip title="设计">
@@ -91,6 +92,14 @@ export function WorkflowTable({
               size="small"
               icon={<HistoryOutlined />}
               onClick={() => onViewHistory(record.id, record.name)}
+            />
+          </Tooltip>
+          {/* M30b 2.0 (2026-09-07): 版本快照按钮,跳子路由预选当前 workflow。 */}
+          <Tooltip title="版本">
+            <Button
+              size="small"
+              icon={<BranchesOutlined />}
+              onClick={() => router.push(`/dashboard/workflow/versions?workflow_id=${record.id}`)}
             />
           </Tooltip>
           <Tooltip title="发布为模板">

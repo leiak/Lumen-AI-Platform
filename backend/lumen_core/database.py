@@ -1198,6 +1198,40 @@ def ensure_workflow_v2_migrated() -> None:
         db.close()
 
 
+def ensure_workflow_versions_table() -> None:
+    """M30b 2.0 (2026-09-07): create ``workflow_versions`` table + indexes
+    if missing.
+
+    Mirrors the M38.1 / M38.2 migration pattern: the table is created via
+    ``Base.metadata.create_all`` (idempotent, no-op on the second call)
+    so we don't need a column-by-column ALTER chain. The unique index
+    ``idx_workflow_version_unique`` is added with an ``_index_exists``
+    guard because ``CREATE INDEX`` is not idempotent in MySQL — repeated
+    calls would raise 1061 "Duplicate key name".
+
+    Order matters: this is called after ``ensure_workflow_v2_migrated``
+    so the ``workflows`` table itself is fully migrated before we start
+    writing version rows.
+
+    Idempotent. Safe to re-run on every uvicorn boot.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from lumen_models.workflow import WorkflowVersion  # noqa: F401
+        Base.metadata.create_all(bind=engine, tables=[WorkflowVersion.__table__])
+        with engine.begin() as conn:
+            if not _index_exists("workflow_versions", "idx_workflow_version_unique"):
+                conn.execute(text(
+                    "CREATE UNIQUE INDEX idx_workflow_version_unique "
+                    "ON workflow_versions (workflow_id, version)"
+                ))
+    except Exception:
+        logger.exception(
+            "ensure_workflow_versions_table failed; will retry on next startup"
+        )
+
+
 def ensure_global_memories_conversation_id() -> None:
     """Add ``conversation_id`` to ``global_memories`` if it's missing.
 
