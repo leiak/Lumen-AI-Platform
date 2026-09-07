@@ -129,7 +129,10 @@ class S3Backend(StorageBackend):
         # 真要走代理,设 ``S3_BYPASS_PROXY=false`` 走 botocore auto-detect。
         proxy_mode = cls._bypass_proxy_kwargs()
         if proxy_mode != "auto":
-            config_kwargs["proxies"] = proxy_mode
+            # 2.1 C.2:proxy_mode 现在是 kwargs 格式(``{"proxies": {}}`` 或 ``{}``),
+            # 用 update 合并进 config_kwargs,而不是当作 proxies 的 value 赋值
+            # (赋值会导致 ``config_kwargs["proxies"] = {"proxies": {}}`` nested bug)。
+            config_kwargs.update(proxy_mode)
         config = BotoConfig(**config_kwargs)
         client = boto3.client(
             "s3",

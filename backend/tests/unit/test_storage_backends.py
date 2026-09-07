@@ -652,21 +652,31 @@ def test_reset_storage_backend_re_reads_env(monkeypatch, tmp_path: Path):
 
 
 def test_bypass_proxy_kwargs_default_bypasses(monkeypatch):
-    """``S3_BYPASS_PROXY`` 未设 / ``true`` → 返 ``{}``(botocore 不查 proxy)。"""
+    """2.1 C.2 env-aware: ``S3_BYPASS_PROXY`` 未设 + 无 ``HTTPS_PROXY`` env →
+    返 ``{"proxies": {}}``(boto3 bypass 强制直连)。
+
+    注意 C.2 之前这个 helper 返 ``{}`` 作为 sentinel;现在改返 kwargs 格式
+    让 caller 直接 ``config_kwargs.update()``。对应 integration 测试在
+    ``test_proxy_bypass_env_aware.py`` 覆盖全决策表。
+    """
     monkeypatch.delenv("S3_BYPASS_PROXY", raising=False)
+    for var in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+        monkeypatch.delenv(var, raising=False)
 
     from lumen_services.storage.s3_backend import S3Backend
 
-    assert S3Backend._bypass_proxy_kwargs() == {}
+    assert S3Backend._bypass_proxy_kwargs() == {"proxies": {}}
 
 
 def test_bypass_proxy_kwargs_explicit_true(monkeypatch):
-    """``S3_BYPASS_PROXY=true`` → 返 ``{}``。"""
+    """``S3_BYPASS_PROXY=true`` + 无 ``HTTPS_PROXY`` env → 返 ``{"proxies": {}}``。"""
     monkeypatch.setenv("S3_BYPASS_PROXY", "true")
+    for var in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+        monkeypatch.delenv(var, raising=False)
 
     from lumen_services.storage.s3_backend import S3Backend
 
-    assert S3Backend._bypass_proxy_kwargs() == {}
+    assert S3Backend._bypass_proxy_kwargs() == {"proxies": {}}
 
 
 def test_bypass_proxy_kwargs_false_returns_auto_sentinel(monkeypatch):
@@ -681,12 +691,14 @@ def test_bypass_proxy_kwargs_false_returns_auto_sentinel(monkeypatch):
 
 
 def test_bypass_proxy_kwargs_truthy_values(monkeypatch):
-    """``S3_BYPASS_PROXY=1`` / ``yes`` / ``on`` 也算 truthy → 返 ``{}``。"""
+    """``S3_BYPASS_PROXY=1`` / ``yes`` / ``on`` 也算 truthy → 返 ``{"proxies": {}}``。"""
+    for var in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+        monkeypatch.delenv(var, raising=False)
     from lumen_services.storage.s3_backend import S3Backend
 
     for value in ("1", "yes", "on"):
         monkeypatch.setenv("S3_BYPASS_PROXY", value)
-        assert S3Backend._bypass_proxy_kwargs() == {}, f"failed for {value!r}"
+        assert S3Backend._bypass_proxy_kwargs() == {"proxies": {}}, f"failed for {value!r}"
 
 
 def test_s3_backend_from_env_passes_empty_proxies_by_default(monkeypatch):
