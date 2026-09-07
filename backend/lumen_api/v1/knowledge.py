@@ -181,9 +181,38 @@ async def update_knowledge_base(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """M38.2.x v2: ``kb.update`` permission is required."""
+    """M38.2.x v2: ``kb.update`` permission is required.
+
+    2.1 C.12: 如果 payload 含 ``workspace_id``(显式 None 也算),需要额外
+    校验 target workspace 的 ``kb.create`` 权限 — 跨 workspace 移动相当于
+    "在 target workspace 创建一个 KB 槽位"。回 tenant root (workspace_id=None)
+    不需要 target 校验,只需要 source kb.update(由 assert_perm_via_kb 保证)。
+    """
     service = KnowledgeService()
     assert_perm_via_kb(db, current_user, "kb.update", kb_id)
+    # 2.1 C.12: 跨 workspace 移动 KB 的 target 权限校验。仅在 caller 显式传了
+    # ``workspace_id`` 字段(包括 None)时检查。``model_fields_set`` 含 key 即
+    # 视为"显式设置",区别于 Pydantic 默认值,避免把"不动 workspace"误识别为
+    # "回 tenant root"。
+    if "workspace_id" in data.model_fields_set and data.workspace_id is not None:
+        if not getattr(current_user, "is_superuser", False):
+            if not PermissionService().check(
+                db, current_user, "kb.create", data.workspace_id
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="无权限: kb.create (目标 workspace)",
+                )
+        # 同时确认 target workspace 在同租户(避免在 admin/superuser 跨租户场景
+        # 下绕过 service 层校验;service 也校验,但 403 vs 404 的语义对前端更明确)
+        from lumen_models.workspace import Workspace as _Workspace
+        ws = db.get(_Workspace, data.workspace_id)
+        if ws is None or ws.tenant_id != current_user.tenant_id:
+            if not getattr(current_user, "is_superuser", False):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"workspace {data.workspace_id} 不可见",
+                )
     kb = service.update_knowledge_base(db, kb_id, current_user.tenant_id, data)
     if not kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")

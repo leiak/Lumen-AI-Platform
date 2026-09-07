@@ -170,6 +170,27 @@ class KnowledgeService:
         update_data = data.model_dump(exclude_unset=True)
         # Always drop embedding_model_config_id from updates — locked field.
         update_data.pop("embedding_model_config_id", None)
+        # 2.1 C.12: 跨 workspace 移动 KB。``workspace_id`` 字段缺失 ≠ 设为 None;
+        # 仅当 caller 显式传了 key(含 None) 才动字段。target workspace 必须
+        # 同租户 — 跨租户挂 KB 是数据泄露。
+        if "workspace_id" in update_data:
+            target_workspace_id = update_data["workspace_id"]
+            if target_workspace_id is not None:
+                from lumen_models.workspace import Workspace
+                ws = db.get(Workspace, target_workspace_id)
+                if ws is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"workspace {target_workspace_id} 不存在",
+                    )
+                if ws.tenant_id != tenant_id:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"workspace {target_workspace_id} 不属于当前租户",
+                    )
+            # 走 None-跳过循环,改成显式赋值(支持 None = 落回 tenant root)
+            kb.workspace_id = target_workspace_id
+            update_data.pop("workspace_id")
         for field, value in update_data.items():
             if value is not None:
                 setattr(kb, field, value)

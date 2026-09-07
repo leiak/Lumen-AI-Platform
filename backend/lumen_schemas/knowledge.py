@@ -55,6 +55,10 @@ class KnowledgeBaseUpdate(BaseModel):
     # image 文档不会被 multimodal 索引,gracefully degraded)。
     multimodal_enabled: Optional[bool] = None
     multimodal_config_id: Optional[int] = None
+    # 2.1 C.12: KB 跨 workspace 移动。``None`` = 显式回 tenant root(未分组
+    # 桶);字段缺失 = 不动 workspace_id(保留原值,避免 PUT 误改)。
+    # tenant isolation 由 service 层在改 workspace_id 时校验 target 必须同租户。
+    workspace_id: Optional[int] = None
 
 
 class KnowledgeBaseResponse(KnowledgeBaseBase):
@@ -65,6 +69,9 @@ class KnowledgeBaseResponse(KnowledgeBaseBase):
     default_parser: Optional[str] = "general"
     chunk_size: int = 500
     chunk_overlap: int = 50
+    # M38.2: KB 所属 workspace id。None = KB 在 tenant root(未分组桶)。
+    # 2.1 C.12: 通过 PUT 端点可改。前端 sidebar drag-drop 切换 workspace 用。
+    workspace_id: Optional[int] = None
     # Number of documents in this KB. Populated by the service layer
     # via a single GROUP BY query — kept as a transient attribute on the
     # SQLAlchemy instance so Pydantic reads it via from_attributes.
