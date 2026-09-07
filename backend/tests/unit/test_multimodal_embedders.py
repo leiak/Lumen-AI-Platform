@@ -501,13 +501,30 @@ def test_openai_vision_stub_raises_on_embed():
         embedder.embed_text("hi")
 
 
-def test_qwen_vl_stub_raises_on_embed():
+def test_qwen_vl_real_impl_with_mock_fallback(monkeypatch):
+    """M38.4 Step 7 (2026-09-07): qwen_vl is now a real impl, not a stub.
+
+    When the constructor falls back to mock (no API key configured) the
+    factory's dim-probe still completes successfully — it returns 1024
+    floats from the deterministic SHA-256 path, not a network exception.
+    Real API shape is documented in the embedder docstring; the
+    unit-level HTTP tests live in ``test_qwen_vl_embedder``.
+
+    We force ``QWEN_VL_USE_MOCK=true`` (and clear any
+    ``DASHSCOPE_API_KEY`` from the test runner's env) so this test
+    is hermetic regardless of where pytest is invoked.
+    """
+    monkeypatch.setenv("QWEN_VL_USE_MOCK", "true")
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
     db = _make_db(_make_config(provider="qwen_vl", model_name="qwen-vl-plus", config_id=501))
     embedder, dim = get_multimodal_embedder(501, db)
     assert embedder.provider_name == "qwen_vl"
     assert dim == embedder.dimension == 1024
-    with pytest.raises(NotImplementedError):
-        embedder.embed_image("ignored")  # still raises on first call
+    # Mock fallback is deterministic — call returns 1024 floats, not an
+    # exception. This replaces the pre-Step-7 ``NotImplementedError``
+    # contract that stubs honoured.
+    vec = embedder.embed_text("anything")
+    assert len(vec) == 1024
 
 
 def test_azure_vision_stub_raises_on_embed():
@@ -520,12 +537,18 @@ def test_azure_vision_stub_raises_on_embed():
 def test_cloud_stub_close_is_noop():
     """Cloud impls will close HTTP sessions; the stubs need to support
     the ``close()`` call without complaint so the context-manager sugar
-    works once a real impl lands."""
+    works once a real impl lands.
+
+    M38.4 Step 7 (2026-09-07): qwen_vl is now a real impl (DashScope),
+    not a stub — but its ``close()`` is also idempotent (nulls the
+    client after the first close), so it stays in this loop as a
+    sanity check that the real impl honors the ABC contract.
+    """
     from lumen_services.multimodal_embedders.openai_vision import OpenAIVisionEmbedder
-    from lumen_services.multimodal_embedders.qwen_vl import QwenVLEmbedder
+    from lumen_services.multimodal_embedders.qwen_vl import QwenVLMultimodalEmbedder
     from lumen_services.multimodal_embedders.azure_vision import AzureVisionEmbedder
 
-    for cls in (OpenAIVisionEmbedder, QwenVLEmbedder, AzureVisionEmbedder):
+    for cls in (OpenAIVisionEmbedder, QwenVLMultimodalEmbedder, AzureVisionEmbedder):
         inst = cls()
         # Idempotent close — calling twice is fine.
         inst.close()

@@ -77,9 +77,9 @@ def _build_openai(config: MultimodalEmbeddingConfig) -> MultimodalEmbedder:
 
 
 def _build_qwen(config: MultimodalEmbeddingConfig) -> MultimodalEmbedder:
-    from .qwen_vl import QwenVLEmbedder
+    from .qwen_vl import QwenVLMultimodalEmbedder
 
-    return QwenVLEmbedder(
+    return QwenVLMultimodalEmbedder(
         api_key=str(config.api_key) if config.api_key else None,
         base_url=str(config.base_url) if config.base_url else None,
         model_name=str(config.model_name) if config.model_name else None,
