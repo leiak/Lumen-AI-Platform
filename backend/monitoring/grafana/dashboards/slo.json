@@ -43,7 +43,7 @@
         "reduceOptions": {"calcs": ["lastNotNull"]}
       },
       "targets": [
-        {"expr": "lumen_slo_budget_remaining{slo=\"api_availability\"}", "refId": "A", "legendFormat": "预算剩余"}
+        {"expr": "lumen_slo_budget_remaining{slo=\"api_availability\", service_name=~\"$service_name\"}", "refId": "A", "legendFormat": "预算剩余"}
       ]
     },
     {
@@ -69,7 +69,7 @@
       },
       "options": {"colorMode": "background", "graphMode": "area", "textMode": "value_and_name", "reduceOptions": {"calcs": ["lastNotNull"]}},
       "targets": [
-        {"expr": "lumen_slo_budget_remaining{slo=\"api_latency\"}", "refId": "A", "legendFormat": "预算剩余"}
+        {"expr": "lumen_slo_budget_remaining{slo=\"api_latency\", service_name=~\"$service_name\"}", "refId": "A", "legendFormat": "预算剩余"}
       ]
     },
     {
@@ -95,7 +95,7 @@
       },
       "options": {"colorMode": "background", "graphMode": "area", "textMode": "value_and_name", "reduceOptions": {"calcs": ["lastNotNull"]}},
       "targets": [
-        {"expr": "lumen_slo_budget_remaining{slo=\"chat_ttfb\"}", "refId": "A", "legendFormat": "预算剩余"}
+        {"expr": "lumen_slo_budget_remaining{slo=\"chat_ttfb\", service_name=~\"$service_name\"}", "refId": "A", "legendFormat": "预算剩余"}
       ]
     },
     {
@@ -121,7 +121,7 @@
       },
       "options": {"colorMode": "background", "graphMode": "area", "textMode": "value_and_name", "reduceOptions": {"calcs": ["lastNotNull"]}},
       "targets": [
-        {"expr": "lumen_slo_budget_remaining{slo=\"doc_processing\"}", "refId": "A", "legendFormat": "预算剩余"}
+        {"expr": "lumen_slo_budget_remaining{slo=\"doc_processing\", service_name=~\"$service_name\"}", "refId": "A", "legendFormat": "预算剩余"}
       ]
     },
     {
@@ -147,7 +147,7 @@
       },
       "options": {"colorMode": "background", "graphMode": "area", "textMode": "value_and_name", "reduceOptions": {"calcs": ["lastNotNull"]}},
       "targets": [
-        {"expr": "lumen_slo_budget_remaining{slo=\"embedding_latency\"}", "refId": "A", "legendFormat": "预算剩余"}
+        {"expr": "lumen_slo_budget_remaining{slo=\"embedding_latency\", service_name=~\"$service_name\"}", "refId": "A", "legendFormat": "预算剩余"}
       ]
     },
     {
@@ -173,7 +173,7 @@
       },
       "options": {"colorMode": "background", "graphMode": "area", "textMode": "value_and_name", "reduceOptions": {"calcs": ["lastNotNull"]}},
       "targets": [
-        {"expr": "lumen_slo_budget_remaining{slo=\"celery_success\"}", "refId": "A", "legendFormat": "预算剩余"}
+        {"expr": "lumen_slo_budget_remaining{slo=\"celery_success\", service_name=~\"$service_name\"}", "refId": "A", "legendFormat": "预算剩余"}
       ]
     },
     {
@@ -206,7 +206,7 @@
       },
       "options": {"legend": {"showLegend": true, "displayMode": "list"}},
       "targets": [
-        {"expr": "lumen_slo_burn_rate_1h{slo=\"api_availability\"}", "refId": "A", "legendFormat": "burn rate"}
+        {"expr": "lumen_slo_burn_rate_1h{slo=\"api_availability\", service_name=~\"$service_name\"}", "refId": "A", "legendFormat": "burn rate"}
       ]
     },
     {
@@ -231,7 +231,7 @@
       },
       "options": {"legend": {"showLegend": true, "displayMode": "list"}},
       "targets": [
-        {"expr": "lumen_slo_burn_rate_1h{slo=\"api_latency\"}", "refId": "A", "legendFormat": "burn rate"}
+        {"expr": "lumen_slo_burn_rate_1h{slo=\"api_latency\", service_name=~\"$service_name\"}", "refId": "A", "legendFormat": "burn rate"}
       ]
     },
     {
@@ -256,7 +256,7 @@
       },
       "options": {"legend": {"showLegend": true, "displayMode": "list"}},
       "targets": [
-        {"expr": "lumen_slo_burn_rate_1h{slo=\"chat_ttfb\"}", "refId": "A", "legendFormat": "burn rate"}
+        {"expr": "lumen_slo_burn_rate_1h{slo=\"chat_ttfb\", service_name=~\"$service_name\"}", "refId": "A", "legendFormat": "burn rate"}
       ]
     },
     {
@@ -281,7 +281,7 @@
       },
       "options": {"legend": {"showLegend": true, "displayMode": "list"}},
       "targets": [
-        {"expr": "lumen_slo_burn_rate_1h{slo=\"doc_processing\"}", "refId": "A", "legendFormat": "burn rate"}
+        {"expr": "lumen_slo_burn_rate_1h{slo=\"doc_processing\", service_name=~\"$service_name\"}", "refId": "A", "legendFormat": "burn rate"}
       ]
     },
     {
@@ -306,7 +306,7 @@
       },
       "options": {"legend": {"showLegend": true, "displayMode": "list"}},
       "targets": [
-        {"expr": "lumen_slo_burn_rate_1h{slo=\"embedding_latency\"}", "refId": "A", "legendFormat": "burn rate"}
+        {"expr": "lumen_slo_burn_rate_1h{slo=\"embedding_latency\", service_name=~\"$service_name\"}", "refId": "A", "legendFormat": "burn rate"}
       ]
     },
     {
@@ -331,14 +331,33 @@
       },
       "options": {"legend": {"showLegend": true, "displayMode": "list"}},
       "targets": [
-        {"expr": "lumen_slo_burn_rate_1h{slo=\"celery_success\"}", "refId": "A", "legendFormat": "burn rate"}
+        {"expr": "lumen_slo_burn_rate_1h{slo=\"celery_success\", service_name=~\"$service_name\"}", "refId": "A", "legendFormat": "burn rate"}
       ]
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
   "tags": ["lumen", "slo"],
-  "templating": {"list": []},
+  "templating": {
+    "list": [
+      {
+        "name": "service_name",
+        "label": "Service",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "query": "label_values(up, service_name)",
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {"text": ["All"], "value": ["$__all"]},
+        "options": [],
+        "hide": 0
+      }
+    ]
+  },
   "time": {"from": "now-6h", "to": "now"},
   "timepicker": {},
   "timezone": "browser",
