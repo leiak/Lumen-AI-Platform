@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -18,7 +18,7 @@ from lumen_schemas.workflow import (
     WorkflowVersionRead,
 )
 from lumen_schemas.common import SingleResponse, PaginatedResponse
-from lumen_services.workflow_service import WorkflowService
+from lumen_services.workflow_service import WorkflowConflictError, WorkflowService
 from lumen_services.workflow_scheduler import get_scheduler_service
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
@@ -107,10 +107,50 @@ async def update_workflow(
     workflow_id: int,
     data: WorkflowUpdate,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    if_match: Optional[str] = Header(None, alias="If-Match", description="M30d 2.0 optimistic lock: caller's last-known updated_at. Mismatch → 409."),
 ):
+    """Update a workflow.
+
+    M30d 2.0 (2026-09-07): optimistic locking via the standard
+    ``If-Match`` HTTP header. The frontend's ``useAutoSave`` records
+    the last ``updated_at`` it received from this endpoint and sends
+    it back on the next save. If another tab/user saved in between,
+    this PUT 409s with the current ``updated_at`` so the caller can
+    refresh and reconcile.
+
+    Header format: ISO 8601 datetime (e.g. ``2026-09-07T12:34:56.789012``).
+    When the header is absent, the call falls back to last-write-wins
+    (legacy behavior).
+    """
     service = WorkflowService()
-    workflow = service.update_workflow(db, workflow_id, current_user.tenant_id, data)
+    if_match_dt: Optional[datetime] = None
+    if if_match:
+        try:
+            # Tolerate trailing ``Z`` (UTC) and ``+00:00`` suffixes.
+            normalized = if_match.replace("Z", "+00:00")
+            if_match_dt = datetime.fromisoformat(normalized)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"If-Match header must be ISO 8601 datetime, got: {if_match!r}",
+            )
+    try:
+        workflow = service.update_workflow(
+            db, workflow_id, current_user.tenant_id, data, if_match_updated_at=if_match_dt
+        )
+    except WorkflowConflictError as conflict:
+        # 409 Conflict with structured detail so the frontend toast
+        # can say "该工作流已被其他人修改,请刷新"(参考
+        # 2.0 release spec A8 acceptance criteria).
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "conflict",
+                "current_updated_at": conflict.current_updated_at.isoformat(),
+                "submitted_updated_at": conflict.submitted_updated_at.isoformat(),
+            },
+        )
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
     return SingleResponse(data=WorkflowResponse.model_validate(workflow))

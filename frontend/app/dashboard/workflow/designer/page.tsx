@@ -54,6 +54,7 @@ import {
   NodeCategory,
 } from "./nodeTypes";
 import { wouldCreateCycle } from "./hooks/wouldCreateCycle";
+import { useAutoSave } from "./hooks/useAutoSave";
 
 // ---------------------------------------------------------------------------
 // M30c 2.0: nodeTypes is now a pure re-export of the allNodeComponents
@@ -154,6 +155,15 @@ function WorkflowDesignerPageContent() {
     "idle" | "saving" | "saved" | "error"
   >("idle");
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
+  // M30d 2.0 (2026-09-07): last-known updated_at from the most recent
+  // save response. Passed back as ``If-Match`` on the next save so the
+  // backend's optimistic-lock check can 409 when a concurrent edit
+  // advanced the row. Kept as a string (ISO 8601) rather than Date to
+  // avoid TZ round-trip surprises — the server returns it as-is and
+  // the next request echoes it back.
+  const [lastKnownUpdatedAt, setLastKnownUpdatedAt] = useState<
+    string | null
+  >(null);
   const [saveErrorMsg, setSaveErrorMsg] = useState<string | null>(null);
   // `now` ticks every 5s while the panel is mounted so the "X 秒前"
   // label refreshes on its own without re-rendering the whole tree.
@@ -350,6 +360,12 @@ function WorkflowDesignerPageContent() {
     setSaveStatus("idle");
     setLastSavedAt(null);
     setSaveErrorMsg(null);
+    // M30d 2.0 (2026-09-07): seed the If-Match state from the server's
+    // last-known updated_at so the first auto-save already carries it.
+    // The list-row fetch (workflows) doesn't always include updated_at,
+    // but handleWorkflowSelect is also called from the "Open" button
+    // after a detail GET — see line 188 — which does.
+    setLastKnownUpdatedAt(preloaded?.updated_at ?? null);
     // Caller can supply the workflow object directly to avoid a stale-state
     // race when called immediately after a setWorkflows() that hasn't
     // re-rendered yet.
@@ -447,7 +463,18 @@ function WorkflowDesignerPageContent() {
           })),
         },
       };
-      await workflowApi.saveDesigner(selectedWorkflowId, workflow);
+      // M30d 2.0 (2026-09-07): pass If-Match with last-known updated_at so
+      // the backend can 409 if a concurrent tab saved in between. Echo the
+      // new updated_at back into state for the next save.
+      const resp = await workflowApi.saveDesigner(
+        selectedWorkflowId,
+        workflow,
+        lastKnownUpdatedAt ?? undefined,
+      );
+      const nextUpdatedAt: string | undefined = resp?.data?.data?.updated_at;
+      if (nextUpdatedAt) {
+        setLastKnownUpdatedAt(nextUpdatedAt);
+      }
       setSaveStatus("saved");
       setLastSavedAt(new Date());
       if (!opts.silent) {
@@ -455,16 +482,45 @@ function WorkflowDesignerPageContent() {
       }
     } catch (error: any) {
       setSaveStatus("error");
-      const detail =
-        error?.response?.data?.detail ||
-        error?.message ||
-        "保存失败,请检查后端";
-      const msg = typeof detail === "string" ? detail : JSON.stringify(detail);
+      // M30d 2.0 (2026-09-07): friendly 409 message — concurrent edit
+      // hit the optimistic-lock guard. The backend's structured detail
+      // ({error:"conflict", current_updated_at, submitted_updated_at})
+      // carries both timestamps so we can offer to refresh+retry.
+      const status: number | undefined = error?.response?.status;
+      const detail = error?.response?.data?.detail;
+      let msg: string;
+      if (status === 409) {
+        const serverTs: string | undefined =
+          typeof detail === "object" && detail !== null
+            ? (detail as any).current_updated_at
+            : undefined;
+        msg = serverTs
+          ? `该工作流已被其他人修改(服务端时间 ${serverTs}),请刷新页面后再保存`
+          : "该工作流已被其他人修改,请刷新页面后再保存";
+      } else {
+        const fallback =
+          (typeof detail === "string" && detail) ||
+          error?.message ||
+          "保存失败,请检查后端";
+        msg = typeof fallback === "string" ? fallback : JSON.stringify(fallback);
+      }
       setSaveErrorMsg(msg);
       message.error(msg);
       throw error;
     }
   };
+
+  // M30d 2.0 (2026-09-07): 300ms debounced auto-save. The user moving
+  // a node fires onNodesChange per drag tick; without debouncing we'd
+  // PUT on every tick. The handleSave's own mutex prevents overlapping
+  // requests so the auto-save + manual-save paths can coexist cleanly.
+  // ``silent: true`` skips the toast — the inline "已保存 X 秒前"
+  // indicator carries the feedback.
+  useAutoSave(
+    nodes.length === 0 && edges.length === 0 ? null : JSON.stringify({ nodes, edges }),
+    () => handleSave({ silent: true }).catch(() => {/* error already surfaced */}),
+    { delayMs: 300, enabled: selectedWorkflowId !== undefined }
+  );
 
   const handleRun = async (inputData: Record<string, any> = {}) => {
     if (selectedWorkflowId === undefined) {

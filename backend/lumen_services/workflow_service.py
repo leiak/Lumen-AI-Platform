@@ -10,6 +10,27 @@ if TYPE_CHECKING:
     from lumen_models.user import User
 
 
+class WorkflowConflictError(Exception):
+    """M30d 2.0 (2026-09-07): optimistic-locking failure.
+
+    Raised by ``WorkflowService.update_workflow`` when the caller
+    supplied an ``if_match_updated_at`` that doesn't match the row's
+    current ``updated_at``. The API layer translates this to HTTP 409.
+
+    ``current_updated_at`` lets the frontend reconcile its local
+    state (its in-memory ``updated_at`` is now stale; the caller
+    should refresh before re-saving).
+    """
+
+    def __init__(self, current_updated_at: datetime, submitted: datetime) -> None:
+        self.current_updated_at = current_updated_at
+        self.submitted_updated_at = submitted
+        super().__init__(
+            f"Workflow conflict: caller submitted updated_at={submitted.isoformat()} "
+            f"but current value is {current_updated_at.isoformat()}"
+        )
+
+
 class WorkflowService:
     # M30a: list_workflows gains server-side pagination + search/filter.
     # Old signature: (db, tenant_id) -> List[Workflow]  (in-memory pagination
@@ -80,11 +101,49 @@ class WorkflowService:
         ).first()
 
     def update_workflow(
-        self, db: Session, workflow_id: int, tenant_id: int, data: WorkflowUpdate
+        self,
+        db: Session,
+        workflow_id: int,
+        tenant_id: int,
+        data: WorkflowUpdate,
+        if_match_updated_at: Optional[datetime] = None,
     ) -> Optional[Workflow]:
+        """Apply a partial update to a workflow.
+
+        M30d 2.0 (2026-09-07): optional ``if_match_updated_at`` enables
+        optimistic locking. When supplied and the row's current
+        ``updated_at`` doesn't match (within 1ms tolerance to account
+        for the onupdate trigger), ``WorkflowConflictError`` is raised
+        so the API can return HTTP 409. The 1ms tolerance handles the
+        common case where the frontend's last-known value was the
+        ``updated_at`` *returned by the server* in the previous
+        response — they're literally the same timestamp, so the
+        comparison is exact. We round both to microsecond precision
+        before comparing.
+
+        When ``if_match_updated_at`` is None (the legacy call sites
+        don't supply it), the behavior is unchanged from 1.0 — the
+        last-write-wins.
+
+        Returns the updated workflow, or ``None`` when the workflow
+        doesn't exist in this tenant.
+        """
         workflow = self.get_workflow(db, workflow_id, tenant_id)
         if not workflow:
             return None
+
+        # Optimistic-lock check: compare submitted timestamp to current
+        # row. We compare microsecond precision because both come from
+        # MySQL DATETIME(6) columns; the frontend's value was returned
+        # by an earlier GET /workflows/{id} response.
+        if if_match_updated_at is not None and workflow.updated_at is not None:
+            current_us = workflow.updated_at.replace(microsecond=workflow.updated_at.microsecond)
+            submitted_us = if_match_updated_at.replace(microsecond=if_match_updated_at.microsecond)
+            if current_us != submitted_us:
+                raise WorkflowConflictError(
+                    current_updated_at=workflow.updated_at,
+                    submitted=if_match_updated_at,
+                )
 
         update_data = data.model_dump(exclude_unset=True)
         # data.model_dump() already serializes the nested WorkflowDefinition to a dict,

@@ -31,6 +31,9 @@ export interface Workflow {
   tenant_id: number;
   is_active: boolean;
   created_at: string;
+  // M30d 2.0 (2026-09-07): echoed back on PUT /workflows/{id} so the
+  // designer can hand it to the next request's If-Match header.
+  updated_at?: string;
 }
 
 export interface WorkflowRun {
@@ -117,8 +120,19 @@ export const workflowApi = {
     api.post<ApiResponse<Workflow>>("/workflows/", data),
   update: (id: number, data: Partial<Workflow>) =>
     api.put<ApiResponse<Workflow>>(`/workflows/${id}`, data),
-  saveDesigner: (id: number, data: WorkflowDesignerData) =>
-    api.put<ApiResponse<Workflow>>(`/workflows/${id}`, data),
+  // M30d 2.0 (2026-09-07): accept optional ``ifMatch`` (last-known
+  // ``updated_at``) so the backend's If-Match-based optimistic-lock
+  // check can 409 if another tab saved in between. The HTTP layer
+  // puts it on the ``If-Match`` header. ``Workflow.updated_at`` is
+  // an ISO 8601 datetime string already, so no transformation needed.
+  saveDesigner: (
+    id: number,
+    data: WorkflowDesignerData,
+    ifMatch?: string,
+  ) =>
+    api.put<ApiResponse<Workflow>>(`/workflows/${id}`, data, {
+      headers: ifMatch ? { "If-Match": ifMatch } : undefined,
+    }),
   delete: (id: number) => api.delete(`/workflows/${id}`),
   run: (id: number, inputData: Record<string, any> = {}) =>
     // M30 ship follow-up (2026-06-18): the backend schema is
