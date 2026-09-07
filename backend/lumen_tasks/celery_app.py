@@ -103,9 +103,14 @@ def _on_worker_init(**_kwargs) -> None:
 
     from lumen_tasks.trace_signals import install_celery_signals
     from lumen_tasks.dlq import install_dlq_signal
+    # 2.1 C.5:lumen_celery_tasks_total Counter 真正写入(Phase 1 ship 了
+    # Counter 定义但没连信号,Prometheus 一直 0,Grafana SLO dashboard 永远
+    # 100%)。handler 内部 try/except 包死,metrics 路径挂了不影响主流程。
+    from lumen_tasks.metrics_signals import install_metrics_signals
 
     install_celery_signals()
     install_dlq_signal()
+    install_metrics_signals()
 
 
 @worker_shutdown.connect
