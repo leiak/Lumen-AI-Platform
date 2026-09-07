@@ -9,6 +9,11 @@ is bounded by the *slowest* branch instead of the sum.
 
 Test for true concurrency: schedule 4 branches each with a 0.2s
 delay. Sequential would take ~0.8s; gather finishes in ~0.2s.
+
+M30d 2.0 (2026-09-07): added ``real_concurrent`` schema field.
+The actual behavior (asyncio.gather) is unchanged — this is a
+schema-only flag so the UI can display whether a given parallel
+node is configured for true concurrency. Default True.
 """
 import asyncio
 import time
@@ -23,6 +28,10 @@ from lumen_core.workflow.types import SegmentType
 
 class ParallelNodeData(BaseNodeData):
     parallel: dict = Field(default_factory=dict)
+    # M30d 2.0: schema flag only; current implementation always runs
+    # branches via asyncio.gather (true concurrency). Kept so the UI
+    # can advertise the mode without breaking the Pydantic model.
+    real_concurrent: bool = True
 
 
 class ParallelNode(BaseNode):

@@ -290,6 +290,37 @@ async def resume_run(
     return SingleResponse(data=WorkflowRunResponse.model_validate(new_run))
 
 
+# M30d 2.0 (2026-09-07): continue from where the old run left off. Unlike
+# /resume, this skips nodes that already completed in the old run and only
+# re-executes the failed node + its downstream. Use when the failure was
+# mid-DAG and re-running the upstream (e.g. an expensive LLM call) would
+# waste time/money. /resume still works for the simple "retry the whole
+# DAG with same input_data" semantic — /continue is the smarter variant.
+@router.post("/{workflow_id}/runs/{run_id}/continue", response_model=SingleResponse[WorkflowRunResponse])
+async def continue_run(
+    workflow_id: int,
+    run_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    service = WorkflowService()
+    new_run = await service.continue_run(db, workflow_id, run_id, current_user.tenant_id)
+    if not new_run:
+        # Reaches here when: (a) workflow doesn't exist or lives in
+        # another tenant, (b) the old run id doesn't match this
+        # workflow, (c) the old run is still in a non-terminal state
+        # (running) — we refuse to continue an active run because the
+        # executor would race with the original BFS.
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Run not found, or old run is still in progress (only "
+                "completed / failed / cancelled runs can be continued)"
+            ),
+        )
+    return SingleResponse(data=WorkflowRunResponse.model_validate(new_run))
+
+
 @router.get("/{workflow_id}/runs", response_model=PaginatedResponse[WorkflowRunResponse])
 async def list_workflow_runs(
     workflow_id: int,

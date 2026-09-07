@@ -85,6 +85,8 @@ class WorkflowExecutor:
         cancel_event: Optional[asyncio.Event] = None,
         persist_node_runs: bool = False,
         user: Optional["User"] = None,
+        skip_node_ids: Optional[set[str]] = None,
+        old_run_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         # Note: `db` parameter is intentionally unused. The executor opens
         # its own session per node (see _instantiate) and closes them in
@@ -107,6 +109,13 @@ class WorkflowExecutor:
         self._on_event = on_event
         self._cancel_event = cancel_event
         self._cancelled = False
+        # M30d 2.0 (2026-09-07): /continue path — when set, the BFS
+        # skips executing these nodes (they already ran successfully in
+        # the old run) but still routes downstream. Pool is pre-populated
+        # from old_run_id's WorkflowNodeRun rows so downstream nodes
+        # that DO re-execute can read the right upstream values.
+        self.skip_node_ids: set[str] = set(skip_node_ids or set())
+        self.old_run_id = old_run_id
 
         # M30a: WorkflowNodeRun row writes. When ``persist_node_runs``
         # is True, the executor opens its own ``SessionLocal()`` for
@@ -167,6 +176,16 @@ class WorkflowExecutor:
                 reverse_adj.setdefault(e["target"], []).append(e["source"])
             start_nodes = [n["id"] for n in nodes if n["id"] not in reverse_adj]
 
+            # M30d 2.0 (2026-09-07): /continue path — pre-populate the
+            # VariablePool with the prior run's completed-node outputs so
+            # any downstream node that DOES re-execute reads the right
+            # upstream values (and so we can synthesize a NodeRunResult
+            # for the skipped nodes below). Skipped nodes themselves are
+            # not executed but still counted in self.results so the
+            # final output collector sees them.
+            if self.skip_node_ids and self.old_run_id is not None:
+                self._reconstruct_state_from_skip()
+
             await self._emit(EVENT_RUN_START, {
                 "run_id": run_id,
                 "workflow_id": self.workflow_id,
@@ -197,6 +216,29 @@ class WorkflowExecutor:
 
                 node_id = queue.popleft()
                 if node_id in ran:
+                    continue
+                # M30d 2.0 (2026-09-07): /continue path. A skipped node
+                # was successfully executed in the prior run — we don't
+                # re-run it, but we DO route its downstream so the BFS
+                # still reaches any node that needs to re-execute (the
+                # failed one, plus anything downstream of it). Pool was
+                # pre-populated in _reconstruct_state_from_skip so any
+                # downstream node that DOES execute reads the right
+                # upstream values.
+                if node_id in self.skip_node_ids:
+                    logger.info(
+                        f"Skipping node {node_id} (inherited from prior run "
+                        f"{self.old_run_id})"
+                    )
+                    ran.add(node_id)
+                    node = next((n for n in nodes if n["id"] == node_id), None)
+                    if node is None:
+                        continue
+                    skipped_result = self.results.get(node_id)
+                    if skipped_result is not None:
+                        for nid in self._route(node, node_id, skipped_result, edges):
+                            if nid not in ran:
+                                queue.append(nid)
                     continue
                 ran.add(node_id)
                 node = next((n for n in nodes if n["id"] == node_id), None)
@@ -549,3 +591,69 @@ class WorkflowExecutor:
             return None
         last = output_results[-1]
         return {"value": last.output_values.get("value"), "outputs": last.output_values}
+
+    def _reconstruct_state_from_skip(self) -> None:
+        """M30d 2.0 (2026-09-07): pre-load the VariablePool + self.results
+        with the prior run's completed-node outputs.
+
+        Called once at the top of ``execute()`` when ``skip_node_ids`` and
+        ``old_run_id`` are both set (the /continue path). Opens its own
+        SessionLocal (mirrors the ``_meta_session`` pattern) so the
+        caller's session lifecycle is untouched.
+
+        For each completed WorkflowNodeRun in the old run whose
+        ``node_id`` is in ``skip_node_ids``:
+        - ``pool.add([node_id, name], value)`` for each name in
+          ``output_data`` so any downstream node that re-executes can
+          read the right upstream value.
+        - ``self.results[node_id]`` gets a synthetic ``NodeRunResult``
+          carrying those same output_values. The BFS uses this so it
+          can route downstream (calling ``_route`` with the right
+          ``edge_source_handle`` for condition nodes) without actually
+          invoking the node.
+
+        Rows with status ``"running"`` / ``"failed"`` / ``"cancelled"``
+        are ignored — they weren't "completed" so the caller has no
+        evidence they ran cleanly. The new run will re-execute them.
+        """
+        from lumen_core.database import SessionLocal
+        from lumen_models.workflow import WorkflowNodeRun
+
+        session = SessionLocal()
+        self._sessions.append(session)
+        try:
+            rows = (
+                session.query(WorkflowNodeRun)
+                .filter(
+                    WorkflowNodeRun.run_id == self.old_run_id,
+                    WorkflowNodeRun.node_id.in_(self.skip_node_ids),
+                    WorkflowNodeRun.status == "completed",
+                )
+                .all()
+            )
+            for row in rows:
+                outputs = row.output_data or {}
+                if not isinstance(outputs, dict):
+                    continue
+                # Mirror what the live execute path does (line ~252-258):
+                # write each named output under [node_id, name] so
+                # downstream consumers can resolve ValueSelectors like
+                # ["node_3", "text"] against the pool.
+                for name, value in outputs.items():
+                    self.pool.add([row.node_id, name], value)
+                # Synthesize a NodeRunResult so _route() can read
+                # edge_source_handle for condition nodes without
+                # invoking the node class.
+                self.results[row.node_id] = NodeRunResult(
+                    node_id=row.node_id,
+                    outputs=[],  # schema-only; live execute() overwrites
+                    output_values=dict(outputs),
+                )
+        except Exception as e:  # noqa: BLE001
+            # Best-effort: if the old run row read fails, the new run
+            # just won't be able to skip those nodes — they'll execute
+            # from scratch. Log loudly so audit catches it.
+            logger.warning(
+                f"Failed to reconstruct state from prior run {self.old_run_id}: {e}",
+                exc_info=True,
+            )

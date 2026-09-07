@@ -115,6 +115,8 @@ class WorkflowService:
         on_event: Optional[Any] = None,
         cancel_event: Optional[Any] = None,
         user: Optional["User"] = None,
+        skip_node_ids: Optional[set[str]] = None,
+        old_run_id: Optional[int] = None,
     ) -> WorkflowRun:
         """
         Persist a ``WorkflowRun`` row, then delegate to the unified
@@ -133,6 +135,12 @@ class WorkflowService:
         ``cancel_event`` (M30a) — optional asyncio.Event. The executor
         checks it at node boundaries; when set, it returns status
         "cancelled" without killing the in-flight node.
+
+        ``skip_node_ids`` + ``old_run_id`` (M30d 2.0): /continue path.
+        The executor will skip executing nodes in this set (they
+        already succeeded in ``old_run_id``) but still route their
+        downstream so the BFS reaches nodes that need re-execution.
+        Pool is pre-populated from the old run's WorkflowNodeRun rows.
 
         This method is ``async`` so it can be awaited from the FastAPI
         endpoint and the scheduler without spinning up a new event loop.
@@ -171,6 +179,11 @@ class WorkflowService:
                 # lifecycle is unaffected).
                 # M38.2.x v2: 透传 user 让 KB node 做 per-KB ``kb.read`` 过滤
                 user=user,
+                # M30d 2.0 (2026-09-07): /continue path. Both kwargs are
+                # optional and default to None — the regular /run +
+                # /resume paths are unaffected.
+                skip_node_ids=skip_node_ids,
+                old_run_id=old_run_id,
             )
             if isinstance(result, dict) and result.get("status") == "failed":
                 run.status = "failed"
@@ -418,6 +431,11 @@ class WorkflowService:
         sophisticated "continue from where it left off" (skip
         completed nodes) is deferred — the M30a WorkflowNodeRun rows
         already carry the state we'd need to implement that.
+
+        Note: M30d 2.0 keeps this "retry the whole DAG" semantic for
+        backwards-compat with the deprecation-era clients. New
+        clients should prefer ``continue_run`` when the failure was
+        mid-DAG and they want to skip the nodes that already ran.
         """
         workflow = self.get_workflow(db, workflow_id, tenant_id)
         if not workflow:
@@ -438,6 +456,70 @@ class WorkflowService:
             tenant_id,
             old_run.input_data or {},
             trigger_source="resume",  # distinguish from manual / scheduled
+        )
+
+    async def continue_run(
+        self, db: Session, workflow_id: int, run_id: int, tenant_id: int
+    ) -> Optional[WorkflowRun]:
+        """M30d 2.0 (2026-09-07): continue a previously failed run,
+        skipping nodes that already completed.
+
+        Returns the NEW run (the old run stays in its terminal state
+        for audit). Returns ``None`` when the old run is still
+        running, doesn't exist, or lives in another tenant.
+
+        Difference from ``resume_run``: ``resume`` re-runs the entire
+        DAG from scratch with the same ``input_data``. ``continue``
+        inherits the prior run's completed-node outputs in the
+        VariablePool and only re-executes the failed node + its
+        downstream. Use ``continue`` when the failure was mid-DAG and
+        you don't want to re-pay the cost of upstream nodes (e.g. an
+        expensive LLM call that already succeeded).
+
+        Audit: the old run's WorkflowNodeRun rows are preserved. The
+        new run writes fresh rows only for nodes it actually
+        executed; skipped nodes show up only in the new run's
+        self.results (the BFS synthesizes a NodeRunResult for them
+        via ``_reconstruct_state_from_skip``).
+        """
+        workflow = self.get_workflow(db, workflow_id, tenant_id)
+        if not workflow:
+            return None
+        old_run = (
+            db.query(WorkflowRun)
+            .filter(WorkflowRun.id == run_id, WorkflowRun.workflow_id == workflow_id)
+            .first()
+        )
+        if not old_run:
+            return None
+        # The old run must be in a terminal state. We don't continue a
+        # running run because that would race with the active executor.
+        if old_run.status not in ("completed", "failed", "cancelled"):
+            return None
+        # Collect node_ids that successfully completed in the old run.
+        # M30a uses ``"completed"`` for success and ``"running"`` for
+        # in-flight; we explicitly skip anything that isn't a clean
+        # success.
+        from lumen_models.workflow import WorkflowNodeRun
+        completed_node_ids = {
+            row.node_id
+            for row in (
+                db.query(WorkflowNodeRun)
+                .filter(
+                    WorkflowNodeRun.run_id == run_id,
+                    WorkflowNodeRun.status == "completed",
+                )
+                .all()
+            )
+        }
+        return await self.run_workflow(
+            db,
+            workflow_id,
+            tenant_id,
+            old_run.input_data or {},
+            trigger_source="continue",  # new 2.0 discriminator
+            skip_node_ids=completed_node_ids,
+            old_run_id=run_id,
         )
 
     # ------------------------------------------------------------------

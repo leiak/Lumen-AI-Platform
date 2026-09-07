@@ -74,7 +74,7 @@ _NODE_TYPE_METADATA: dict[tuple[str, str], NodeMetadata] = {
     ("parallel", "1"): NodeMetadata(
         type="parallel", label="并行执行", description="并行运行多个分支",
         icon="⫮", color="geekblue", category="control",
-        default_config={"branches": []},
+        default_config={"branches": [], "real_concurrent": True},  # M30d 2.0
         inputs=[{"name": "input", "type": "any"}],
         outputs=[{"name": "results", "type": "array"}],
     ),
