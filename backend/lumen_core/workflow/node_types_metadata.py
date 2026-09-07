@@ -14,6 +14,12 @@ some metadata is best expressed once and shared (e.g. the "📚
 node), and because adding the entries here doesn't require
 modifying each node's runtime class — keeping the runtime /
 display split clean.
+
+M30c 2.0 (2026-09-07): 22 entries total = 20 user-facing nodes
+(8 P1 + 9 P2 + 2 M35 + 1 M36) + 2 placeholders (start/end).
+Spec A6 originally said "22 user-facing" — actual is 20 (the 2
+placeholders below are NOT counted in the frontend registry; the
+executor handles them via start-node search).
 """
 
 from lumen_core.workflow.nodes.base import NodeMetadata

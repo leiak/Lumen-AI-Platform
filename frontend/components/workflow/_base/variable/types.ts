@@ -55,4 +55,8 @@ export enum BlockEnum {
   QuestionClassifier = "question_classifier",
   VariableAssigner = "variable_assigner",
   VariableAggregator = "variable_aggregator",
+  // M30c 2.0 (2026-09-07): M35/M36 nodes
+  TTS = "tts",
+  PlaybookInject = "playbook_inject",
+  VideoCompose = "video_compose",
 }

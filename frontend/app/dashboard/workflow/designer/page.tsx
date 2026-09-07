@@ -39,131 +39,29 @@ import { workflowApi, Workflow } from "@/services/workflow";
 import { getPanelForType } from "@/components/workflow/nodes/registry";
 import { RunResultPanel } from "@/components/workflow/designer/RunResultPanel";
 import { InputValuesModal, type InputVarSpec } from "@/components/workflow/designer/InputValuesModal";
-// M30c: import the P2 node components + the per-node metadata used by
-// the left-side NodeLibraryPanel. The 9 P2 Node.tsx files were already
-// shipped with P2 (Code/HTTP/Tool/KB/TemplateTransform/PE/QC/VA/VAgg)
-// but never wired into the canvas — that gap is closed by merging
-// `p2NodeComponents` into the canvas's `nodeTypes` map below.
+// M30c 2.0 (2026-09-07): 20 nodes total — 8 P1 (input/agent/llm/condition/
+// output/parallel/fan_out/fan_in) + 9 P2 (code/http/tool/knowledge_retrieval/
+// template_transform/parameter_extractor/question_classifier/variable_assigner/
+// variable_aggregator) + 2 M35 (tts/playbook_inject) + 1 M36 (video_compose).
+// 2 start/end placeholders are NOT in the canvas (executor handles them).
+// All 20 Node.tsx files now live under components/workflow/nodes/<type>/Node.tsx
+// — the 8 P1 + 3 M35/M36 ones were extracted in M30c 2.0; the 9 P2 ones
+// shipped that way with P2 in 2026-06-05.
 import {
-  p2NodeComponents,
-  P2_NODE_REGISTRY_LIST,
+  allNodeComponents,
+  ALL_NODE_REGISTRY_LIST,
   CATEGORY_LABELS,
   NodeCategory,
 } from "./nodeTypes";
 import { wouldCreateCycle } from "./hooks/wouldCreateCycle";
 
 // ---------------------------------------------------------------------------
-// Custom node components
+// M30c 2.0: nodeTypes is now a pure re-export of the allNodeComponents
+// map from ./nodeTypes (which imports all 22 Node.tsx files). No inline
+// components left in this file.
 // ---------------------------------------------------------------------------
 
-const InputNode = ({ data }: { data: any }) => (
-  <Card size="small" style={{ minWidth: 150, background: "#f0f0f0" }}>
-    <Handle type="target" position={Position.Top} />
-    <div style={{ fontWeight: "bold" }}>📥 Input</div>
-    <div style={{ fontSize: 12, color: "#666" }}>{data.label}</div>
-    <Handle type="source" position={Position.Bottom} />
-  </Card>
-);
-
-const AgentNode = ({ data }: { data: any }) => (
-  <Card size="small" style={{ minWidth: 150, background: "#e6f7ff" }}>
-    <Handle type="target" position={Position.Top} />
-    <div style={{ fontWeight: "bold" }}>🤖 Agent</div>
-    <div style={{ fontSize: 12, color: "#666" }}>{data.label}</div>
-    <Handle type="source" position={Position.Bottom} />
-  </Card>
-);
-
-const LLMNode = ({ data }: { data: any }) => {
-  const modelLabel = data?.model_name || "未配置模型";
-  const hasPrompt = Boolean(data?.prompt?.trim());
-  return (
-    <Card
-      size="small"
-      style={{
-        minWidth: 180,
-        background: "linear-gradient(135deg, #f9f0ff 0%, #efdbff 100%)",
-        borderColor: "#b37feb",
-      }}
-    >
-      <Handle type="target" position={Position.Top} />
-      <div style={{ fontWeight: "bold", color: "#531dab" }}>✨ LLM</div>
-      <div style={{ fontSize: 12, color: "#666" }}>{data.label}</div>
-      <div style={{ fontSize: 11, marginTop: 4 }}>
-        <Tag color="purple" style={{ marginRight: 4 }}>
-          {modelLabel}
-        </Tag>
-        {hasPrompt ? (
-          <Tag color="green">prompt</Tag>
-        ) : (
-          <Tag color="default">未填写 prompt</Tag>
-        )}
-      </div>
-      <Handle type="source" position={Position.Bottom} />
-    </Card>
-  );
-};
-
-const ConditionNode = ({ data }: { data: any }) => (
-  <Card size="small" style={{ minWidth: 150, background: "#fff7e6" }}>
-    <Handle type="target" position={Position.Top} />
-    <div style={{ fontWeight: "bold" }}>🔀 Condition</div>
-    <div style={{ fontSize: 12, color: "#666" }}>{data.label}</div>
-    <Handle type="source" position={Position.Bottom} style={{ left: "30%" }} />
-    <Handle type="source" position={Position.Bottom} style={{ left: "70%" }} />
-  </Card>
-);
-
-const OutputNode = ({ data }: { data: any }) => (
-  <Card size="small" style={{ minWidth: 150, background: "#f6ffed" }}>
-    <Handle type="target" position={Position.Top} />
-    <div style={{ fontWeight: "bold" }}>📤 Output</div>
-    <div style={{ fontSize: 12, color: "#666" }}>{data.label}</div>
-  </Card>
-);
-
-const ParallelNode = ({ data }: { data: any }) => (
-  <Card size="small" style={{ minWidth: 150, background: "#fff0f6" }}>
-    <Handle type="target" position={Position.Top} />
-    <div style={{ fontWeight: "bold" }}>⚡ Parallel</div>
-    <div style={{ fontSize: 12, color: "#666" }}>{data.label}</div>
-    <Handle type="source" position={Position.Bottom} style={{ left: "30%" }} />
-    <Handle type="source" position={Position.Bottom} style={{ left: "70%" }} />
-  </Card>
-);
-
-const FanOutNode = ({ data }: { data: any }) => (
-  <Card size="small" style={{ minWidth: 150, background: "#f0f5ff" }}>
-    <Handle type="target" position={Position.Top} />
-    <div style={{ fontWeight: "bold" }}>🔱 Fan-Out</div>
-    <div style={{ fontSize: 12, color: "#666" }}>{data.label}</div>
-    <Handle type="source" position={Position.Bottom} />
-  </Card>
-);
-
-const FanInNode = ({ data }: { data: any }) => (
-  <Card size="small" style={{ minWidth: 150, background: "#fffbe6" }}>
-    <Handle type="target" position={Position.Top} />
-    <Handle type="target" position={Position.Left} />
-    <div style={{ fontWeight: "bold" }}>🔻 Fan-In</div>
-    <div style={{ fontSize: 12, color: "#666" }}>{data.label}</div>
-    <Handle type="source" position={Position.Bottom} />
-  </Card>
-);
-
-const nodeTypes = {
-  // M30c: merge P2 components into the canvas map. P1 stays inline
-  // (preserves the pre-M30c visual style); P2 ships as Node.tsx.
-  ...p2NodeComponents,
-  input: InputNode,
-  agent: AgentNode,
-  llm: LLMNode,
-  condition: ConditionNode,
-  output: OutputNode,
-  parallel: ParallelNode,
-  fan_out: FanOutNode,
-  fan_in: FanInNode,
-};
+const nodeTypes = allNodeComponents;
 
 const initialNodes: Node[] = [
   { id: (typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID()) || `n-${Date.now()}`, type: "input", position: { x: 250, y: 0 }, data: { label: "User Input" } },
@@ -175,37 +73,17 @@ const initialEdges: Edge[] = [];
 // Node library — left sidebar
 // ---------------------------------------------------------------------------
 
-interface NodeLibEntry {
-  type: string;
-  label: string;
-  icon: string;
-  description: string;
-  color: string;
-}
-
-const P1_NODE_LIB: NodeLibEntry[] = [
-  { type: "input", label: "输入节点", icon: "📥", description: "定义工作流输入变量", color: "#f0f0f0" },
-  { type: "agent", label: "Agent 节点", icon: "🤖", description: "多轮对话 Agent", color: "#e6f7ff" },
-  { type: "llm", label: "LLM 节点", icon: "✨", description: "大语言模型调用", color: "#f9f0ff" },
-  { type: "condition", label: "条件节点", icon: "🔀", description: "条件分支路由", color: "#fff7e6" },
-  { type: "output", label: "输出节点", icon: "📤", description: "定义工作流输出", color: "#f6ffed" },
-  { type: "parallel", label: "并行节点", icon: "⚡", description: "并行执行多条路径", color: "#fff0f6" },
-  { type: "fan_out", label: "Fan-Out 节点", icon: "🔱", description: "一对多分发", color: "#f0f5ff" },
-  { type: "fan_in", label: "Fan-In 节点", icon: "🔻", description: "多合一汇聚", color: "#fffbe6" },
-];
-
-// Merge P1 + P2 into one flat list annotated with category
-const ALL_NODE_LIB: (NodeLibEntry & { category: NodeCategory })[] = [
-  ...P1_NODE_LIB.map((n) => ({ ...n, category: "input" as NodeCategory })),
-  ...P2_NODE_REGISTRY_LIST.map((meta) => ({
-    type: meta.type as string,
-    label: meta.label,
-    icon: meta.icon,
-    description: meta.description,
-    color: meta.color,
-    category: meta.category,
-  })),
-];
+// M30c 2.0 (2026-09-07): 节点库直接用中央 ALL_NODE_REGISTRY_LIST(20 个),
+// 不再维护本地 P1_NODE_LIB 副本 —— 中央 registry 已经带正确的 category
+// (input/process/control/variable/integration/output)。
+const ALL_NODE_LIB = ALL_NODE_REGISTRY_LIST.map((meta) => ({
+  type: meta.type as string,
+  label: meta.label,
+  icon: meta.icon,
+  description: meta.description,
+  color: meta.color,
+  category: meta.category,
+}));
 
 // Group by category in display order
 const CATEGORY_ORDER: NodeCategory[] = ["input", "process", "control", "variable", "integration", "output"];

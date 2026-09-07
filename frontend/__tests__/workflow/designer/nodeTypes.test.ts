@@ -1,39 +1,72 @@
 import { describe, expect, it } from "vitest";
 import {
-  P2_NODE_REGISTRY,
-  P2_NODE_REGISTRY_LIST,
-  p2NodeComponents,
+  ALL_NODE_REGISTRY,
+  ALL_NODE_REGISTRY_LIST,
+  allNodeComponents,
 } from "@/app/dashboard/workflow/designer/nodeTypes";
 
-describe("designer nodeTypes registry (M30c)", () => {
-  it("registers all 9 P2 nodes", () => {
-    // M30c head pain: 9 P2 nodes were shipped with Node.tsx files but
-    // never wired into the canvas. After M30c they must all be in
-    // the registry AND in the canvas map.
-    expect(P2_NODE_REGISTRY_LIST.length).toBe(9);
-    const keys = Object.keys(P2_NODE_REGISTRY);
-    expect(keys).toContain("code");
-    expect(keys).toContain("http");
-    expect(keys).toContain("tool");
-    expect(keys).toContain("knowledge_retrieval");
-    expect(keys).toContain("template_transform");
-    expect(keys).toContain("parameter_extractor");
-    expect(keys).toContain("question_classifier");
-    expect(keys).toContain("variable_assigner");
-    expect(keys).toContain("variable_aggregator");
+describe("designer nodeTypes registry (M30c 22 nodes)", () => {
+  it("registers all 20 nodes (8 P1 + 9 P2 + 2 M35 + 1 M36)", () => {
+    // M30c 2.0 (2026-09-07): spec originally said 17 / plan said 22 — actual
+    // count is 20 (8+9+2+1). 2 start/end placeholders are NOT in this
+    // registry (executor handles them).
+    expect(ALL_NODE_REGISTRY_LIST.length).toBe(20);
   });
 
-  it("p2NodeComponents map has the same keys as the registry", () => {
-    for (const meta of P2_NODE_REGISTRY_LIST) {
-      expect(p2NodeComponents[meta.type as string]).toBe(meta.component);
+  it("contains every P1 node type", () => {
+    const keys = Object.keys(ALL_NODE_REGISTRY);
+    for (const t of [
+      "input",
+      "agent",
+      "llm",
+      "condition",
+      "output",
+      "parallel",
+      "fan_out",
+      "fan_in",
+    ]) {
+      expect(keys).toContain(t);
+    }
+  });
+
+  it("contains every P2 node type", () => {
+    const keys = Object.keys(ALL_NODE_REGISTRY);
+    for (const t of [
+      "code",
+      "http",
+      "tool",
+      "knowledge_retrieval",
+      "template_transform",
+      "parameter_extractor",
+      "question_classifier",
+      "variable_assigner",
+      "variable_aggregator",
+    ]) {
+      expect(keys).toContain(t);
+    }
+  });
+
+  it("contains every M35/M36 node type (M30c 2.0 add)", () => {
+    // M35 (tts/playbook_inject) + M36 (video_compose) — spec 用 17,实际 22
+    const keys = Object.keys(ALL_NODE_REGISTRY);
+    for (const t of ["tts", "playbook_inject", "video_compose"]) {
+      expect(keys).toContain(t);
+    }
+  });
+
+  it("allNodeComponents map has a component for every registered node", () => {
+    for (const meta of ALL_NODE_REGISTRY_LIST) {
+      expect(allNodeComponents[meta.type as string]).toBe(meta.component);
     }
   });
 
   it("each entry has icon + label + description for the library panel", () => {
-    for (const meta of P2_NODE_REGISTRY_LIST) {
+    for (const meta of ALL_NODE_REGISTRY_LIST) {
       expect(meta.icon).toBeTruthy();
       expect(meta.label).toBeTruthy();
       expect(meta.description).toBeTruthy();
+      expect(meta.color).toBeTruthy();
+      expect(meta.category).toBeTruthy();
     }
   });
 });
