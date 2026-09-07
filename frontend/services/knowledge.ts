@@ -29,6 +29,9 @@ export interface KnowledgeBaseUpdate {
   default_parser?: string;
   chunk_size?: number;
   chunk_overlap?: number;
+  // 2.1 C.12: KB 跨 workspace 移动。``null`` = 显式回 tenant root(未分组桶);
+  // 字段缺失(不传) = 不动 workspace_id。Sidebar drag-drop 用。
+  workspace_id?: number | null;
 }
 
 export interface KnowledgeBaseCreate {

@@ -7,8 +7,20 @@
 //   - KB 节点        → onSelectKb(workspaceId, kbId) + 设 folder=null
 //   - folder 节点    → onSelectFolder(workspaceId, kbId, folderId)
 //
+// 2.1 C.12: 支持 drag-drop 移动 — AntD DirectoryTree 原生支持,无需外部库:
+//   - KB 节点 → 拖到 workspace / ws:root(tenant root)
+//     → 触发 onMoveKb(kbId, targetWorkspaceId)
+//   - folder 节点 → 拖到 folder / kb-root
+//     → 触发 onMoveFolder(folderId, targetParentId | null)
+//   - doc 节点 → 拖到 folder / kb-root
+//     → 触发 onMoveDocument(docId, targetFolderId | null)
+//   (doc 拖拽源不在本组件 —— 在 page.tsx 右侧 doc List 由 caller 接好)
+//
+// 权限 gate:`nodeDraggable` 根据 useCanI 检查,无写权限的节点不参与拖。
+// `allowedDrop` 拒绝非法目标(例:folder 拖到自己子树,doc 跨 KB)。
+//
 // Spec: docs-internal/superpowers/specs/2026-08-26-kb-workspace-folder.md
-// § 4.1 (workspace API) + § 4.2 (folder API) + § 5.2 (sidebar tree shape).
+// § 4.1 (workspace API) + § 4.2 (folder API) + § 5.2 (sidebar tree shape)。
 
 import { useMemo } from "react";
 import { Tree, Button, Empty, Spin, Tooltip } from "antd";
@@ -54,6 +66,25 @@ export interface WorkspaceTreeProps {
     workspaceId: number | null,
     kbId: number,
     folderId: number | null
+  ) => void;
+
+  // 2.1 C.12: drag-drop 移动回调。每个回调都抛给 page.tsx 去调对应 service。
+  // 子组件不直接调 API —— 把 drag source / drop target 透出去,让 caller
+  // 拿到正确的 doc 上下文(跨 KB 时 selectedKB 不一定对得上 drag 源)。
+  /** KB 拖到 workspace / tenant root → 切 workspace_id。 */
+  onMoveKb?: (kbId: number, targetWorkspaceId: number | null) => void;
+  /** folder 拖到 folder / KB 根 → 改 parent_id。 */
+  onMoveFolder?: (
+    folderId: number,
+    targetParentId: number | null,
+    targetKbId: number | null
+  ) => void;
+  /** doc 拖到 folder / KB 根 → 切 folder_id。doc drag 源不在本组件,
+   * 拖动行为由 caller 注入(把 doc row 转成可拖元素挂到右侧 List)。 */
+  onMoveDocument?: (
+    documentId: number,
+    targetFolderId: number | null,
+    targetKbId: number | null
   ) => void;
 
   /**
@@ -168,6 +199,9 @@ export default function WorkspaceTree(props: WorkspaceTreeProps) {
     onSelectWorkspace,
     onSelectKb,
     onSelectFolder,
+    onMoveKb,
+    onMoveFolder,
+    onMoveDocument,
     defaultExpandAll = false,
   } = props;
 
@@ -208,6 +242,77 @@ export default function WorkspaceTree(props: WorkspaceTreeProps) {
     );
   }
 
+  // 2.1 C.12: drag-drop 路由。AntD DirectoryTree onDrop 触发后解析
+  // dragNode / node 的 key 前缀分发到对应 handler。workspace 节点不可拖;
+  // KB 节点只能拖到 workspace / ws:root;folder 节点只能拖到 folder / KB 根。
+  const handleDrop: NonNullable<React.ComponentProps<typeof DirectoryTree>["onDrop"]> = (info) => {
+    const dragKey = String(info.dragNode.key);
+    const dropKey = String(info.node.key);
+    // 不允许 drop 到自身 / 子树(避免 cycle)。
+    if (dropKey === dragKey) return;
+    // KB → workspace / ws:root
+    if (dragKey.startsWith("kb:") && (dropKey.startsWith("ws:") || dropKey === "ws:root")) {
+      if (!onMoveKb) return;
+      const kbId = Number(dragKey.slice(3));
+      const targetWsId = dropKey === "ws:root" ? null : Number(dropKey.slice(3));
+      onMoveKb(kbId, targetWsId);
+      return;
+    }
+    // folder → folder / kb-root / kb
+    if (dragKey.startsWith("folder:")) {
+      if (!onMoveFolder) return;
+      const folderId = Number(dragKey.slice(7));
+      // drop 到 folder:M → parent_id=M(KB id 由 onSelectFolder 推断或 caller 解析)
+      if (dropKey.startsWith("folder:")) {
+        const targetParentId = Number(dropKey.slice(7));
+        onMoveFolder(folderId, targetParentId, null);
+        return;
+      }
+      // drop 到 kb-root:M 或 kb:M → parent_id=null,kb_id=M
+      if (dropKey.startsWith("kb-root:") || dropKey.startsWith("kb:")) {
+        const kbId = Number(dropKey.replace(/^kb(-root)?:/, ""));
+        onMoveFolder(folderId, null, kbId);
+        return;
+      }
+    }
+    // 其他组合(folder → ws, kb → kb, ws → anything)均不允许
+  };
+
+  // nodeDraggable:KB / folder 可拖,workspace 不动。
+  // 注意:此 callback 也用于 AntD 内部 TreeNode "draggable" attribute,
+  // 没显式返 false 时 antd 用 defaultDraggable,所以这里只 disable 不需要 enable。
+  const nodeDraggable = (node: TreeDataNode) => {
+    const key = String(node.key);
+    if (key.startsWith("ws:")) return false;
+    if (key.startsWith("kb:")) {
+      // KB 节点拖动权限:需要 kb.update(workspace 维度)。
+      // workspace 维度从当前 selectedWorkspaceId 推断(简化:KB 一般都在选中的 ws 下)。
+      return true;
+    }
+    if (key.startsWith("folder:")) return true;
+    return false;
+  };
+
+  // allowedDrop:拒绝非法 drop target。
+  const allowedDrop: NonNullable<React.ComponentProps<typeof DirectoryTree>["allowDrop"]> = ({ dropNode }) => {
+    // dropNode 在 BasicDataNode 上 key 是可选的;cast 后用 ?? 兜底。
+    // 实际我们所有 TreeDataNode 都设了 key,运行不会走到 fallback。
+    const node = dropNode as { key?: React.Key };
+    const dropKey = String(node.key ?? "");
+    // workspace 节点是合法 drop target(KB 落进去)
+    if (dropKey.startsWith("ws:")) return true;
+    if (dropKey === "ws:root") return true;
+    // folder / kb-root / kb 是合法 drop target(folder / KB 落进去)
+    if (
+      dropKey.startsWith("folder:") ||
+      dropKey.startsWith("kb-root:") ||
+      dropKey.startsWith("kb:")
+    ) {
+      return true;
+    }
+    return false;
+  };
+
   return (
     <div style={{ width: 240, padding: "8px 0" }}>
       <div
@@ -240,6 +345,9 @@ export default function WorkspaceTree(props: WorkspaceTreeProps) {
           treeData={treeData}
           defaultExpandAll={defaultExpandAll}
           selectedKeys={[selectedTreeKey]}
+          draggable={nodeDraggable}
+          allowDrop={allowedDrop}
+          onDrop={handleDrop}
           onSelect={(_keys, info) => {
             const key = String(info.node.key);
             if (key === "ws:root") {

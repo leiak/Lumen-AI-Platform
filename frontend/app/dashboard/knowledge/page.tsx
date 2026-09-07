@@ -58,6 +58,7 @@ import {
   listFolders,
   createFolder,
   moveDocument,
+  updateFolder,
 } from "@/services/folder";
 import type { WorkspaceTreeResponse } from "@/types/workspace";
 import type { DocumentFolderTreeNode } from "@/types/folder";
@@ -579,6 +580,56 @@ export default function KnowledgePage() {
     }
   };
 
+  // 2.1 C.12: sidebar drag-drop handler —— KB 跨 workspace 移动。
+  // 走 PUT /api/v1/knowledge/{id} + workspace_id 字段,后端校验 target 权限 + tenant 可见性。
+  const handleMoveKbDrag = async (
+    kbId: number,
+    targetWorkspaceId: number | null
+  ) => {
+    try {
+      const resp = await knowledgeApi.update(kbId, { workspace_id: targetWorkspaceId });
+      if (resp.data.code === 200) {
+        message.success(
+          targetWorkspaceId == null ? "已移到未分组" : "知识库已切换 workspace"
+        );
+        // workspace 树变化 → invalidate workspace-trees + workspaces 列表
+        queryClient.invalidateQueries({ queryKey: ["workspace-trees"] });
+        queryClient.invalidateQueries({ queryKey: ["workspaces", "list"] });
+        // 当前 selectedKB 仍在内存,但其 workspace_id 已变。
+        // 简化:不主动刷 selectedKB.workspace_id(下次 list 时自然更新)。
+      } else {
+        message.error(resp.data.message || "移动失败");
+      }
+    } catch (error: any) {
+      message.error(
+        error?.response?.data?.detail || error?.message || "移动失败"
+      );
+    }
+  };
+
+  // 2.1 C.12: sidebar drag-drop handler —— folder 跨 parent 移动。
+  // 走 PUT /api/v1/folders/{id} + parent_id 字段,后端 cycle 检查 + 跨 KB 拒绝。
+  const handleMoveFolderDrag = async (
+    folderId: number,
+    targetParentId: number | null,
+    _targetKbId: number | null
+  ) => {
+    try {
+      const resp = await updateFolder(folderId, { parent_id: targetParentId });
+      if (resp.code === 200) {
+        message.success("Folder 已移动");
+        refetchFolders();
+        queryClient.invalidateQueries({ queryKey: ["workspace-trees"] });
+      } else {
+        message.error(resp.message || "移动失败");
+      }
+    } catch (error: any) {
+      message.error(
+        error?.response?.data?.detail || error?.message || "移动失败"
+      );
+    }
+  };
+
   const handleSelectKB = (kb: KnowledgeBase | null) => {
     setSelectedKB(kb);
     setSearchResults([]);
@@ -1062,6 +1113,9 @@ export default function KnowledgePage() {
           onSelectWorkspace={handleSelectWorkspace}
           onSelectKb={handleSelectKb}
           onSelectFolder={handleSelectFolder}
+          // 2.1 C.12: drag-drop 移动 KB / folder
+          onMoveKb={handleMoveKbDrag}
+          onMoveFolder={handleMoveFolderDrag}
         />
       </Sider>
       <Content style={{ padding: 24, overflow: "auto" }}>
