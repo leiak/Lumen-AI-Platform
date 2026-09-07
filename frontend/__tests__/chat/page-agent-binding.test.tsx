@@ -5,7 +5,7 @@
 // now uses App.useApp() for messages.
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import { App, ConfigProvider, message } from "antd";
+import { App, ConfigProvider } from "antd";
 
 const mockListConversations = vi.fn();
 const mockCreateConversation = vi.fn();
@@ -91,8 +91,6 @@ describe("ChatPage new-conversation modal", () => {
       })
     );
 
-    vi.spyOn(message, "success").mockImplementation((() => ({})) as any);
-    vi.spyOn(message, "error").mockImplementation((() => ({})) as any);
   });
 
   it("opens modal with 'default' selected when + button is clicked", async () => {
@@ -192,6 +190,31 @@ describe("ChatPage new-conversation modal", () => {
       expect(screen.getByText("创建对话失败")).toBeTruthy();
     });
   });
+
+  // C.7:后端返 code=200 但 data=null 时,以前会把 null 直插会话列表,
+  // 侧边栏渲染 newConv.id 崩掉。守卫后应报错并保持 modal 打开。
+  it("keeps modal open and shows error toast when the envelope has code=200 but null data", async () => {
+    mockCreateConversation.mockResolvedValue({
+      data: { code: 200, message: "ok", data: null },
+    });
+
+    render(<ChatPage />, { wrapper: TestWrapper });
+    await waitFor(() => expect(mockAgentList).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: /新建对话/ }));
+    expect(screen.getAllByText("新建对话").length).toBeGreaterThanOrEqual(2);
+
+    fireEvent.click(screen.getByRole("button", { name: /创建/ }));
+
+    await waitFor(() => {
+      expect(mockCreateConversation).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("服务器返回为空")).toBeTruthy();
+    });
+    // Modal 保持打开,用户可重试
+    expect(screen.getAllByText("新建对话").length).toBeGreaterThanOrEqual(2);
+  });
 });
 
 describe("ChatPage top agent switcher", () => {
@@ -223,8 +246,6 @@ describe("ChatPage top agent switcher", () => {
       })
     );
 
-    vi.spyOn(message, "success").mockImplementation((() => ({})) as any);
-    vi.spyOn(message, "error").mockImplementation((() => ({})) as any);
   });
 
   it("switching agent calls updateConversation and updates local state", async () => {
@@ -301,8 +322,6 @@ describe("ChatPage AgentKBBanner (M21 T19)", () => {
     mockGetMessages.mockResolvedValue({
       data: { code: 200, message: "ok", data: [] },
     });
-    vi.spyOn(message, "success").mockImplementation((() => ({})) as any);
-    vi.spyOn(message, "error").mockImplementation((() => ({})) as any);
   });
 
   it("shows KB banner on conversation bound to a KB-having agent", async () => {
@@ -381,8 +400,6 @@ describe("ChatPage sidebar agent badge", () => {
     mockAgentList.mockResolvedValue({
       data: { code: 200, message: "ok", data: [] },
     });
-    vi.spyOn(message, "success").mockImplementation((() => ({})) as any);
-    vi.spyOn(message, "error").mockImplementation((() => ({})) as any);
   });
 
   it("shows agent_name badge for conv with agent_id, hides for default-only", async () => {
@@ -427,8 +444,6 @@ describe("ChatPage send payload includes agent_id from currentConv", () => {
       }),
     };
     mockStreamChat.mockResolvedValue(fakeBody as any);
-    vi.spyOn(message, "success").mockImplementation((() => ({})) as any);
-    vi.spyOn(message, "error").mockImplementation((() => ({})) as any);
   });
 
   it("sends agent_id from currentConv when sending a message", async () => {

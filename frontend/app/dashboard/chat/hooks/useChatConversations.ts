@@ -72,6 +72,13 @@ export function useChatConversations() {
         });
         if (res.data.code === 200) {
           const newConv = res.data.data;
+          // code=200 但 data 为空是后端异常路径:直插 null 会让侧边栏渲染
+          // 崩掉(newConv.id 访问 undefined)。跟 useChatAgents 的
+          // switchAgentForConv 同一守卫模式。
+          if (!newConv) {
+            message.error("服务器返回为空");
+            return null;
+          }
           setConversations((prev) => [newConv, ...prev]);
           setCurrentConv(newConv);
           setBannerDismissedForConv(new Set());
