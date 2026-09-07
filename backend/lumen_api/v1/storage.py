@@ -33,6 +33,10 @@ from lumen_core.database import get_db
 from lumen_models.knowledge import Document
 from lumen_models.user import User
 from lumen_schemas.common import SingleResponse
+from lumen_schemas.storage_backend import (
+    StorageBackendInfo,
+    StorageBackendToggleRequest,
+)
 
 from .auth import get_current_user, require_admin
 
@@ -156,6 +160,70 @@ def storage_local_get(
 
 
 # -- 3. cold migration --------------------------------------------------
+
+
+@router.post(
+    "/backend",
+    response_model=SingleResponse[StorageBackendInfo],
+)
+def storage_toggle_backend(
+    payload: StorageBackendToggleRequest,
+    current_user: User = Depends(require_admin),
+) -> SingleResponse[StorageBackendInfo]:
+    """2.1 C.4: admin runtime 切换 storage backend。
+
+    流程:
+    1. 应用 config override 到 ``os.environ``(None 跳过,保留旧值)。
+    2. 设 ``STORAGE_BACKEND`` env + 清 singleton + 重建。
+    3. 调 health_check() 立刻验新 backend 真活着,失败返 400 + actionable
+       reason(不让 admin 切到半残状态)。
+
+    admin-only:生产 K8s 集群误切会让所有上传/下载落到错误 backend,需要
+    强守门。``require_admin`` 在 ``lumen_api/v1/auth.py`` 内做 ``is_superuser``
+    校验。
+    """
+    from lumen_services.storage import (
+        apply_storage_config_overrides,
+        toggle_storage_backend,
+    )
+    from lumen_services.storage.s3_backend import S3BackendError
+
+    overrides = payload.config.model_dump(exclude_none=True) if payload.config else None
+    try:
+        applied = apply_storage_config_overrides(overrides)
+        if applied:
+            logger.info(
+                "storage backend toggle: applied env overrides keys=%s",
+                sorted(applied.keys()),
+            )
+        backend = toggle_storage_backend(payload.backend)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except S3BackendError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"backend '{payload.backend}' config invalid: {exc}",
+        )
+
+    report = backend.health_check()
+    info = StorageBackendInfo(
+        backend=str(report.get("backend", "unknown")),
+        ok=bool(report.get("ok", False)),
+        detail=str(report.get("detail", "")),
+        latency_ms=int(report.get("latency_ms", 0)),
+    )
+    if not info.ok:
+        # toggle 成功但 health_check 失败(典型:S3 credential 错误 → bucket
+        # HeadBucket 返 403)。返 503 让前端知道 backend 已切但不可用,
+        # 同时 body 里有 detail。
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": f"backend '{payload.backend}' toggled but health check failed",
+                "info": info.model_dump(),
+            },
+        )
+    return SingleResponse(data=info, message=f"storage backend switched to {payload.backend}")
 
 
 def _read_bytes_for_migration(key: str, legacy_file_path: str) -> bytes:
