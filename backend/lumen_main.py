@@ -18,6 +18,7 @@ from lumen_core.dynamic_cors import DynamicCORSMiddleware
 from lumen_api.middleware.trace_id import TraceIdMiddleware  # Phase 0 Unit 5 4.2
 from lumen_api.middleware.rate_limit import RateLimitMiddleware  # Phase 1 Group A 2.1
 from lumen_api.middleware.prometheus import PrometheusMiddleware  # Phase 0 Unit 5 4.3
+from lumen_api.deprecation import DeprecationHeadersMiddleware  # 2.1 A.1
 from lumen_core.database import (
     create_tables,
     ensure_workflow_runs_trigger_source,
@@ -304,6 +305,21 @@ app.add_middleware(
     ],
     cache_ttl_seconds=60,
 )
+# 2.1 A.1 (2026-09-08): RFC 8594 Sunset / Deprecation / Link header
+# 中间件 —— 加在 CORS 之后(让 401/403/404/429 等所有 response 都被覆盖),
+# 在 TraceId 之前(Sunset header 写入与 trace_id 正交,顺序无关,但放外层
+# 让 response 阶段最先拿到 deprecation 信息,便于将来加 Prometheus
+# metrics 维度)。
+#
+# 设计要点:
+#   1. middleware 是主要 delivery channel —— FastAPI 在 path function
+#      抛 HTTPException 时会丢弃 router-level Depends 的 response
+#      headers 注入,只有外层 middleware 能在 final response 上写 header。
+#   2. ``DEPRECATED_ENDPOINTS`` registry 是 single source of truth,Phase 6
+#      A.3 (2027-01-31 Sunset fire) 改 1 行 date + 删 entry 即完成切换。
+#   3. registry 已预登记 5 个 Phase 6 endpoint —— 那些 endpoint 的
+#      handler 上线后(不需要改 router)middleware 自动发 Sunset header。
+app.add_middleware(DeprecationHeadersMiddleware)
 # Phase 0 Unit 5 4.2 (2026-09-02):trace_id 全链路贯通。
 # 必须**最外层**(最后 add_middleware,FIFO),让所有下游 middleware / endpoint
 # / log / httpx 调用 / DB writer 都能从 contextvar 读到 trace_id。

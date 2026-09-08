@@ -1,24 +1,28 @@
 """M30d 2.0 spec A9.2 (2026-09-07) + 2.1 A.1 (2026-09-08): Deprecation / Sunset
 / Link header tests.
 
-Verifies that ``mark_deprecated``:
+Verifies that:
 
-- Sets ``Deprecation: true`` (RFC 8594 §2.1), ``Sunset: <IMF-fixdate>``
-  (RFC 8594 §2.2) and ``Link: <successor>; rel="successor-version"``
-  (RFC 8594 §3) on the response when the endpoint path is registered.
-- Sets ``X-Lumen-Deprecation-Reason`` extension for human readability.
+- ``mark_deprecated`` (per-endpoint dependency) sets ``Deprecation: true``
+  (RFC 8594 §2.1), ``Sunset: <IMF-fixdate>`` (RFC 8594 §2.2) and
+  ``Link: <successor>; rel="successor-version"`` (RFC 8594 §3) on the
+  response when the endpoint path is registered.
+- ``DeprecationHeadersMiddleware`` (primary delivery channel) injects
+  the same header set on every response — including HTTPException paths
+  (401/403/404) where the dependency's ``response: Response`` injection
+  is dropped by FastAPI.
 - Raises ``KeyError`` for paths not in the registry — prevents typos
   from silently shipping without the header.
 - Works as a FastAPI dependency via ``response: Response`` injection.
 - Honours an explicit ``sunset_date=`` override when migrating to a new
   sunset window.
 
-2.1 A.1: the registry now carries 5 endpoints (``/resume`` is the only
-handler wired today; the other 4 are pre-registered for Phase 6 A.3 to
+2.1 A.1: the registry now carries 6 paths (``/resume`` is the only
+handler wired today; the other 5 are pre-registered for Phase 6 A.3 to
 flip to 410 Gone on 2027-01-31). These tests assert the registry
 content + the header format independently of whether a router actually
 attaches the dep — the announcement calendar is the contract, the
-header is the delivery channel.
+middleware is the delivery channel.
 """
 from __future__ import annotations
 
@@ -27,11 +31,13 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 import pytest
-from fastapi import Response
+from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi.testclient import TestClient
 
 from lumen_api.deprecation import (
     DEPRECATED_ENDPOINTS,
     SUNSET_DATE,
+    DeprecationHeadersMiddleware,
     mark_deprecated,
 )
 
@@ -213,3 +219,171 @@ def test_mark_deprecated_no_successor_omits_link():
     finally:
         dep_module.DEPRECATED_ENDPOINTS.clear()
         dep_module.DEPRECATED_ENDPOINTS.update(original)
+
+
+# ---------------------------------------------------------------------------
+# Middleware delivery channel
+# ---------------------------------------------------------------------------
+#
+# 2.1 A.1 (2026-09-08): the middleware is the primary delivery channel
+# because FastAPI drops ``response: Response`` injection when the path
+# function raises HTTPException. The migration window is most valuable
+# exactly when the request can't succeed (401/403/404) — those are the
+# calls where the consumer needs the warning most.
+
+
+def _make_test_app() -> FastAPI:
+    """Build a minimal FastAPI app with the deprecation middleware."""
+    app = FastAPI()
+    app.add_middleware(DeprecationHeadersMiddleware)
+
+    @app.get("/legacy/ok")
+    async def legacy_ok():
+        return {"ok": True}
+
+    @app.get("/legacy/error")
+    async def legacy_error():
+        raise HTTPException(status_code=404, detail="not found")
+
+    @app.get("/legacy/forbidden")
+    async def legacy_forbidden():
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    @app.get("/modern/ok")
+    async def modern_ok():
+        return {"ok": True}
+
+    @app.get(
+        "/workflows/{workflow_id}/runs/{run_id}/resume",
+        dependencies=[Depends(mark_deprecated(
+            "/workflows/{workflow_id}/runs/{run_id}/resume"
+        ))],
+    )
+    async def wf_resume(workflow_id: int, run_id: int):
+        raise HTTPException(status_code=404, detail="not found")
+
+    return app
+
+
+@pytest.fixture
+def deprecation_app():
+    """Register test routes + middleware for the duration of a test.
+
+    We use synthetic paths (/legacy/*) since adding real Phase 6
+    endpoints to the registry just for tests would conflict with the
+    sunset-calendar contract. The test patches the registry to point
+    at the synthetic paths, runs the middleware, then restores.
+    """
+    from lumen_api import deprecation as dep_module
+
+    original = {
+        path: dict(entry) for path, entry in dep_module.DEPRECATED_ENDPOINTS.items()
+    }
+    # Re-key synthetic paths to test entries.
+    dep_module.DEPRECATED_ENDPOINTS.clear()
+    dep_module.DEPRECATED_ENDPOINTS.update({
+        "/legacy/ok": {
+            "reason": "test legacy ok reason",
+            "sunset_date": SUNSET_DATE,
+            "successor": "/modern/ok",
+        },
+        "/legacy/error": {
+            "reason": "test legacy error reason",
+            "sunset_date": SUNSET_DATE,
+            "successor": "/modern/ok",
+        },
+        "/legacy/forbidden": {
+            "reason": "test legacy forbidden reason",
+            "sunset_date": SUNSET_DATE,
+            "successor": "/modern/ok",
+        },
+        # Resume route — used by test_wf_resume_compat_double_emission.
+        "/workflows/{workflow_id}/runs/{run_id}/resume": original[
+            "/workflows/{workflow_id}/runs/{run_id}/resume"
+        ],
+    })
+    # Recompile the cached patterns after registry mutation.
+    import re as _re
+    dep_module._COMPILED_DEPRECATED = tuple(
+        (dep_module._compile_pattern(path), entry)
+        for path, entry in dep_module.DEPRECATED_ENDPOINTS.items()
+    )
+    try:
+        yield _make_test_app()
+    finally:
+        dep_module.DEPRECATED_ENDPOINTS.clear()
+        dep_module.DEPRECATED_ENDPOINTS.update(original)
+        dep_module._COMPILED_DEPRECATED = tuple(
+            (dep_module._compile_pattern(path), entry)
+            for path, entry in dep_module.DEPRECATED_ENDPOINTS.items()
+        )
+
+
+def test_middleware_injects_headers_on_ok_response(deprecation_app):
+    """Middleware runs on the happy path too — every response gets
+    the Sunset trio."""
+    client = TestClient(deprecation_app)
+    r = client.get("/legacy/ok")
+    assert r.status_code == 200
+    assert r.headers["Deprecation"] == "true"
+    assert "Sun, 31 Jan 2027" in r.headers["Sunset"]
+    assert "/modern/ok" in r.headers["Link"]
+    assert 'rel="successor-version"' in r.headers["Link"]
+    assert "test legacy ok reason" in r.headers["X-Lumen-Deprecation-Reason"]
+
+
+def test_middleware_injects_headers_on_httpexception(deprecation_app):
+    """HTTPException 404: the dependency's response injection is
+    discarded, but the middleware injects headers on the final
+    HTTPException response. This is the core 2.1 A.1 motivation."""
+    client = TestClient(deprecation_app)
+    r = client.get("/legacy/error")
+    assert r.status_code == 404
+    assert r.headers["Deprecation"] == "true"
+    assert "2027" in r.headers["Sunset"]
+    assert "/modern/ok" in r.headers["Link"]
+    assert "test legacy error reason" in r.headers["X-Lumen-Deprecation-Reason"]
+
+
+def test_middleware_injects_headers_on_403(deprecation_app):
+    """HTTPException 403: same as 404 — middleware still injects."""
+    client = TestClient(deprecation_app)
+    r = client.get("/legacy/forbidden")
+    assert r.status_code == 403
+    assert r.headers["Deprecation"] == "true"
+    assert "2027" in r.headers["Sunset"]
+
+
+def test_middleware_skips_non_deprecated_paths(deprecation_app):
+    """Modern (non-deprecated) endpoints get no deprecation headers."""
+    client = TestClient(deprecation_app)
+    r = client.get("/modern/ok")
+    assert r.status_code == 200
+    assert "Deprecation" not in r.headers
+    assert "Sunset" not in r.headers
+    assert "Link" not in r.headers
+    assert "X-Lumen-Deprecation-Reason" not in r.headers
+
+
+def test_middleware_pattern_matches_path_params(deprecation_app):
+    """Path-param placeholders in registry entries are matched as
+    ``[^/]+`` so /workflows/123/runs/456/resume hits the
+    ``/workflows/{workflow_id}/runs/{run_id}/resume`` entry."""
+    client = TestClient(deprecation_app)
+    r = client.get("/workflows/42/runs/7/resume")
+    assert r.status_code == 404  # handler raises
+    assert r.headers["Deprecation"] == "true"
+    assert "/continue" in r.headers["Link"]
+
+
+def test_wf_resume_dependency_plus_middleware_compatible(deprecation_app):
+    """Both delivery channels (dep + middleware) write the same headers
+    idempotently. This is the real /resume endpoint pattern: handler
+    carries the dep (visibility) + middleware catches HTTPException."""
+    client = TestClient(deprecation_app)
+    r = client.get("/workflows/99/runs/1/resume")
+    assert r.status_code == 404
+    # Headers present exactly once (no duplicate values).
+    assert r.headers.get_list("Deprecation") == ["true"]
+    assert len(r.headers.get_list("Sunset")) == 1
+    assert len(r.headers.get_list("Link")) == 1

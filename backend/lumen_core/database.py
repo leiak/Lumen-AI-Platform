@@ -2161,6 +2161,10 @@ def ensure_skills_tenant_id() -> None:
             conn.commit()
 
         # 回填已安装自定义技能的 tenant_id（名字如 xxx_5 → tenant_id=5）
+        # 加 2147483647 (INT signed max) 上限防御:test fixture 残留的名字
+        # 可能含毫秒时间戳后缀(> 2^31),CAST 会抛 1264 Out of range。
+        # 那些是测试污染行,不应该破坏 uvicorn 启动 — 跳过即可,
+        # tenant_id 留 NULL 不会破坏业务(只代表无法追溯租户来源)。
         conn.execute(text("""
             UPDATE skills
             SET tenant_id = CAST(SUBSTRING_INDEX(name, '_', -1) AS UNSIGNED)
@@ -2168,6 +2172,7 @@ def ensure_skills_tenant_id() -> None:
               AND is_builtin = FALSE
               AND name REGEXP '_[0-9]+$'
               AND SUBSTRING_INDEX(name, '_', -1) REGEXP '^[0-9]+$'
+              AND CAST(SUBSTRING_INDEX(name, '_', -1) AS UNSIGNED) <= 2147483647
         """))
         conn.commit()
 
