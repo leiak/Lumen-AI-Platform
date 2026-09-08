@@ -27,6 +27,8 @@ from lumen_core.database import (
     ensure_workflow_model_refs_migrated,
     ensure_workflow_v2_migrated,
     ensure_workflow_versions_table,  # M30b 2.0: workflow_versions 表
+    ensure_workflow_version_column,  # 2.1 B.1: workflows.version 列
+    bootstrap_workflow_versions,  # 2.1 B.1: 老 workflow 补 baseline
     ensure_documents_created_by,
     ensure_conversations_deleted_at,
     ensure_conversations_team_id,
@@ -509,6 +511,10 @@ async def _lifespan(app: FastAPI):
     ensure_workflow_model_refs_migrated()
     ensure_workflow_v2_migrated()
     ensure_workflow_versions_table()  # M30b 2.0: workflow_versions 表
+    # 2.1 B.1 (2026-09-08): workflows.version 列 + 给老 workflow 补 baseline row。
+    # 顺序:列先加(version default=0),再建 version=1 baseline + bump workflow.version。
+    ensure_workflow_version_column()
+    bootstrap_workflow_versions()
     ensure_notifications_table()
     ensure_documents_created_by()
     ensure_documents_storage_columns()  # M38.1: storage backend abstraction

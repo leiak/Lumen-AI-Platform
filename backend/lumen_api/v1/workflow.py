@@ -86,7 +86,14 @@ async def create_workflow(
     db: Session = Depends(get_db)
 ):
     service = WorkflowService()
-    workflow = service.create_workflow(db, current_user.tenant_id, data)
+    # 2.1 B.1 (2026-09-08): forward actor so the seed WorkflowVersion
+    # row records who created the workflow.
+    workflow = service.create_workflow(
+        db,
+        current_user.tenant_id,
+        data,
+        actor_user_id=current_user.id,
+    )
     return SingleResponse(data=WorkflowResponse.model_validate(workflow))
 
 
@@ -138,7 +145,16 @@ async def update_workflow(
             )
     try:
         workflow = service.update_workflow(
-            db, workflow_id, current_user.tenant_id, data, if_match_updated_at=if_match_dt
+            db,
+            workflow_id,
+            current_user.tenant_id,
+            data,
+            if_match_updated_at=if_match_dt,
+            # 2.1 B.1 (2026-09-08): forward the actor + change_summary
+            # to the version+1 trigger so the ``WorkflowVersion`` row
+            # records who saved what.
+            actor_user_id=current_user.id,
+            change_summary=data.change_summary,
         )
     except WorkflowConflictError as conflict:
         # 409 Conflict with structured detail so the frontend toast

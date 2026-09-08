@@ -1232,6 +1232,114 @@ def ensure_workflow_versions_table() -> None:
         )
 
 
+def ensure_workflow_version_column() -> None:
+    """2.1 B.1 (2026-09-08): add ``workflows.version`` Integer column if missing.
+
+    Pre-2.1 ``Workflow`` rows have ``version=0`` (the new server_default),
+    and ``bootstrap_workflow_versions()`` immediately bumps them to ``1``
+    while inserting the baseline row. New workflows created post-2.1 also
+    default to ``0`` and ``bootstrap_workflow_versions`` is idempotent so
+    it'll either skip them (if they already have a version row from
+    ``create_workflow``) or seed one.
+
+    Guarded by ``_column_exists`` so the migration is a no-op after the
+    first run. Mirrors the M38.1 / M38.2 column-add pattern. Safe to call
+    on every uvicorn boot.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        with engine.begin() as conn:
+            if not _column_exists("workflows", "version"):
+                conn.execute(text(
+                    "ALTER TABLE workflows "
+                    "ADD COLUMN version INT NOT NULL DEFAULT 0"
+                ))
+    except Exception:
+        logger.exception(
+            "ensure_workflow_version_column failed; will retry on next startup"
+        )
+
+
+def bootstrap_workflow_versions() -> None:
+    """2.1 B.1 (2026-09-08): seed a baseline ``WorkflowVersion`` row for
+    every pre-2.1 workflow that has zero version rows.
+
+    Why one baseline row per workflow:
+
+    - The list endpoint is used by the designer UI's "history" drawer
+      to render a list of past saves. Pre-2.1 workflows that have been
+      edited many times but never had a version snapshot would render
+      as "no history" even though the user has clearly saved many
+      times. The baseline row represents "this was the state at the
+      moment 2.1 shipped" so the history list is never empty.
+    - The bootstrap is **idempotent**: a workflow with at least one
+      existing ``WorkflowVersion`` row is left alone (subsequent runs
+      are no-ops). New workflows created post-2.1 may also be skipped
+      if ``create_workflow`` already seeded a baseline.
+
+    Implementation:
+
+    1. Subquery: find workflow ids with no ``WorkflowVersion`` rows.
+    2. For each such workflow, insert version=1 with the current
+       ``Workflow.definition`` as the snapshot, then bump
+       ``workflow.version`` to ``1``.
+
+    This runs in a single connection so the SELECT + INSERT loop stays
+    transactional. For ~100s of workflows the loop is sub-second; if
+    the fleet ever grows beyond that, the obvious follow-up is to
+    batch with ``INSERT ... SELECT`` (deferred — not needed yet).
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from lumen_models.workflow import Workflow, WorkflowVersion
+        db = SessionLocal()
+        try:
+            # workflow_ids that have no version row yet
+            unseeded = (
+                db.query(Workflow.id)
+                .outerjoin(
+                    WorkflowVersion,
+                    WorkflowVersion.workflow_id == Workflow.id,
+                )
+                .filter(WorkflowVersion.id.is_(None))
+                .all()
+            )
+            if not unseeded:
+                return
+            for (workflow_id,) in unseeded:
+                wf = db.get(Workflow, workflow_id)
+                if wf is None:
+                    continue
+                # 已经有 row 了(并发 bootstrap 重入)就跳过
+                existing = (
+                    db.query(WorkflowVersion)
+                    .filter(WorkflowVersion.workflow_id == workflow_id)
+                    .first()
+                )
+                if existing is not None:
+                    continue
+                db.add(WorkflowVersion(
+                    workflow_id=workflow_id,
+                    version=1,
+                    definition_snapshot=wf.definition,
+                    change_summary=None,
+                    created_by_user_id=None,
+                ))
+                wf.version = 1
+            db.commit()
+            logger.info(
+                f"bootstrap_workflow_versions: seeded {len(unseeded)} baseline rows"
+            )
+        finally:
+            db.close()
+    except Exception:
+        logger.exception(
+            "bootstrap_workflow_versions failed; will retry on next startup"
+        )
+
+
 def ensure_global_memories_conversation_id() -> None:
     """Add ``conversation_id`` to ``global_memories`` if it's missing.
 

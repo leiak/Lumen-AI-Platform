@@ -1,3 +1,4 @@
+import copy
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional
 
@@ -81,15 +82,37 @@ class WorkflowService:
         return {"items": items, "total": total}
 
     def create_workflow(
-        self, db: Session, tenant_id: int, data: WorkflowCreate
+        self,
+        db: Session,
+        tenant_id: int,
+        data: WorkflowCreate,
+        *,
+        actor_user_id: Optional[int] = None,
     ) -> Workflow:
+        """Create a workflow.
+
+        2.1 B.1 (2026-09-08): seed version=1 baseline row so the
+        history drawer has something to show from the moment the
+        workflow exists. ``actor_user_id`` (optional kwarg) records
+        who created it on the baseline row's
+        ``created_by_user_id`` column.
+        """
         workflow = Workflow(
             name=data.name,
             description=data.description,
             definition=data.definition.model_dump(),
             tenant_id=tenant_id,
+            version=1,
         )
         db.add(workflow)
+        db.flush()  # populate workflow.id without committing yet
+        db.add(WorkflowVersion(
+            workflow_id=workflow.id,
+            version=1,
+            definition_snapshot=copy.deepcopy(workflow.definition),
+            change_summary="Initial version",
+            created_by_user_id=actor_user_id,
+        ))
         db.commit()
         db.refresh(workflow)
         return workflow
@@ -107,6 +130,9 @@ class WorkflowService:
         tenant_id: int,
         data: WorkflowUpdate,
         if_match_updated_at: Optional[datetime] = None,
+        *,
+        actor_user_id: Optional[int] = None,
+        change_summary: Optional[str] = None,
     ) -> Optional[Workflow]:
         """Apply a partial update to a workflow.
 
@@ -124,6 +150,13 @@ class WorkflowService:
         When ``if_match_updated_at`` is None (the legacy call sites
         don't supply it), the behavior is unchanged from 1.0 — the
         last-write-wins.
+
+        2.1 B.1 (2026-09-08): every successful PUT writes a new
+        ``WorkflowVersion`` row and bumps ``workflow.version`` by 1.
+        ``change_summary`` and ``actor_user_id`` are optional
+        kwargs (forwarded by the router from the body's
+        ``change_summary`` field + ``current_user.id``); when None
+        the row is still inserted but those columns are NULL.
 
         Returns the updated workflow, or ``None`` when the workflow
         doesn't exist in this tenant.
@@ -145,12 +178,53 @@ class WorkflowService:
                     submitted=if_match_updated_at,
                 )
 
+        # 2.1 B.1: snapshot pre-update definition so the new
+        # ``WorkflowVersion`` row captures the state being replaced.
+        # JSON column comes back as a dict already (typed JSON), but
+        # we deepcopy to insulate the snapshot from later mutation
+        # by the request handler.
+        pre_update_definition = (
+            copy.deepcopy(workflow.definition)
+            if workflow.definition is not None
+            else None
+        )
+
         update_data = data.model_dump(exclude_unset=True)
         # data.model_dump() already serializes the nested WorkflowDefinition to a dict,
         # so no further conversion is needed here.
 
+        # 2.1 B.1 (2026-09-08): pull ``change_summary`` out of the
+        # update payload — it isn't a ``Workflow`` column, it's the
+        # change message we attach to the new ``WorkflowVersion`` row.
+        # Anything left in ``update_data`` is then guaranteed to be a
+        # real ``Workflow`` column (``name`` / ``description`` /
+        # ``definition`` / ``is_active``), so the ``setattr`` loop
+        # below stays safe.
+        body_change_summary = update_data.pop("change_summary", None)
+        effective_change_summary = (
+            body_change_summary if body_change_summary is not None else change_summary
+        )
+
         for field, value in update_data.items():
             setattr(workflow, field, value)
+
+        # Bump version + insert a new ``WorkflowVersion`` row in the
+        # same transaction as the workflow update. The unique index
+        # ``idx_workflow_version_unique (workflow_id, version)`` is the
+        # last-line race guard: if two PUTs raced and both computed
+        # ``new_version = N`` from the same snapshot, the second
+        # commit hits Duplicate entry → DB IntegrityError → the
+        # caller's transaction is rolled back. The frontend's
+        # 409 retry path then re-reads + re-saves cleanly.
+        new_version = (workflow.version or 0) + 1
+        workflow.version = new_version
+        db.add(WorkflowVersion(
+            workflow_id=workflow.id,
+            version=new_version,
+            definition_snapshot=pre_update_definition,
+            change_summary=effective_change_summary,
+            created_by_user_id=actor_user_id,
+        ))
 
         db.commit()
         db.refresh(workflow)

@@ -12,6 +12,13 @@ class Workflow(BaseModel):
     definition = Column(JSON, nullable=False)  # DAG definition
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
     is_active = Column(Boolean, default=True)
+    # 2.1 B.1 (2026-09-08): current "保存即 version +1" counter.
+    # 服务器侧 ground truth,跟 ``WorkflowVersion`` 表的 max(version)
+    # 同步;前端只读。Default=0 让 pre-2.1 老 workflow bootstrap 后才
+    # 升到 1(走 ``bootstrap_workflow_versions()`` 一次性补 baseline),
+    # 避免 PUT 老 workflow 时跳号。新 workflow create_workflow 直接写
+    # ``version=1``,然后 bootstrap 看到已有 version row 跳过。
+    version = Column(Integer, nullable=False, default=0, server_default="0")
 
     tenant = relationship("Tenant", backref="workflows")
     runs = relationship("WorkflowRun", back_populates="workflow", cascade="all, delete-orphan")

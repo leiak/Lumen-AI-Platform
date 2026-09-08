@@ -42,6 +42,12 @@ class WorkflowUpdate(BaseModel):
     description: Optional[str] = None
     definition: Optional[WorkflowDefinition] = None
     is_active: Optional[bool] = None
+    # 2.1 B.1 (2026-09-08): optional free-text summary of this save
+    # (e.g. "调高 temperature 到 0.7"). Forwarded to the
+    # ``WorkflowVersion.change_summary`` column when the row is
+    # written by the PUT trigger. Optional + nullable so legacy
+    # callers that don't know about the field stay backward-compat.
+    change_summary: Optional[str] = None
 
 
 class WorkflowResponse(WorkflowBase):
@@ -61,6 +67,11 @@ class WorkflowResponse(WorkflowBase):
     # we add later don't get silently stripped by Pydantic. The DB
     # column is a JSON blob; this is the round-trip carrier.
     definition: Optional[Dict[str, Any]] = None
+    # 2.1 B.1 (2026-09-08): current version counter, bumped by 1 on
+    # every successful PUT. Echoed on every response so the UI can
+    # show "version 17" badge next to the workflow name without an
+    # extra round-trip to /workflows/{id}/versions.
+    version: Optional[int] = None
 
     class Config:
         from_attributes = True
