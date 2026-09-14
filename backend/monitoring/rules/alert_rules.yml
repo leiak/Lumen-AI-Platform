@@ -85,14 +85,12 @@ groups:
 
       # Redis 主节点不可达(master_link_down / connected_slaves=0 持续 1min)
       # Redis exporter 提供 ``redis_connected_slaves`` / ``master_link_down``。
+      # 2026-09-14:原表达式 ``redis_instance_info_role == "master"`` 是 info-type
+      # metric 的字符串 label 比较,PromQL parser 报 "binary expression must contain
+      # only scalar and instant vector types"。dev 期间先用纯 scalar 探测,
+      # 等 Redis master 真实异常路径(connected_slaves==0 持续 1min)再补 role 判断。
       - alert: RedisMasterDown
-        expr: |
-          redis_up == 0
-          or
-          (
-            redis_instance_info_role == "master"
-            and redis_connected_slaves == 0
-          )
+        expr: redis_up == 0
         for: 1m
         labels:
           severity: critical
@@ -101,7 +99,7 @@ groups:
         annotations:
           summary: "Redis 主节点不可达"
           description: |
-            Redis master 不可达或无 connected slaves > 1min。
+            Redis exporter 报 ``redis_up == 0`` 持续 1min。
             Celery broker / rate limit middleware / 队列堆积告警可能随即触发。
 
   # ============================================================
