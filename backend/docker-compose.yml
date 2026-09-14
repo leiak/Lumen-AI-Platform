@@ -285,7 +285,7 @@ services:
       - jaeger_data:/badger
     healthcheck:
       # jaegertracing/all-in-one 镜像有 wget,14269 是 admin port,/status 返 "ok"
-      test: ["CMD-SHELL", "wget -qO- http://localhost:14269/status | grep -q ok || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:14269/status | grep -q 'Server available' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -298,12 +298,18 @@ services:
     # otel/opentelemetry-collector-contrib 含 jaeger / prometheus / batch 等 contrib exporter,
     # 而 otel/opentelemetry-collector(无 -contrib)只含 core subset。
     # 8889 是 prometheus exporter 端口(8888 已被 Jupyter 占),13133 是 health_check UI。
+    #
+    # 端口冲突修复(2026-09-14):原 ``4317:4317`` / ``4318:4318`` 与
+    # jaeger 撞 host 端口(两 service 同时 up 会随机一个起不来)。
+    # 改 host 端口 ``14317`` / ``14318``,容器内端口不变,backend 仍可
+    # 走 ``lumen-platform-otel-collector:4317``(docker network 内),
+    # 或外网 ``localhost:14317`` 调试。8889/13133 不冲突保留。
     image: otel/opentelemetry-collector-contrib:latest
     container_name: lumen-platform-otel-collector
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     ports:
-      - "4317:4317"   # OTLP gRPC(backend 用)
-      - "4318:4318"   # OTLP HTTP(同上)
+      - "14317:4317"  # OTLP gRPC,backend 用 docker network 名直连,14317 仅 dev 调试
+      - "14318:4318"  # OTLP HTTP,同上
       - "8889:8889"   # prometheus exporter(prometheus 容器内 scrape)
       - "13133:13133" # health_check extension(dev 调试用)
     volumes:
