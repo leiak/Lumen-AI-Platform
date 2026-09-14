@@ -494,7 +494,7 @@ def _get_minimax_key() -> str:
 
 
 def upsert_default_model_configs() -> None:
-    """Insert/update three rows mirroring the pre-reset DB state.
+    """Insert/update four rows mirroring the pre-reset DB state.
 
     - Row 1: MiniMax-M2.7-highspeed, is_default=1, is_chat=1,
       is_openclaw=1 (the OpenClaw gateway talks to this one).
@@ -506,6 +506,24 @@ def upsert_default_model_configs() -> None:
       _persists_conversation_id_to_global``) patch this row's base_url
       in place; the seed ensures the row exists at all so the test
       has something to query.
+    - Row 4: nomic-embed-text, is_embedding=1, tenant_id=NULL
+      (global builtin,visible to all tenants — see
+      ``lumen_api/v1/models.py:54`` 注释 and MEMORY.md "ModelConfig
+      查询必须支持 global builtin" 段). KB doc 上传默认 embedding。
+
+    注意:**ollama 类型的 base_url 不在 seed 写死**。reason:Ollama endpoint
+    是部署环境耦合的(容器里是 ``http://ollama:11434``,host 直连是
+    ``http://localhost:11434``),写死 host 路径会让 docker compose 起的
+    celery worker 用错地址 → embed 阶段 ConnectionError。factory 走
+    ``embedding_factory.py:91`` 时,base_url=NULL 会回退到
+    ``settings.OLLAMA_API_BASE``(由 ``.env`` / ``.env.docker`` 注入)。
+
+    ``qwen2.5:0.5b`` 也以 ``base_url=None`` 入库(idempotent 升级路径下
+    只在 ``cfg["base_url"] is not None`` 时覆盖,所以旧的
+    ``http://localhost:11434`` 值不会被 reset)。这台机器目前 chat 路径
+    只用 M2.7-highspeed(M3 fallback),qwen2.5:0.5b 没人调用 —— 不动它
+    是有意的,避免覆盖 admin 手动改过的 base_url。如需重置,手动
+    ``UPDATE model_configs SET base_url=NULL WHERE name='qwen2.5:0.5b'``。
     """
     db = SessionLocal()
     try:
@@ -519,6 +537,8 @@ def upsert_default_model_configs() -> None:
                 "is_default": True,
                 "is_chat": True,
                 "is_openclaw": True,
+                "is_embedding": False,
+                "tenant_id": 1,
             },
             {
                 "name": "MiniMax-M3",
@@ -529,16 +549,34 @@ def upsert_default_model_configs() -> None:
                 "is_default": False,
                 "is_chat": True,
                 "is_openclaw": False,
+                "is_embedding": False,
+                "tenant_id": 1,
             },
             {
                 "name": "qwen2.5:0.5b",
                 "model_type": "ollama",
                 "model_name": "qwen2.5:0.5b",
-                "base_url": "http://localhost:11434",
+                "base_url": None,  # 让 factory 走 settings.OLLAMA_API_BASE
                 "api_key": "ollama",  # Ollama ignores; required by schema
                 "is_default": False,
                 "is_chat": True,
                 "is_openclaw": False,
+                "is_embedding": False,
+                "tenant_id": 1,
+            },
+            {
+                "name": "nomic-embed-text",
+                "model_type": "ollama",
+                "model_name": "nomic-embed-text",
+                "base_url": None,  # 让 factory 走 settings.OLLAMA_API_BASE
+                "api_key": "ollama",  # Ollama ignores; required by schema
+                "is_default": False,
+                "is_chat": False,
+                "is_openclaw": False,
+                "is_embedding": True,
+                # global builtin —— tenant_id=NULL,所有租户可见
+                # (MEMORY.md "ModelConfig 查询必须支持 global builtin")
+                "tenant_id": None,
             },
         ]
         for cfg in rows:
@@ -558,23 +596,33 @@ def upsert_default_model_configs() -> None:
                     is_default=cfg["is_default"],
                     is_active=True,
                     is_chat=cfg["is_chat"],
-                    is_embedding=False,
+                    is_embedding=cfg["is_embedding"],
                     is_image_generation=False,
                     # is_openclaw field lives on the
                     # feat/openclaw-integration branch (M23 PoC) and
                     # is not on master; skip it here.
-                    # tenant_id=1 (not NULL) so that test fixtures which
-                    # filter by ``ModelConfig.tenant_id == 1`` pick up
-                    # the seeded row.
-                    tenant_id=1,
+                    # tenant_id=1 (not NULL) for chat rows so that test
+                    # fixtures which filter by ``ModelConfig.tenant_id == 1``
+                    # pick up the seeded row. Embedding row keeps NULL
+                    # so it acts as a global builtin (visible to every
+                    # tenant; see lumen_api/v1/models.py:54).
+                    tenant_id=cfg["tenant_id"],
                 )
                 db.add(row)
             else:
-                existing.base_url = cfg["base_url"]
+                # Idempotent: refresh mutable fields, but DO NOT overwrite
+                # base_url for ollama rows when it was previously cleared
+                # (None). Tests + manual admin tweaks may have moved it to
+                # NULL intentionally — we don't want to revert their work.
+                # Only reset base_url when cfg supplies a non-None value
+                # (the MiniMax chat rows).
+                if cfg["base_url"] is not None:
+                    existing.base_url = cfg["base_url"]
                 existing.api_key = cfg["api_key"]
                 existing.is_default = cfg["is_default"]
                 existing.is_chat = cfg["is_chat"]
-                existing.tenant_id = 1
+                existing.is_embedding = cfg["is_embedding"]
+                existing.tenant_id = cfg["tenant_id"]
                 existing.is_active = True
         db.commit()
         # Also clear is_default on any other row so our M2.7-highspeed is
@@ -587,7 +635,8 @@ def upsert_default_model_configs() -> None:
         print(
             "[7/8] default model configs upserted "
             "(MiniMax-M2.7-highspeed=default+openclaw, "
-            "MiniMax-M3=fallback, qwen2.5:0.5b=ollama-dev)"
+            "MiniMax-M3=fallback, qwen2.5:0.5b=ollama-dev, "
+            "nomic-embed-text=global-embedding)"
         )
     finally:
         db.close()

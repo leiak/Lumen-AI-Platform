@@ -14,14 +14,15 @@ def _clear_cache():
 
 
 def _make_db(config_id, *, is_active=True, is_embedding=True,
-             model_type="ollama", model_name="nomic-embed-text"):
+             model_type="ollama", model_name="nomic-embed-text",
+             base_url="http://localhost:11434"):
     cfg = MagicMock()
     cfg.id = config_id
     cfg.is_active = is_active
     cfg.is_embedding = is_embedding
     cfg.model_type = model_type
     cfg.model_name = model_name
-    cfg.base_url = "http://localhost:11434"
+    cfg.base_url = base_url
     cfg.api_key = None
     db = MagicMock()
     db.get.return_value = cfg
@@ -194,3 +195,63 @@ def test_openai_embeddings_passes_proxy_bypass_to_both_clients():
     # routes sync + async through the bypassed httpx clients
     assert kwargs["http_client"] is MockHttpx.Client.return_value
     assert kwargs["http_async_client"] is MockHttpx.AsyncClient.return_value
+
+
+# ---- 2026-09-14: KB doc 上传分块失败 root cause -----------------------
+#
+# ``model_configs.base_url`` 写死 ``http://localhost:11434`` 在 host
+# 直连时是对的,但 docker compose 起的 celery worker 容器里
+# ``localhost:11434`` 不是 ollama。正确 base_url 是
+# ``http://ollama:11434``(docker network 名)或 NULL(让 factory 走
+# ``settings.OLLAMA_API_BASE``)。
+#
+# 行为契约(``lumen_services/embedding_factory.py:91``):
+#   - ``cfg.base_url`` 非空 → 用 cfg.base_url
+#   - ``cfg.base_url`` 为空 (NULL 或 "") → 回退到 ``settings.OLLAMA_API_BASE``
+#
+# 这是 Docker / dev / prod 三环境 base_url 注入的单一真相源;测试守住
+# 这条边界,任何把 NULL/空串错位覆盖成 ``localhost:11434`` 的改动都会
+# 在 CI 立即 fail。
+
+
+def test_uses_settings_when_ollama_base_url_is_null():
+    """NULL base_url → factory 用 ``settings.OLLAMA_API_BASE``,不抛异常,
+    也不 silently fallback 到 ``http://localhost:11434``(那会让容器化
+    worker 走错地址)。
+    """
+    from lumen_services.embedding_logging import LoggingEmbeddings
+    from lumen_core.httpx_bypass import bypass_proxy_client_kwargs
+
+    db, cfg = _make_db(22, base_url=None)
+    with patch("lumen_services.embedding_factory.OllamaEmbeddings") as MockOll:
+        MockOll.return_value.embed_query.return_value = [0.1] * 768
+        emb, dim = embedding_factory.get_embeddings_for_config(22, db)
+    MockOll.assert_called_once_with(
+        model="nomic-embed-text",
+        # settings.OLLAMA_API_BASE 默认 ``http://localhost:11434``(host 直连),
+        # 容器内由 .env.docker 覆盖为 ``http://ollama:11434``。
+        # factory 必须用 settings,而不是 cfg.base_url(None)。
+        base_url=embedding_factory.settings.OLLAMA_API_BASE,
+        client_kwargs=bypass_proxy_client_kwargs(),
+    )
+    assert dim == 768
+    assert isinstance(emb, LoggingEmbeddings)
+
+
+def test_uses_settings_when_ollama_base_url_is_empty_string():
+    """空串 base_url 跟 NULL 等价 —— 仍回退到 settings。
+
+    模型配置可能被 admin 误填成空串(后端 Pydantic 没强制非空),
+    factory 必须用 falsy 检查覆盖两种情形。
+    """
+    from lumen_core.httpx_bypass import bypass_proxy_client_kwargs
+
+    db, cfg = _make_db(23, base_url="")
+    with patch("lumen_services.embedding_factory.OllamaEmbeddings") as MockOll:
+        MockOll.return_value.embed_query.return_value = [0.1] * 768
+        embedding_factory.get_embeddings_for_config(23, db)
+    MockOll.assert_called_once_with(
+        model="nomic-embed-text",
+        base_url=embedding_factory.settings.OLLAMA_API_BASE,
+        client_kwargs=bypass_proxy_client_kwargs(),
+    )
