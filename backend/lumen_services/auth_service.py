@@ -9,7 +9,18 @@ from lumen_core.tenant import TenantContext
 class AuthService:
     @staticmethod
     def authenticate_user(db: Session, username: str, password: str) -> Optional[User]:
-        user = db.query(User).filter(User.username == username).first()
+        # ORDER BY id ASC 让多账号时稳定选最小 id —— pytest fixture
+        # 残留 / 多次 init_dev_db 跑可能产生多条同 username 行(例:admin),
+        # 不指定排序的话 .first() 在不同 query plan 下返回不同行,撞到
+        # hash 不全的那条就 500(passlib.exc.UnknownHashError)。
+        # 2026-09-14 实际故障:dev DB 有 id=1 (hashed_password='x' 占位
+        # 行) + id=12 (真 admin),未指定排序时随机命中 id=1 → login 500。
+        user = (
+            db.query(User)
+            .filter(User.username == username)
+            .order_by(User.id.asc())
+            .first()
+        )
         if not user:
             return None
         if not verify_password(password, user.hashed_password):
