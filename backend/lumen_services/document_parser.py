@@ -5,6 +5,13 @@ from typing import Optional, Dict, Any, List, Tuple
 logger = logging.getLogger(__name__)
 
 class DocumentParser:
+    #: Plain-text formats that bypass Docling entirely. Docling treats
+    #: these as binary PDF candidates and raises
+    #: ``pypdfium2: PdfiumError: Failed to load document`` for non-PDF
+    #: content — we just read the bytes ourselves. Class-level (not
+    #: ``__init__``) so tests can introspect without instantiating.
+    PLAIN_TEXT_FORMATS = {"txt", "markdown", "html"}
+
     def __init__(self):
         self.supported_formats = {
             '.pdf': 'pdf',
@@ -89,6 +96,53 @@ class DocumentParser:
         parse_path, temp_path, storage_key_used = self._resolve_parse_path(file_path, storage_key)
         ext = os.path.splitext(parse_path)[1].lower()
         doc_format = self.supported_formats.get(ext, 'unknown')
+
+        # Plain-text formats (.txt / .md / .html / .htm) bypass Docling
+        # entirely. Docling treats ``.txt`` as a binary PDF candidate
+        # and raises ``pypdfium2: PdfiumError: Failed to load document
+        # (PDFium: Data format error)`` because the file isn't a PDF.
+        # Same hazard for .md (Markdown is technically text but Docling
+        # still routes it through PDF pipeline) and .html / .htm (which
+        # Docling also mis-parses as PDF). Read the bytes ourselves —
+        # cheap, exact, and matches what users actually expect for a
+        # plain-text upload.
+        PLAIN_TEXT_FORMATS = self.PLAIN_TEXT_FORMATS
+        if doc_format in PLAIN_TEXT_FORMATS:
+            try:
+                with open(parse_path, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            except OSError as e:
+                logger.warning("plain-text read failed for %s: %s", parse_path, e)
+                text = ""
+            # Build a minimal result dict that mimics what the parser
+            # chain returns, so downstream ``_create_chunks`` /
+            # metadata.record run unchanged.
+            result = {
+                "text": text,
+                "metadata": {
+                    "type": "general",
+                    "format": doc_format,
+                    "parser": "plain_text_fastpath",
+                    "file_path": parse_path,
+                },
+            }
+            if storage_key and storage_key_used:
+                result["metadata"]["storage_key"] = storage_key
+            # secondary split — txt/md/html 都走 fixed 500/50
+            # (general 默认),chunks 跟 Docling 路径完全一致
+            result["chunks"] = self._create_chunks(
+                text, "general",
+                chunking_strategy=chunking_strategy,
+                chunking_params=chunking_params,
+            )
+            # temp_path cleanup:early-return 绕开了下面的 try/finally
+            # 块,这里手动清理,避免 S3 临时文件残留。
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+            return result
 
         # Get the appropriate parser
         from lumen_services.parsers import DocumentParserFactory
