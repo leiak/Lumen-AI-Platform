@@ -41,13 +41,20 @@ class ModelConfigBase(BaseModel):
     # 跟 is_default 同套路:`model_configs.temperature/max_tokens/timeout` 三列
     # 允许 NULL(早期 row 没填),Pydantic 严格 float/int 校验 None 会让
     # `GET /models/` 整 endpoint 500 — workflow designer LLM 节点的 ModelSelector
-    # 因此加载不出任何模型。None 兜底成 Field 默认值(0.7 / 4096 / 120),
+    # 因此加载不出任何模型。None/0 都兜底成 Field 默认值(0.7 / 4096 / 120),
     # 响应保持类型对齐前端 TS,不改 schema 字段语义。
+    # 2026-09-14 follow-up:dev DB 里 ``nomic-embed-text`` (id=4) 的
+    # ``max_tokens=0`` 是 init_dev_db seed 时漏填字段导致的(inline
+    # ``ModelConfig(...)`` 构造没设 max_tokens,column default 0),
+    # 不是 NULL 触发 500 而是 0 撞 ``Field(gt=0)`` 触发 500 → 前端
+    # agent 编辑下拉加载不到任何 model。把 0 一并兜底。
     @field_validator("temperature", "max_tokens", "timeout", mode="before")
     @classmethod
     def _coerce_optional_defaults(cls, v: Any, info: Any) -> Any:
-        if v is None:
-            defaults = {"temperature": 0.7, "max_tokens": 4096, "timeout": 120}
+        defaults = {"temperature": 0.7, "max_tokens": 4096, "timeout": 120}
+        if v is None or (info.field_name in ("max_tokens", "timeout") and v == 0):
+            # temperature=0 是合法值(精确模式)只兜 None;
+            # max_tokens/timeout 不能 0 (Field gt=0) 兜 None + 0。
             return defaults[info.field_name]
         return v
 

@@ -591,6 +591,13 @@ def upsert_default_model_configs() -> None:
                     base_url=cfg["base_url"],
                     api_key=cfg["api_key"],
                     temperature=0.7,
+                    # max_tokens=4096 全行统一 —— embedding model 的
+                    # max_tokens 在概念上不存在,但 ``ModelConfigResponse``
+                    # schema (lumen_api/v1/models.py:87) 要求 > 0,
+                    # ``nomic-embed-text`` 没显式设时会落 schema 默认 0
+                    # → GET /api/v1/models/ 500,前端 agent 编辑下拉
+                    # 全空。修法见 commit ``5c96528`` 后续 follow-up
+                    # (2026-09-14)。
                     max_tokens=4096,
                     timeout=120,
                     is_default=cfg["is_default"],

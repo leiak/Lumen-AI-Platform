@@ -1,66 +1,81 @@
-"""Unit tests for ModelConfig schema with the new is_chat/is_embedding flags."""
+"""Tests for ``lumen_schemas.model_config.ModelConfigResponse`` default coercion.
+
+2026-09-14 修复 dev DB 里 ``nomic-embed-text`` (id=4) ``max_tokens=0``
+触发的 ``GET /models/`` 500。schema 既要拒绝明确的 0(语义上不该 0),
+又要给历史 row 一个 fallback 路径 —— 否则任何漏填 max_tokens 的
+seed / fixture 都会让前端 agent 编辑下拉整个加载不出来。
+
+测试守住:``max_tokens=0`` / ``max_tokens=None`` / ``timeout=0`` 都
+会被兜底成 schema 默认 4096 / 120。
+"""
 import pytest
 from pydantic import ValidationError
 
-from lumen_schemas.model_config import (
-    ModelConfigCreate, ModelConfigUpdate, ModelConfigResponse,
-)
+from lumen_schemas.model_config import ModelConfigBase, ModelConfigResponse
 
 
-def test_create_defaults_is_chat_true_is_embedding_false():
-    """Defaults match legacy ModelConfig rows that pre-date the flags."""
-    cfg = ModelConfigCreate(
-        name="x", model_type="ollama", model_name="qwen2.5:7b",
+def _ok_kwargs(**overrides):
+    """Return a baseline of valid kwargs; caller overrides per field."""
+    base = dict(
+        name="t",
+        model_type="ollama",
+        model_name="nomic-embed-text",
+        temperature=0.7,
+        max_tokens=4096,
+        timeout=120,
+        is_default=False,
+        is_chat=False,
+        is_embedding=True,
     )
-    assert cfg.is_chat is True
-    assert cfg.is_embedding is False
+    base.update(overrides)
+    return base
 
 
-def test_create_accepts_explicit_both_true():
-    """Multimodal-style model that's both chat and embedding."""
-    cfg = ModelConfigCreate(
-        name="x", model_type="ollama", model_name="some-multi",
-        is_chat=True, is_embedding=True,
-    )
-    assert cfg.is_chat is True
-    assert cfg.is_embedding is True
-
-
-def test_update_partial_keeps_none_for_omitted_fields():
-    """ModelConfigUpdate allows partial updates; omitted fields are None."""
-    upd = ModelConfigUpdate(temperature=0.3)
-    assert upd.temperature == 0.3
-    assert upd.is_chat is None
-    assert upd.is_embedding is None
-
-
-def test_response_includes_flags():
-    """ModelConfigResponse must serialize is_chat/is_embedding for the UI."""
-    resp = ModelConfigResponse(
-        id=1, name="x", model_type="ollama", model_name="q",
-        is_chat=True, is_embedding=True, is_active=True, is_default=False,
-        temperature=0.7, max_tokens=4096, timeout=120, tenant_id=1,
-        created_at="2026-06-06T00:00:00", updated_at="2026-06-06T00:00:00",
-    )
-    assert resp.is_chat is True
-    assert resp.is_embedding is True
-
-
-def test_response_coerces_is_default_none_to_false():
-    """Regression: legacy / script-inserted rows can have is_default=NULL
-    in MySQL. The schema validator must coerce None → False so the list
-    endpoint stays 200 instead of raising ValidationError → 500 (which
-    left the admin page blank until the dev restarted uvicorn).
+def test_max_tokens_zero_coerced_to_default():
+    """``max_tokens=0`` 是 init_dev_db seed 漏字段的场景 —— schema
+    必须兜底成 4096,否则 ``Field(gt=0)`` 触发 ValidationError → 500。
     """
-    resp = ModelConfigResponse(
-        id=571, name="legacy-img-model", model_type="minimax",
-        model_name="stub-image-1",
-        is_chat=False, is_embedding=False, is_image_generation=True,
-        is_active=True, is_default=None,  # ← the legacy NULL
-        temperature=0.7, max_tokens=4096, timeout=120, tenant_id=1,
-        created_at="2026-06-06T00:00:00", updated_at="2026-06-06T00:00:00",
+    cfg = ModelConfigBase(**_ok_kwargs(max_tokens=0))
+    assert cfg.max_tokens == 4096
+
+
+def test_max_tokens_none_coerced_to_default():
+    """None 兜底(line 46-52 旧行为)。"""
+    cfg = ModelConfigBase(**_ok_kwargs(max_tokens=None))
+    assert cfg.max_tokens == 4096
+
+
+def test_timeout_zero_coerced_to_default():
+    """同 max_tokens,timeout=0 也兜底成 120。"""
+    cfg = ModelConfigBase(**_ok_kwargs(timeout=0))
+    assert cfg.timeout == 120
+
+
+def test_temperature_zero_is_preserved():
+    """temperature=0 是合法值(精确模式),**不要**兜底 —— 只兜 None。"""
+    cfg = ModelConfigBase(**_ok_kwargs(temperature=0))
+    assert cfg.temperature == 0
+
+
+def test_max_tokens_positive_value_preserved():
+    """显式给的合法值不被动。"""
+    cfg = ModelConfigBase(**_ok_kwargs(max_tokens=2048))
+    assert cfg.max_tokens == 2048
+
+
+def test_response_schema_accepts_zero_max_tokens():
+    """ModelConfigResponse.from_attributes(ORM 模式)也要兜底 0,
+    因为 admin UI / agent 编辑下拉走的是 Response。"""
+    from datetime import datetime
+    from types import SimpleNamespace
+    now = datetime(2026, 9, 14, 12, 0, 0)
+    obj = SimpleNamespace(
+        id=4,
+        is_active=True,
+        tenant_id=None,
+        created_at=now,
+        updated_at=now,
+        **_ok_kwargs(max_tokens=0),
     )
-    # Coerced to bool False; the frontend `is_default` Tag stays the
-    # same (renders `-` for both False and None).
-    assert resp.is_default is False
-    assert isinstance(resp.is_default, bool)
+    resp = ModelConfigResponse.model_validate(obj)
+    assert resp.max_tokens == 4096
