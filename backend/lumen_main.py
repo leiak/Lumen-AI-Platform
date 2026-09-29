@@ -13,6 +13,7 @@ load_dotenv()
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from lumen_core.checkpointer import CheckpointerService  # M39 T1.4: LangGraph checkpoint singleton
 from lumen_core.config import settings
 from lumen_core.dynamic_cors import DynamicCORSMiddleware
 from lumen_api.middleware.trace_id import TraceIdMiddleware  # Phase 0 Unit 5 4.2
@@ -462,6 +463,12 @@ async def _shutdown_cleanup(
     from lumen_core.otel import force_flush
 
     force_flush(timeout_millis=5000)
+    # M39 T1.4 (2026-09-29):关 LangGraph CheckpointerService 的 psycopg
+    # ConnectionPool,优雅等 in-flight save 归还连接再 close。`_saver is not None`
+    # 守门 —— 防御 startup 失败导致 _saver 仍为 None 的边界场景,close()
+    # 内部已 nullify,二次调用幂等。
+    if settings.LANGGRAPH_CHECKPOINT_ENABLED and CheckpointerService._saver is not None:
+        CheckpointerService.close()
     # 关闭 SQLAlchemy 连接池,避免 taskkill / SIGTERM 后 MySQL 留 Sleep
     # 连接持 MDL 导致下个 uvicorn 启动时 ensure_* ALTER 卡 MDL 等候链
     # (2026-06-08 第 5 次重启时踩到,KILL 孤儿连接后才恢复)。
@@ -716,6 +723,15 @@ async def _lifespan(app: FastAPI):
             _lifespan_logger.getLogger(__name__).warning(
                 "slo_budget_calculator start failed (%s); SLO gauges will stay at default", e,
             )
+
+    # M39 T1.4 (2026-09-29):LangGraph Checkpointer lifespan 集成。
+    # 放 startup 末尾 —— 让 scheduler / monitor 任务先启(它们不依赖
+    # Checkpointer),CheckpointerService 最后建 ConnectionPool + 建 PG 表,
+    # 失败时整体 startup 抛错,_startup_complete 不 flip → /startup 503
+    # 提示 K8s 不要派流量进来。setup() 内部 idempotent + 失败时主动
+    # close 释放半构造 pool,下次重启是干净的初始化。
+    if settings.LANGGRAPH_CHECKPOINT_ENABLED:
+        CheckpointerService.setup()
 
     # Phase 0 Unit 2 (2026-09-02):标记 startup 跑完。
     # 必须在所有 ensure_* / scheduler 启动之后才 flip,否则 readiness
