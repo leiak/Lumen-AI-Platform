@@ -123,6 +123,15 @@ from lumen_core.database import (
     ensure_documents_multimodal_columns,
     ensure_document_chunks_multimodal_columns,
     ensure_knowledge_bases_multimodal_columns,
+    # M39 T1.7 (2026-09-29):agent_team_runs 表 + Conversation.last_run_id /
+    # Message.run_id FK 列。Plan-spec 原本走 Alembic,项目无 alembic,
+    # 沿用 ensure_* 惯例。Order matters:agent_team_runs 表先建,
+    # 否则 conversations.last_run_id / messages.run_id FK 字符串在
+    # query compile 时 NoReferencedTableError(T1.6 implementer 在
+    # chat.py:9 加 workaround import 的根因)。
+    ensure_agent_team_runs_table,
+    ensure_conversations_last_run_id,
+    ensure_messages_run_id,
 )
 from lumen_core.notification_migration import ensure_notifications_table
 from lumen_api.v1 import router as v1_router
@@ -132,6 +141,7 @@ from lumen_api.v1 import router as v1_router
 from lumen_models.tenant import Tenant
 from lumen_models.agent import Agent, AgentTool, AgentKnowledgeBase
 from lumen_models.agent_team import AgentTeam, AgentTeamMember, AgentTeamRoute  # Multi-agent team
+from lumen_models.agent_team_run import AgentRun  # M39 T1.5/T1.7: AgentRun Table must register before chat.py so Conversation.last_run_id / Message.run_id FK strings resolve at query compile time. T1.6 used to be a workaround import inside chat.py:9; T1.7 moved it here to match the import-order pattern.
 from lumen_models.external_app import ExternalApp, ExternalVisitor  # Must come before chat.py so FK refs resolve
 from lumen_models.chat import Conversation, Message
 from lumen_models.knowledge import KnowledgeBase, Document, DocumentChunk
@@ -543,6 +553,12 @@ async def _lifespan(app: FastAPI):
     ensure_documents_multimodal_columns()
     ensure_document_chunks_multimodal_columns()
     ensure_knowledge_bases_multimodal_columns()
+    # M39 T1.7 (2026-09-29):agent_team_runs 表 + Conversation.last_run_id /
+    # Message.run_id FK 列。Order matters:agent_team_runs 表先建,
+    # 后两步 ALTER 的 FK 字符串才能解析(target table 已在 Base.metadata)。
+    ensure_agent_team_runs_table()
+    ensure_conversations_last_run_id()
+    ensure_messages_run_id()
     ensure_conversations_deleted_at()
     ensure_conversations_team_id()
     ensure_conversations_user_id_nullable()

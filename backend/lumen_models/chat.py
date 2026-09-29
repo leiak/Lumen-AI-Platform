@@ -2,11 +2,12 @@ from sqlalchemy import Column, String, Text, Integer, ForeignKey, DateTime
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from lumen_models.base import BaseModel
-# 提前 import agent_team_run 让 AgentRun Table 注册到 Base.metadata,
-# 否则 Conversation.last_run_id / Message.run_id 的 ForeignKey 字符串
-# 在 query compile 时 NoReferencedTableError。T1.5 没在 lumen_main.py
-# 注册这个 model,这里手动补;M39 T1.7 Alembic 收口后可以挪到 lumen_main。
-from lumen_models.agent_team_run import AgentRun  # noqa: F401  # 仅用于 FK 解析
+# 注意:AgentRun Table 已在 lumen_main.py:135 显式 import 注册到
+# Base.metadata,本模块无需重复 import。M39 T1.6 期间曾在此处手动
+# ``from lumen_models.agent_team_run import AgentRun`` 是因为
+# lumen_main.py 没注册,query compile 时 NoReferencedTableError;
+# T1.7 已挪到 lumen_main,这里删掉(注释保留便于后续读 chat.py 的人
+# 理解 FK 解析时序)。
 
 class Conversation(BaseModel):
     __tablename__ = "conversations"

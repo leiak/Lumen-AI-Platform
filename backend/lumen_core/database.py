@@ -2918,3 +2918,144 @@ def ensure_customer_field_definitions_unique_dedup() -> None:
             "ensure_customer_field_definitions_unique_dedup failed; "
             "will retry on next startup"
         )
+
+
+# ---------------------------------------------------------------------------
+# M39 T1.7 (2026-09-29):agent_team_runs 表 + Conversation.last_run_id /
+# Message.run_id FK 列。Plan-spec 原本走 Alembic autogen,但项目无 alembic
+# (alembic.ini / alembic/ 都不存在,见 grep 2026-09-29),沿用项目惯例走
+# ensure_* 体系。dev DB schema 已在 T1.6 期间手工 pymysql 建好,本组
+# helper 把建表 DDL 收到 ensure_*,DB 重建可重现。
+#
+# FK 解析依赖关系(T1.6 implementer 在 chat.py:9 留的 workaround 注释):
+#   Conversation.last_run_id / Message.run_id 都通过字符串
+#   ``"agent_team_runs.id"`` 反指回 AgentRun。SQLAlchemy FK 字符串解析
+#   是 lazy 的,只在 query compile 时才要求 Base.metadata 里有 AgentRun
+#   Table —— 所以本组的 import 时机很关键:lumen_main.py 必须先 import
+#   AgentRun model(已挪到 lumen_main.py:135),然后 chat.py 在 line 136
+#   import Conversation/Message 时才能正确 join Base.metadata。
+#
+# 失败 fallback:跟 M38.4 / Phase 1 一致,try/except + logger.exception
+# 包死,uvicorn startup 不阻塞(确保表不存在时还能 boot,只是 query 时报
+# ProgrammingError),下次 boot 重试。
+# ---------------------------------------------------------------------------
+
+
+def ensure_agent_team_runs_table() -> None:
+    """M39 T1.7: ensure ``agent_team_runs`` table exists (AgentRun ORM, T1.5).
+
+    镜像 M37.2 ``ensure_eval_runs_table`` 模式 —— 预加载所有被 FK 引用的
+    父表 model,然后 ``Base.metadata.create_all(bind=engine)`` 一次性建表
+    + composite index(``idx_run_thread`` + ``idx_run_team_status``)。
+    ``create_all`` 内部走 SQLAlchemy 自带 ``CREATE TABLE IF NOT EXISTS``,
+    幂等,二次启动是 no-op。
+
+    FK 拓扑(AgentRun model 字段 43-46):
+      - team_id         → agent_teams.id
+      - conversation_id → conversations.id
+      - user_id        → users.id
+      - tenant_id      → tenants.id
+
+    Chat 模型(Conversation.last_run_id / Message.run_id)反向 FK →
+    agent_team_runs.id,所以 lumen_main.py 在 lifespan startup 调用本
+    helper 之前必须先把 AgentRun model import 到 Base.metadata(已挪到
+    lumen_main.py:135)。同 M37.2 套路:不传 ``tables=`` 参数,让
+    SQLAlchemy FK sort 阶段能看完整 metadata 图。
+
+    不加 DB-level FK constraint:Project 惯例(参 ensure_conversations_external_fks
+    注释 + MEMORY.md 2026-08-26 cp7 ship 记录)。ORM-level FK 字符串够用,
+    引用完整性由 service 层把关。
+
+    Spec: docs-internal/superpowers/specs/2026-09-29-multi-agent-team-upgrade-design.md §4.3
+    Plan: docs-internal/superpowers/plans/2026-09-29-multi-agent-team-upgrade.md T1.7
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from lumen_models.user import User  # noqa: F401
+        from lumen_models.tenant import Tenant  # noqa: F401
+        from lumen_models.agent_team import AgentTeam  # noqa: F401
+        from lumen_models.chat import Conversation  # noqa: F401
+        from lumen_models.agent_team_run import AgentRun  # noqa: F401
+        Base.metadata.create_all(bind=engine)
+    except Exception:
+        logger.exception(
+            "ensure_agent_team_runs_table failed; will retry on next startup"
+        )
+
+
+def ensure_conversations_last_run_id() -> None:
+    """M39 T1.7: ensure ``conversations.last_run_id`` FK column exists.
+
+    由 Conversation ORM 字段 32 声明为
+    ``Column(Integer, ForeignKey("agent_team_runs.id"), nullable=True)``。
+    本 helper 确保 dev/prod DB 都有这一列,DB 重建时不用手动补。dev DB
+    已在 T1.6 期间手工建好,本 helper 主要是建表 DDL 的 ensure_* 体系
+    收口。
+
+    不加 DB-level FK constraint:同 ``ensure_agent_team_runs_table`` 注释。
+    ORM-level FK 字符串 + service 层校验已足够,FK 拓扑(指向刚建的
+    agent_team_runs)又涉顺序,加 DB-level constraint 会让本 helper 跟
+    ``ensure_agent_team_runs_table`` 强耦合。
+
+    Idempotent:_column_exists 守门。安全在每个 uvicorn boot 重跑。
+
+    Spec: docs-internal/superpowers/specs/2026-09-29-multi-agent-team-upgrade-design.md §4.3
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        with engine.begin() as conn:
+            if not _column_exists("conversations", "last_run_id"):
+                conn.execute(text(
+                    "ALTER TABLE conversations "
+                    "ADD COLUMN last_run_id INT NULL "
+                    "COMMENT 'M39 T1.7: latest agent_team_runs.id for this "
+                    "conversation; NULL = single-Agent legacy'"
+                ))
+    except Exception:
+        logger.exception(
+            "ensure_conversations_last_run_id failed; will retry on next startup"
+        )
+
+
+def ensure_messages_run_id() -> None:
+    """M39 T1.7: ensure ``messages.run_id`` FK column + index exist.
+
+    由 Message ORM 字段 44 声明为
+    ``Column(Integer, ForeignKey("agent_team_runs.id"), nullable=True, index=True)``。
+    本 helper 确保 dev/prod DB 有这一列 + 对应 index(用于 time-travel 拉
+    某次 run 的全部 messages)。dev DB 已在 T1.6 期间手工建好,index 名
+    是 SQLAlchemy 默认 ``ix_messages_run_id``(单列 index)。
+
+    ``Message.run_id`` 跟 ``Conversation.last_run_id`` 是 M39 引入的
+    一对双 FK:``run_id`` 精确到"这条 message 来自哪次 run",``last_run_id``
+    只是 conv 视角的"最近一次 run"。Dashboard 端按 run_id 拉 messages
+    列表(``WHERE run_id = :id ORDER BY created_at``)需要这个 index
+    避免全表 scan。
+
+    Idempotent:_column_exists + _index_exists 守门。安全在每个 uvicorn
+    boot 重跑。
+
+    Spec: docs-internal/superpowers/specs/2026-09-29-multi-agent-team-upgrade-design.md §4.3
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        with engine.begin() as conn:
+            if not _column_exists("messages", "run_id"):
+                conn.execute(text(
+                    "ALTER TABLE messages "
+                    "ADD COLUMN run_id INT NULL "
+                    "COMMENT 'M39 T1.7: agent_team_runs.id that produced "
+                    "this message; NULL = single-Agent legacy'"
+                ))
+            if not _index_exists("messages", "ix_messages_run_id"):
+                conn.execute(text(
+                    "CREATE INDEX ix_messages_run_id "
+                    "ON messages (run_id)"
+                ))
+    except Exception:
+        logger.exception(
+            "ensure_messages_run_id failed; will retry on next startup"
+        )
