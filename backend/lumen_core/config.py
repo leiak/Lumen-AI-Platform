@@ -219,6 +219,12 @@ class Settings(BaseSettings):
     # CheckpointerService.setup() / close();TeamRunner 走 in-memory
     # saver(后续 T1.13+ 实现)。dev 默认 False,显式开才能用 PG 持久化。
     LANGGRAPH_CHECKPOINT_ENABLED: bool = False
+    # LangGraph Checkpointer pool sizing(M39 T1.3 v2 fix):min_size 控制
+    # 启动预热连接数,max_size 控制并发上限。dev 默认 2/20 满足单测 + 小
+    # 流量;prod 视 QPS 调到 5/50 之类。改完无需重启 pool,需重启
+    # uvicorn / celery 才生效(lifespan close + new init)。
+    CHECKPOINTER_POOL_MIN_SIZE: int = 2
+    CHECKPOINTER_POOL_MAX_SIZE: int = 20
 
     class Config:
         env_file = ".env"
