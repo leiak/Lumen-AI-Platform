@@ -178,7 +178,7 @@ def _initial_state(team_setup) -> dict:
 # ---------------------------------------------------------------------------
 
 def test_state_graph_5_nodes_compile():
-    """``build_team_graph()`` returns a CompiledStateGraph with 5 nodes."""
+    """``build_team_graph()`` returns a CompiledStateGraph with 6 nodes (T1.9: +plan_review)."""
     from lumen_services.agents.state_graph import (
         TeamRunState, build_team_graph,
     )
@@ -577,3 +577,48 @@ def test_send_fan_out_runs_workers_in_parallel_state(team_setup):
                 }
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# T1.9 — HiTL (Human-in-the-Loop) plan_review node + interrupt_before
+# ---------------------------------------------------------------------------
+
+def test_plan_review_node_present():
+    """build_team_graph includes plan_review node + interrupt_before 配置。
+
+    T1.9 plan: insert virtual `plan_review` between decide_routing and the
+    worker fan-out. The node body is a no-op; the actual halt is driven
+    by ``interrupt_before=["plan_review", "aggregate"]`` on compile().
+    """
+    from lumen_services.agents.state_graph import build_team_graph, plan_review
+    g = build_team_graph()
+    nodes = list(g.nodes.keys())
+    # plan_review must be registered as a node
+    assert "plan_review" in nodes, f"plan_review missing from graph nodes: {nodes}"
+    # plan_review must be importable as a no-op callable (body returns {})
+    assert callable(plan_review)
+    assert plan_review.__name__ == "plan_review"
+
+
+def test_interrupt_before_both_phases():
+    """interrupt_before 同时含 plan_review(计划审批) + aggregate(结果审批)。
+
+    LangGraph 1.0.2 exposes the interrupt list as ``interrupt_before_nodes``
+    (a ``list[str]`` on the compiled graph). The plan-spec sketch assumed
+    it might be a ``set`` or live under ``g.builder`` — that varies by
+    version. On 1.0.2 it's a top-level list, so we assert directly.
+    """
+    from lumen_services.agents.state_graph import build_team_graph
+    g = build_team_graph()
+    interrupt_nodes = getattr(g, "interrupt_before_nodes", None)
+    # 1.0.2 stores it as a list[str]; fall back gracefully if shape changes.
+    assert interrupt_nodes is not None, (
+        "CompiledStateGraph missing interrupt_before_nodes attribute; "
+        "LangGraph API may have changed."
+    )
+    assert "plan_review" in interrupt_nodes, (
+        f"plan_review missing from interrupt_before_nodes: {interrupt_nodes}"
+    )
+    assert "aggregate" in interrupt_nodes, (
+        f"aggregate missing from interrupt_before_nodes: {interrupt_nodes}"
+    )

@@ -249,6 +249,21 @@ def load_context(state: TeamRunState, config: RunnableConfig) -> dict:
     }
 
 
+def plan_review(state: TeamRunState) -> dict:
+    """Virtual node — its sole purpose is to make LangGraph pause after decide_routing.
+
+    Body does nothing; ``interrupt_before=["plan_review"]`` (set in
+    ``build_team_graph.compile``) is what actually halts execution. The
+    frontend receives the interrupt, shows the user the manager's plan
+    (chosen workers + reasoning), and resumes via
+    ``Command(resume=<approval>)`` which lets the graph skip this node
+    and proceed to ``run_worker`` fan-out.
+
+    No-op return: state is unchanged, no DB side effects, no LLM calls.
+    """
+    return {}
+
+
 def decide_routing(state: TeamRunState, config: RunnableConfig) -> dict:
     """Step 8-9: ManagerDecider OR policy, defensive fallback to all members."""
     db = _get_db(config)
@@ -550,17 +565,26 @@ def build_team_graph():
     """Construct and compile the multi-agent StateGraph.
 
     Returns a CompiledStateGraph ready for ``.invoke()`` or ``.stream()``.
+
+    T1.9: HiTL (Human-in-the-Loop) — pause after ``decide_routing`` so the
+    user can review the manager's plan before workers run. The graph
+    inserts a virtual ``plan_review`` node; the actual halt is driven by
+    ``interrupt_before=["plan_review", "aggregate"]``. The frontend
+    resumes via ``Command(resume=<approval>)`` which makes the graph
+    skip ``plan_review`` and continue with the worker fan-out.
     """
     g = StateGraph(TeamRunState)
     g.add_node("load_context", load_context)
     g.add_node("decide_routing", decide_routing)
+    g.add_node("plan_review", plan_review)  # T1.9: HiTL pause point
     g.add_node("run_worker", run_worker)
     g.add_node("aggregate", aggregate)
     g.add_node("persist", persist)
 
     g.add_edge(START, "load_context")
     g.add_edge("load_context", "decide_routing")
-    g.add_conditional_edges("decide_routing", route_to_workers, ["run_worker"])
+    g.add_edge("decide_routing", "plan_review")  # T1.9: 经 plan_review 再 fan-out
+    g.add_conditional_edges("plan_review", route_to_workers, ["run_worker"])  # T1.9: 从这里 fan-out
     g.add_conditional_edges(
         "run_worker", should_aggregate,
         {"skip": "persist", "aggregate": "aggregate"},
@@ -568,4 +592,7 @@ def build_team_graph():
     g.add_edge("aggregate", "persist")
     g.add_edge("persist", END)
 
-    return g.compile()
+    # T1.9: 中断点同时支持 plan_review(计划审批)+ aggregate(结果审批)
+    return g.compile(
+        interrupt_before=["plan_review", "aggregate"],
+    )
