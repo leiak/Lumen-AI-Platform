@@ -23,6 +23,13 @@ Lumen 业务指标(各服务主动 .labels(...).inc() / .observe()):
 - ``lumen_doc_processing_duration_seconds{status}`` — 文档处理耗时
 - ``lumen_celery_tasks_total{queue, status}`` — celery 任务计数
 
+M39 Team run(T1.17 2026-09-29,TeamRunner.stream 上线后主动 inc/observe):
+- ``lumen_team_run_started_total{status}`` — Team run 启动计数(按 terminal status)
+- ``lumen_team_run_duration_seconds{status}`` — Team run 总耗时直方图
+- ``lumen_team_run_interrupt_total{phase}`` — HiTL 中断计数(plan / result 阶段)
+- ``lumen_team_checkpoint_write_seconds`` — LangGraph checkpoint 写入耗时
+- ``lumen_postgres_health`` — PostgresSaver PG 健康(0=unhealthy,1=healthy)
+
 SLO / 错误预算(由 lumen_core.slo_budget_calculator 30s tick 更新):
 - ``lumen_slo_budget_remaining{slo}`` — 月度错误预算剩余 ratio(1.0 = 100%, 0 = 用完, 负 = 超支)
 - ``lumen_slo_burn_rate_1h{slo}`` — 最近 1h 预算消耗速度(1.0 = 期望速率, >1 = 超速)
@@ -202,6 +209,58 @@ lumen_slo_burn_rate_1h = Gauge(
 )
 
 
+# ---- M39 Team run metrics (T1.17 2026-09-29) ----
+
+
+# M39 T1.17 (2026-09-29): Team run 启动计数。status label 覆盖
+# terminal 状态(目前 5 类:completed / partial / errored / interrupted /
+# rejected,未来加 cancelled 也只多一行 label —— counter 不破坏历史
+# 时序,Prometheus sum/rate 查询依然正确)。
+team_run_started_total = Counter(
+    "lumen_team_run_started_total",
+    "Team runs started, labeled by terminal status",
+    ["status"],
+)
+
+# M39 T1.17 (2026-09-29): Team run 总耗时。bucket 在 30s / 60s / 120s
+# 附近密布,符合 HiTL 中断 + 多 worker 并发典型耗时(30s~5min)。
+# P95 用 histogram_quantile() 在大 bucket 段分辨率足够。
+team_run_duration_seconds = Histogram(
+    "lumen_team_run_duration_seconds",
+    "Team run total duration in seconds",
+    ["status"],
+    buckets=(0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0),
+)
+
+# M39 T1.17 (2026-09-29): HiTL 中断计数。phase label 区分 plan vs
+# result 阶段。Grafana 看板分阶段统计中断率,识别"用户在 plan 阶段
+# 经常 reject"或"result 阶段经常 modify"等 UX 痛点。
+team_run_interrupt_total = Counter(
+    "lumen_team_run_interrupt_total",
+    "Team run HiTL interrupts, labeled by phase",
+    ["phase"],
+)
+
+# M39 T1.17 (2026-09-29): LangGraph checkpoint 写入耗时。
+# PostgresSaver 内部多 INSERT(写 3 张表),单次 save 一般 5~50ms,
+# bucket 在 100ms / 500ms 附近密布,异常尖刺(>2s)通常意味 PG 慢或
+# ConnectionPool 耗尽 —— 触发 P1 alert。
+team_checkpoint_write_seconds = Histogram(
+    "lumen_team_checkpoint_write_seconds",
+    "LangGraph checkpoint write latency",
+    buckets=(0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0),
+)
+
+# M39 T1.17 (2026-09-29): PG 健康状态 Gauge。lumen_main lifespan
+# 30s tick 更新(读 CheckpointerService.health() 结果)。
+# Prometheus 抓的是 last value,值不变 = 上一帧 healthy。
+# 0 → /ready 标 degraded,Alertmanager lumen_postgres_unhealthy 告警。
+postgres_health = Gauge(
+    "lumen_postgres_health",
+    "1 = PG container healthy, 0 = unhealthy",
+)
+
+
 # ---- /metrics 端点 helper ----
 
 
@@ -282,6 +341,13 @@ def reset_metrics_for_test() -> None:
         lumen_celery_queue_depth,
         lumen_slo_budget_remaining,
         lumen_slo_burn_rate_1h,
+        # M39 T1.17 (2026-09-29): Team run 监控 5 件套,测试间
+        # 隔离也走同一个 reset 路径,避免 sample 串。
+        team_run_started_total,
+        team_run_duration_seconds,
+        team_run_interrupt_total,
+        team_checkpoint_write_seconds,
+        postgres_health,
     )
     for metric in _LUMEN_METRICS:
         try:
@@ -309,6 +375,12 @@ __all__ = [
     "lumen_celery_queue_depth",
     "lumen_slo_budget_remaining",
     "lumen_slo_burn_rate_1h",
+    # M39 T1.17 (2026-09-29)
+    "team_run_started_total",
+    "team_run_duration_seconds",
+    "team_run_interrupt_total",
+    "team_checkpoint_write_seconds",
+    "postgres_health",
     "render_metrics",
     "get_metric_value",
     "reset_metrics_for_test",
