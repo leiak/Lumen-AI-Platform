@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def _redact_url(url: str) -> str:
-    """把 DSN 里的密码段替换成 ***,保留 host:port/db 用于诊断。
+    """Redact the password segment of a DSN while preserving host:port/db.
 
     PostgresSaver 初始化日志会 print 完整 URL,含明文密码;这个 helper
     把 ``scheme://user:pass@host:port/db`` 改成 ``scheme://user:***@...``,
@@ -101,7 +101,7 @@ class CheckpointerService:
 
     @classmethod
     def health(cls) -> bool:
-        """真打 PG 一次 SELECT 1,验证连接 + 服务可达;失败返 False,不抛。
+        """Round-trip ``SELECT 1`` against PG; return True on success.
 
         早期实现用 ``get_next_version()``,但那是纯算术,不读 PG —— PG 真
         down 时 health 永远 True。改用 pool.connection() 拿一条连接 round-trip
