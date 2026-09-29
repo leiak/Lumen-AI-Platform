@@ -1,0 +1,24 @@
+# dev 模式:Next.js dev server,代码靠 bind mount 进来
+# 跟产线 Dockerfile 不一样:这里用 next dev(热改),不跑 build + next start
+FROM node:20-alpine
+
+# 国内 npm 镜像(2026-09-29 加,Docker Hub 国内经常 timeout)
+RUN npm config set registry https://registry.npmmirror.com
+
+WORKDIR /app
+
+# 先 COPY package 文件,利用 layer cache(只有依赖变更才重装)
+COPY package.json package-lock.json* ./
+
+# npm install 让 node_modules 在容器内生成
+# bind mount 时 /app/node_modules 用 named volume 覆盖保留,host 上不会被空目录清掉
+RUN npm install --no-audit --no-fund
+
+# 代码靠 compose bind mount,Dockerfile 不 COPY
+# .env.local 也靠 bind mount 进来
+
+EXPOSE 11334
+
+# Next.js 15 默认监听 0.0.0.0,不需要 -H override
+# API_PROXY_TARGET env var 决定 next.config.js rewrites() 的 destination
+CMD ["npm", "run", "dev"]

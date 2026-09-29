@@ -95,6 +95,61 @@ services:
       start_period: 20s
     mem_limit: 1g  # 防 dev OOM
 
+  backend:
+    # 2026-09-29 前后端 docker 化(dev 模式):uvicorn --reload 单 worker,
+    # 代码 + .env 靠 bind mount 进来,改完实时生效,不用 rebuild image。
+    # 走 docker DNS 访问基础设施(.env.docker 提供 mysql/redis/ollama/es/minio 容器地址),
+    # .env 提供 secret 字段(SECRET_KEY / MINIMAX_API_KEY / STORAGE_* 等)。
+    # 端口 11335 publish 到 host,浏览器访问 http://localhost:11335/api/v1。
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: lumen-platform-backend
+    env_file:
+      - .env
+      - .env.docker
+    ports:
+      - "11335:11335"
+    volumes:
+      - D:/work-ai/0401-lingclaw-to-langchain-demo/backend:/app
+      - D:/work-ai/0401-lingclaw-to-langchain-demo/backend/data:/app/data
+      - D:/work-ai/0401-lingclaw-to-langchain-demo/storage:/storage
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    # 2026-09-29 前后端 docker 化(dev 模式):next dev,代码靠 bind mount 进来。
+    # Next.js 15 默认监听 0.0.0.0 不需要 -H override。
+    # API_PROXY_TARGET 让 next.config.js rewrites() 走 host.docker.internal:11335
+    # (容器内 127.0.0.1 不是 host 上的 backend)。
+    # /app/node_modules 用 named volume frontend_node_modules 保留,
+    # 防止 bind mount host frontend/ 时把容器内 npm install 的清掉。
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile.dev
+    container_name: lumen-platform-frontend
+    ports:
+      - "11334:11334"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:11335/api/v1
+      - API_PROXY_TARGET=http://host.docker.internal:11335
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - D:/work-ai/0401-lingclaw-to-langchain-demo/frontend:/app
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      - backend
+    restart: unless-stopped
+
   prometheus:
     # Phase 1 Group B 2.4.5 (2026-09-04):Prometheus server 拉 uvicorn /metrics。
     # 端口 19090 避开 default 9090(同机可能冲突);config 走 monitoring/prometheus.yml,
@@ -338,3 +393,6 @@ volumes:
   grafana_data:
   alertmanager_data:
   jaeger_data:
+  # 2026-09-29 前后端 docker 化:前端容器内 node_modules 用 named volume 保留,
+  # 防止 bind mount host frontend/ 时把容器内 npm install 的 node_modules 清掉
+  frontend_node_modules:

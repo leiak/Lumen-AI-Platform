@@ -1,0 +1,42 @@
+# dev 模式:uvicorn --reload 单 worker,代码靠 bind mount 进来
+# 跟现有 Dockerfile(产线 gunicorn)的区别:CMD 改 uvicorn --reload,且不 COPY 源码(由 compose bind mount)
+FROM python:3.11-slim
+
+# pypi 清华镜像(跟产线 Dockerfile 一致,2026-06-16 立)
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+ && pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn \
+ && pip install --upgrade pip
+
+WORKDIR /app
+
+# 先装 requirements 触发 layer cache(只有 requirements 变了才重装)
+COPY requirements.txt .
+RUN pip install --no-cache-dir --timeout 600 -r requirements.txt
+
+# 2026-09-29 加:host 上 Anaconda 默认装的 OTel 全家桶(api/sdk/exporter/instrumentation-fastapi),
+# docker 化才发现漏了。单独放在 requirements.txt 之后,只这一层 cache invalid,
+# 不影响前面 requirements.txt 触发的大 layer(553MB nvidia-cudnn + 247MB triton 等,
+# 那些因为 docling-ibm-models→torch 间接拉,在清华镜像拉极慢)。
+RUN pip install --no-cache-dir --timeout 600 \
+    "opentelemetry-api>=1.27,<2.0" \
+    "opentelemetry-sdk>=1.27,<2.0" \
+    "opentelemetry-exporter-otlp-proto-grpc>=1.27,<2.0" \
+    "opentelemetry-exporter-otlp-proto-http>=1.27,<2.0" \
+    "opentelemetry-instrumentation-fastapi>=0.57b0,<1.0"
+
+# 2026-09-29 加:passlib 1.7.4 用 ``bcrypt.__about__.__version__`` 探版本,
+# bcrypt 4.x 删了这个 attribute → /api/v1/auth/login 直接 500
+# ``(trapped) error reading bcrypt version`` 后 verify 抛 AttributeError。
+# host 上 Anaconda 装的是 bcrypt 3.x 所以之前没暴露。pin <4 防 rebuild 时飘。
+RUN pip install --no-cache-dir --timeout 600 "bcrypt>=3.2,<4.0"
+
+# 代码 + .env 都靠 compose bind mount,Dockerfile 不 COPY
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+EXPOSE 11335
+
+# dev 用 uvicorn --reload,容器内是 Linux,--reload 工作正常
+# (注意:CLAUDE.md §5 说的是 host 上 Windows + --reload 会 zombie,容器内不受影响)
+CMD ["uvicorn", "lumen_main:app", "--host", "0.0.0.0", "--port", "11335", "--reload"]

@@ -160,3 +160,19 @@ opentelemetry-instrumentation-sqlalchemy>=0.57b0,<1.0
 opentelemetry-instrumentation-celery>=0.57b0,<1.0
 opentelemetry-instrumentation-pymysql>=0.57b0,<1.0
 opentelemetry-instrumentation-dbapi>=0.57b0,<1.0
+# 2026-09-29 加的 opentelemetry-api/sdk/exporter/instrumentation-fastapi 移到 Dockerfile.dev 单独装,
+# 避免触发整个 requirements.txt 的 pip 重装(包括 553MB nvidia-cudnn、247MB triton 等),这些包因为
+# docling-ibm-models→torch 间接依赖,在中国 pypi 镜像拉得极慢(实测 50+ 分钟)。
+
+# 2026-09-29 加:vision_training_service 用的 ML 依赖,host 上 Anaconda 默认装了所以
+# 之前没暴露,docker 化后才发现。joblib 给模型序列化用,sklearn 给逻辑回归训练用。
+scikit-learn>=1.5
+joblib>=1.3
+
+# 2026-09-29 加:export_pdf_service / lumen_api.v1.* 多处 import markdown as python_markdown,
+# host 上 Anaconda 默认装了 python-markdown 所以之前没暴露,docker 化才发现。
+markdown>=3.5
+
+# 2026-09-29 加:export_pdf_service 异步 PDF 导出用。dev 模式只 import,实际跑 PDF 导出时
+# 还得 `playwright install chromium`(~200MB)。先把 pip 包装上,init 留给业务运行时按需。
+playwright>=1.40
