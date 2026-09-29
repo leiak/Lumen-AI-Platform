@@ -207,6 +207,19 @@ class Settings(BaseSettings):
     # 关掉需要在 startup 注入 RATE_LIMIT_ENABLED=false 关闭保护。
     RATE_LIMIT_ENABLED: bool = True
 
+    # --- M39 LangGraph Checkpoint (2026-09-29) ---
+    # POSTGRES_URL: PostgresSaver 连接串,空串代表未配置(unittest 可
+    # 在不依赖 PG 的情况下构造 Settings)。lifespan startup 检查
+    # LANGGRAPH_CHECKPOINT_ENABLED 为真时才会真连;Service 自身 get()
+    # 也会再次防御性检查,空串 → RuntimeError,避免 PostgresSaver
+    # 内部静默 AttributeError。
+    # dev: postgresql://lumen:lumenpw@localhost:15432/lumen_checkpoints
+    POSTGRES_URL: str = ""
+    # LANGGRAPH_CHECKPOINT_ENABLED: 主开关。False 时 lifespan 完全跳过
+    # CheckpointerService.setup() / close();TeamRunner 走 in-memory
+    # saver(后续 T1.13+ 实现)。dev 默认 False,显式开才能用 PG 持久化。
+    LANGGRAPH_CHECKPOINT_ENABLED: bool = False
+
     class Config:
         env_file = ".env"
 

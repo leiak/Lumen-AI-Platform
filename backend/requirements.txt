@@ -17,6 +17,13 @@ alembic==1.13.3
 langchain==1.0.2
 langchain-core==1.0.1
 langgraph==1.0.2
+# M39 (2026-09-29): LangGraph 1.0.x 的 PostgresSaver 已拆出到独立包,
+# 主 langgraph==1.0.2 的依赖 langgraph-checkpoint>=2.1.2 已自带,但
+# langgraph-checkpoint-postgres 仍需单独装。2.0.25 是 2025-04 时点
+# 2.x 系列的稳定版本,与 langgraph-checkpoint 2.x 系列匹配;1.0.x 是
+# LangGraph 0.x 的对应系列,装在 langgraph==1.0.2 项目上会报
+# "version conflict" / "import path 不同"。
+langgraph-checkpoint-postgres==2.0.25
 langchain-openai==1.0.1
 # langchain-ollama replaces the deprecated langchain.chat_models.ChatOllama
 # (deprecated in 0.3.1, removed in 1.0). Also covers OllamaEmbeddings.
