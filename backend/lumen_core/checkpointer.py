@@ -8,25 +8,32 @@ Spec 决策见 docs-internal/superpowers/specs/2026-09-29-multi-agent-team-upgra
 from __future__ import annotations
 
 import logging
-import pickle
 import threading
 from typing import Optional
 
 from langgraph.checkpoint.postgres import PostgresSaver
+from psycopg_pool import ConnectionPool
+
 from lumen_core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class CheckpointerService:
-    """单例 + health check + lifespan hook 集成。"""
+    """单例 + health check + lifespan hook 集成。
+
+    长生命周期 ConnectionPool(psycopg_pool)+ PostgresSaver 复用该 pool,
+    每次 save 从 pool 取一条连接、用完归还。lifespan startup 调 setup() 建
+    LangGraph 表,shutdown 调 close() 关 pool 释放连接。
+    """
 
     _saver: Optional[PostgresSaver] = None
+    _pool: Optional[ConnectionPool] = None
     _lock = threading.Lock()
 
     @classmethod
     def get(cls) -> PostgresSaver:
-        """懒初始化,首次调用建 PostgresSaver,后续返回单例。
+        """懒初始化,首次调用建 ConnectionPool + PostgresSaver,后续返回单例。
 
         POSTGRES_URL 为空时抛 RuntimeError(让 lifespan startup 显式失败,
         比 PostgresSaver 内部静默 AttributeError 更清楚)。
@@ -39,11 +46,19 @@ class CheckpointerService:
         if cls._saver is None:
             with cls._lock:
                 if cls._saver is None:
-                    cls._saver = PostgresSaver.from_conn_string(
+                    # 长生命周期 ConnectionPool,单条连接获取即可完成每次 save。
+                    # autocommit=True 配 PostgresSaver 的语义(LangGraph 自己控事务)。
+                    cls._pool = ConnectionPool(
                         settings.POSTGRES_URL,
-                        serde=pickle,  # Lumen state 是 TypedDict,pickle 安全
+                        min_size=1,
+                        max_size=10,
+                        kwargs={"autocommit": True},
                     )
-                    logger.info("PostgresSaver initialized url=%s", settings.POSTGRES_URL)
+                    cls._saver = PostgresSaver(cls._pool)
+                    logger.info(
+                        "PostgresSaver initialized url=%s pool_min=1 pool_max=10",
+                        settings.POSTGRES_URL,
+                    )
         return cls._saver
 
     @classmethod
@@ -68,10 +83,12 @@ class CheckpointerService:
 
     @classmethod
     def close(cls) -> None:
-        """lifespan shutdown hook — 释放连接池。"""
-        if cls._saver is not None:
+        """lifespan shutdown hook — 关连接池释放所有 in-flight 连接。"""
+        if cls._pool is not None:
             try:
-                cls._saver.close()
+                # pool.close() 等所有 in-flight 连接归还再返回,graceful 关闭。
+                cls._pool.close()
             except Exception:  # noqa: BLE001
                 pass
+            cls._pool = None
             cls._saver = None
