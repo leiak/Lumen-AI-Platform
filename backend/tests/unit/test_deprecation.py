@@ -81,14 +81,20 @@ def test_registry_does_not_contain_continue():
         "/api/v1/wx-publisher/publish-legacy",
         "/api/v1/storage/local-legacy/{key}",
         "/api/v1/image-generation/legacy",
+        # M39 (2026-09-29): multi-agent team chat migrated to /runs.
+        "/agent-teams/{team_id}/chat",
+        "/agent-teams/{team_id}/chat/stream",
     ],
 )
 def test_registry_contains_all_announced_sunset_endpoints(path):
-    """2.1 A.1: 5+1 deprecated endpoints in the sunset calendar.
+    """2.1 A.1: 5+1 deprecated endpoints in the sunset calendar, plus
+    the 2 M39 multi-agent chat entries that ship handler-wired today.
 
     The 5 Phase-6-A.3 endpoints are pre-registered (announcement
     channel) — they don't have handlers yet, but they're on the public
-    Sunset calendar so operators can plan migration.
+    Sunset calendar so operators can plan migration. The 2 M39 entries
+    are wired in ``lumen_api/v1/agent_team.py`` and emit headers on
+    every response via the middleware.
     """
     assert path in DEPRECATED_ENDPOINTS
     entry = DEPRECATED_ENDPOINTS[path]

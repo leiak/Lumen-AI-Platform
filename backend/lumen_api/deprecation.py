@@ -44,7 +44,7 @@ their request can't even reach the handler. So:
 Sunset calendar
 ---------------
 The ``DEPRECATED_ENDPOINTS`` registry is the single source of truth for
-the sunset calendar. Six paths are tracked:
+the sunset calendar. Eight paths are tracked:
 
   - ``/workflows/{id}/runs/{id}/resume`` — M30d 2.0 ship (handler wired)
   - ``/chat/legacy/complete``, ``/v0/dashboard/summary``,
@@ -55,6 +55,10 @@ the sunset calendar. Six paths are tracked:
     2027-01-31 Sunset fire (Phase 6 A.3). The registry is the
     announcement channel today; middleware lights up the headers
     automatically when those paths come online.
+  - ``/agent-teams/{id}/chat``, ``/agent-teams/{id}/chat/stream`` —
+    M39 (2026-09-29), handler wired; old multi-agent chat is migrated
+    to the /runs run-record flow. Sunset fires at 2027-01-31 alongside
+    the Phase 6 A.3 group.
 """
 from __future__ import annotations
 
@@ -173,6 +177,35 @@ DEPRECATED_ENDPOINTS: Dict[str, Dict[str, str]] = {
         ),
         "sunset_date": SUNSET_DATE,
         "successor": "/api/v1/image-generation/generate",
+    },
+    # M39 (2026-09-29): multi-agent team chat is migrated to the
+    # /runs run-record flow. /chat returns a single combined response
+    # with no persisted run; /runs returns a persisted run row that
+    # supports streaming (/runs/{run_id}/stream), cancellation, and
+    # resume semantics — which the fire-and-forget /chat path can't.
+    "/agent-teams/{team_id}/chat": {
+        "reason": (
+            "M39: replaced by POST /agent-teams/{team_id}/runs. The "
+            "old /chat returns a single combined response with no "
+            "persisted run row; the new /runs flow returns a persisted "
+            "run record that supports streaming, cancellation, and "
+            "resume (see docs/modules/agent-teams.md §M39)."
+        ),
+        "sunset_date": SUNSET_DATE,
+        "successor": "/agent-teams/{team_id}/runs",
+    },
+    # M39: /chat/stream is fire-and-forget SSE with no persisted run;
+    # /runs/{run_id}/stream is the typed SSE stream of a persisted
+    # run — pairs naturally with the new /runs POST endpoint above.
+    "/agent-teams/{team_id}/chat/stream": {
+        "reason": (
+            "M39: replaced by GET /agent-teams/{team_id}/runs/{run_id}/stream. "
+            "The old /chat/stream is a fire-and-forget SSE feed with no "
+            "persisted run; the new /runs/{run_id}/stream is the typed "
+            "SSE stream of a persisted run (resume + cancel safe)."
+        ),
+        "sunset_date": SUNSET_DATE,
+        "successor": "/agent-teams/{team_id}/runs/{run_id}/stream",
     },
 }
 

@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from lumen_api.deprecation import mark_deprecated
 from lumen_api.v1.auth import get_current_user
 from lumen_core.database import get_db
 from lumen_models.chat import Conversation
@@ -258,7 +259,18 @@ async def remove_member(
 # ---------------------------------------------------------------------------
 # Chat (run)
 # ---------------------------------------------------------------------------
-@router.post("/{team_id}/chat", response_model=SingleResponse[AgentTeamChatResponse])
+# M39 (2026-09-29): /chat + /chat/stream are deprecated in favour of the
+# /runs run-record flow. The Deprecation / Sunset / Link /
+# X-Lumen-Deprecation-Reason headers are injected via the registry +
+# middleware + mark_deprecated dep — same pattern M30b uses for
+# /workflows/{id}/runs/{id}/resume.
+@router.post(
+    "/{team_id}/chat",
+    response_model=SingleResponse[AgentTeamChatResponse],
+    dependencies=[
+        Depends(mark_deprecated("/agent-teams/{team_id}/chat")),
+    ],
+)
 async def team_chat(
     team_id: int,
     data: AgentTeamChatRequest,
@@ -334,7 +346,15 @@ def _node_to_sse_payload(node_name: str, state_delta: dict, trace_id: str) -> di
     return {**base, "delta_keys": list(state_delta.keys())}
 
 
-@router.post("/{team_id}/chat/stream")
+# M39: /chat/stream also on the sunset calendar — see /chat above for
+# rationale. The middleware injects headers on the StreamingResponse
+# (and on any HTTPException it raises along the way).
+@router.post(
+    "/{team_id}/chat/stream",
+    dependencies=[
+        Depends(mark_deprecated("/agent-teams/{team_id}/chat/stream")),
+    ],
+)
 async def team_chat_stream(
     team_id: int,
     data: AgentTeamChatRequest,
