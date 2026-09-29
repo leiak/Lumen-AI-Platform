@@ -20,11 +20,12 @@ logger = logging.getLogger(__name__)
 
 
 class CheckpointerService:
-    """单例 + health check + lifespan hook 集成。
+    """Lifespan-managed singleton PostgresSaver wrapper with health check.
 
-    长生命周期 ConnectionPool(psycopg_pool)+ PostgresSaver 复用该 pool,
-    每次 save 从 pool 取一条连接、用完归还。lifespan startup 调 setup() 建
-    LangGraph 表,shutdown 调 close() 关 pool 释放连接。
+    单例 + health check + lifespan hook 集成。长生命周期 ConnectionPool
+    (psycopg_pool)+ PostgresSaver 复用该 pool,每次 save 从 pool 取一条连接、
+    用完归还。lifespan startup 调 setup() 建 LangGraph 表,shutdown 调 close()
+    关 pool 释放连接。
     """
 
     _saver: Optional[PostgresSaver] = None
@@ -33,8 +34,9 @@ class CheckpointerService:
 
     @classmethod
     def get(cls) -> PostgresSaver:
-        """懒初始化,首次调用建 ConnectionPool + PostgresSaver,后续返回单例。
+        """Lazily build ConnectionPool + PostgresSaver and return the singleton saver.
 
+        懒初始化,首次调用建 ConnectionPool + PostgresSaver,后续返回单例。
         POSTGRES_URL 为空时抛 RuntimeError(让 lifespan startup 显式失败,
         比 PostgresSaver 内部静默 AttributeError 更清楚)。
         """
@@ -63,7 +65,10 @@ class CheckpointerService:
 
     @classmethod
     def health(cls) -> bool:
-        """健康检查 — 调 get_next_version() 触发一次 PG 往返,失败返 False。"""
+        """Probe PG via get_next_version() and return True on success.
+
+        健康检查 — 调 get_next_version() 触发一次 PG 往返,失败返 False。
+        """
         try:
             cls.get().get_next_version(None, None)
             return True
@@ -73,7 +78,10 @@ class CheckpointerService:
 
     @classmethod
     def setup(cls) -> None:
-        """lifespan startup hook — 建 checkpoints / checkpoint_writes / checkpoint_blobs 三表。"""
+        """Create LangGraph checkpoint tables via PostgresSaver.setup() (idempotent).
+
+        lifespan startup hook — 建 checkpoints / checkpoint_writes / checkpoint_blobs 三表。
+        """
         try:
             cls.get().setup()
             logger.info("PostgresSaver.setup() done — LangGraph tables created")
@@ -83,7 +91,10 @@ class CheckpointerService:
 
     @classmethod
     def close(cls) -> None:
-        """lifespan shutdown hook — 关连接池释放所有 in-flight 连接。"""
+        """Close the ConnectionPool and release all in-flight connections.
+
+        lifespan shutdown hook — 关连接池释放所有 in-flight 连接。
+        """
         if cls._pool is not None:
             try:
                 # pool.close() 等所有 in-flight 连接归还再返回,graceful 关闭。
