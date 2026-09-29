@@ -1,4 +1,25 @@
 services:
+  postgres:
+    # M39 (2026-09-29) 多 Agent 团队升级:LangGraph PostgresSaver 持久化
+    # checkpoint 需要独立 PG 实例,与 MySQL(业务库)解耦。
+    # 端口 15432 避开 default 5432(同机可能有 PostgreSQL 实例)。
+    # 密码默认 lumenpw(dev),生产用 POSTGRES_PASSWORD 环境变量覆盖。
+    image: postgres:16-alpine
+    container_name: lumen-platform-postgres
+    environment:
+      POSTGRES_DB: lumen_checkpoints
+      POSTGRES_USER: lumen
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lumenpw}
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lumen"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   mysql:
     image: mysql:8.0
     container_name: lumen-platform-mysql
@@ -384,6 +405,7 @@ services:
     mem_limit: 512m
 
 volumes:
+  postgres_data:
   mysql_data:
   es_data:
   redis_data:
