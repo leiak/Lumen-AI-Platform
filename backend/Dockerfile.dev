@@ -30,6 +30,12 @@ RUN pip install --no-cache-dir --timeout 600 \
 # host 上 Anaconda 装的是 bcrypt 3.x 所以之前没暴露。pin <4 防 rebuild 时飘。
 RUN pip install --no-cache-dir --timeout 600 "bcrypt>=3.2,<4.0"
 
+# 2026-09-29 加:lumen_core/checkpointer.py 顶层 ``from langgraph.checkpoint.postgres
+# import PostgresSaver`` → ``import psycopg`` → ``import_from_libpq()`` 找不到 libpq。
+# python:3.11-slim 默认没装 libpq-dev,host 上之前大概用过或 Anaconda 缓存了。
+# ``psycopg[binary]`` 含静态链接 libpq 的 binary wheel,纯 Python 装即可,无需 apt。
+RUN pip install --no-cache-dir --timeout 600 "psycopg[binary]>=3.2"
+
 # 代码 + .env 都靠 compose bind mount,Dockerfile 不 COPY
 
 ENV PYTHONUNBUFFERED=1 \
