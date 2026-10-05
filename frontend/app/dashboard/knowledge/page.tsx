@@ -57,6 +57,8 @@ import MoveDocumentModal from "@/components/knowledge/MoveDocumentModal";
 import { useWorkspaceTree } from "@/app/dashboard/knowledge/hooks/useWorkspaceTree";
 // M40.1 Phase 2: useKnowledgeList hook —— KB list 状态 + CRUD + blocker modal。
 import { useKnowledgeList } from "@/app/dashboard/knowledge/hooks/useKnowledgeList";
+// M40.1 Phase 3: useDocumentUpload hook —— 上传 mutation + doc type picker。
+import { useDocumentUpload } from "@/app/dashboard/knowledge/hooks/useDocumentUpload";
 // M38.2.x v2: workspace RBAC members 管理 + useCanI gate
 import { WorkspaceMembersModal } from "@/components/knowledge/WorkspaceMembersModal";
 import { useCanI } from "@/hooks/useWorkspacePermissions";
@@ -126,8 +128,7 @@ export default function KnowledgePage() {
   const [detailModalVisible, setDetailModalVisible] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState<SearchResult | null>(null);
 
-  // Upload state(Phase 3 useDocumentUpload 接管)
-  const [selectedDocType, setSelectedDocType] = useState<string>("");
+  // M40.1 Phase 3: 上传 state 搬到 useDocumentUpload hook。
 
   // Search options state(Phase 5 useDocumentSearch 接管)
   const [searchOptions, setSearchOptions] = useState({
@@ -219,6 +220,19 @@ export default function KnowledgePage() {
   // 同步 selectedWorkspaceId 给 kb hook(closure refresh)
   wsRef.current = ws.selectedWorkspaceId;
 
+  // M40.1 Phase 3: useDocumentUpload hook —— upload mutation + doc type picker。
+  // onUploadSuccess 触发 KB list badge 刷新 + 当前 KB 文档列表刷新。
+  const up = useDocumentUpload({
+    currentFolderId: ws.selectedFolderId,
+    onUploadSuccess: (kbId) => {
+      kb.refreshKbList();
+      if (kb.selectedKB && kb.selectedKB.id === kbId) {
+        queryClient.invalidateQueries({ queryKey: ["documents", kbId] });
+        fetchDocuments(kbId);
+      }
+    },
+  });
+
   useEffect(() => {
     // Subscribe to incoming notifications; refetch the current KB's doc
     // list when a doc-related notification for that KB arrives.
@@ -273,38 +287,7 @@ export default function KnowledgePage() {
     return () => clearTimeout(t);
   }, [docParam, documents.length, docList.length]);
 
-  // Upload mutation - background safe, survives page navigation
-  const uploadMutation = useMutation({
-    mutationFn: ({ kbId, file, docType, folderId }: { kbId: number; file: File; docType?: string; folderId?: number }) =>
-      knowledgeApi.upload(kbId, file, docType, folderId),
-    onMutate: () => {
-      message.loading("上传中...", 0);
-    },
-    onSuccess: (response, variables) => {
-      message.destroy();
-      if (response.data.code === 200) {
-        message.success("上传成功");
-      } else {
-        message.error(response.data.message || "上传失败");
-      }
-      // Refresh the KB list so the document-count badge on the row
-      // updates immediately after upload (otherwise it stays stale).
-      kb.refreshKbList();
-      // Refresh the right-side document list if a KB is selected
-      if (kb.selectedKB) {
-        queryClient.invalidateQueries({ queryKey: ["documents", kb.selectedKB.id] });
-        fetchDocuments(kb.selectedKB.id);
-      }
-    },
-    onError: (error: any) => {
-      message.destroy();
-      if (error.response?.status === 413) {
-        message.error("文件太大");
-      } else {
-        message.error("上传失败");
-      }
-    },
-  });
+  // M40.1 Phase 3: uploadMutation + handleUpload 搬到 useDocumentUpload hook。
 
   // M40.1 Phase 2: kb.refreshKbList / kb.handleSelectKB / kb.handleCreate / kb.handleDelete /
 // kb.handleEdit / kb.handleUpdate 全部搬到 useKnowledgeList hook。
@@ -329,16 +312,7 @@ export default function KnowledgePage() {
     }
   };
 
-  const handleUpload = (kbId: number, file: File) => {
-    uploadMutation.mutate({
-      kbId,
-      file,
-      docType: selectedDocType,
-      // M40.1: 当前 folder 由 useWorkspaceTree 提供;null = KB 根目录。
-      folderId: ws.selectedFolderId ?? undefined,
-    });
-    return false; // prevent default upload behavior
-  };
+  // M40.1 Phase 3: handleUpload 搬到 useDocumentUpload hook。
 
   const handleViewDocs = async (kb: KnowledgeBase) => {
     setDocListKB(kb);
@@ -636,12 +610,12 @@ export default function KnowledgePage() {
           </Button>
           <Upload
             showUploadList={false}
-            beforeUpload={(file) => handleUpload(record.id, file)}
+            beforeUpload={(file) => up.handleUpload(record.id, file)}
           >
             <Button
               size="small"
               icon={<UploadOutlined />}
-              loading={uploadMutation.isPending && uploadMutation.variables?.kbId === record.id}
+              loading={up.uploadMutation.isPending && up.uploadMutation.variables?.kbId === record.id}
             >
               上传
             </Button>
@@ -813,8 +787,8 @@ export default function KnowledgePage() {
                           placeholder="文档类型"
                           allowClear
                           style={{ width: 120 }}
-                          value={selectedDocType || undefined}
-                          onChange={(value) => setSelectedDocType(value || "")}
+                          value={up.selectedDocType || undefined}
+                          onChange={(value) => up.setSelectedDocType(value || "")}
                           options={parserTypes.map((t: ParserType) => ({
                             label: t.label,
                             value: t.type,
@@ -823,14 +797,14 @@ export default function KnowledgePage() {
                         <Upload
                           showUploadList={false}
                           beforeUpload={(file) => {
-                            if (kb.selectedKB) handleUpload(kb.selectedKB.id, file);
+                            if (kb.selectedKB) up.handleUpload(kb.selectedKB.id, file);
                             return false;
                           }}
                         >
                           <Button
                             size="small"
                             icon={<UploadOutlined />}
-                            loading={uploadMutation.isPending && uploadMutation.variables?.kbId === kb.selectedKB.id}
+                            loading={up.uploadMutation.isPending && up.uploadMutation.variables?.kbId === kb.selectedKB.id}
                           >
                             上传文档
                           </Button>
