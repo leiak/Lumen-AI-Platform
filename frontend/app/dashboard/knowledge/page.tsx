@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import {
   Layout,
   Table,
@@ -55,6 +55,8 @@ import CreateFolderModal from "@/components/knowledge/CreateFolderModal";
 import MoveDocumentModal from "@/components/knowledge/MoveDocumentModal";
 // M40.1 Phase 1: useWorkspaceTree hook —— workspace/folder/rbac 状态 + 4 modal + 8 handler。
 import { useWorkspaceTree } from "@/app/dashboard/knowledge/hooks/useWorkspaceTree";
+// M40.1 Phase 2: useKnowledgeList hook —— KB list 状态 + CRUD + blocker modal。
+import { useKnowledgeList } from "@/app/dashboard/knowledge/hooks/useKnowledgeList";
 // M38.2.x v2: workspace RBAC members 管理 + useCanI gate
 import { WorkspaceMembersModal } from "@/components/knowledge/WorkspaceMembersModal";
 import { useCanI } from "@/hooks/useWorkspacePermissions";
@@ -109,33 +111,25 @@ function DeleteDocumentAction({
 }
 
 export default function KnowledgePage() {
-  const [data, setData] = useState<KnowledgeBase[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [modalVisible, setModalVisible] = useState(false);
-  const [form] = Form.useForm();
-  // Server-side pagination for the KB list. The /knowledge/ endpoint returns
-  // a PaginatedResponse; without explicit state the AntD Table can only show
-  // the first 10 rows the server returned.
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
-  const [total, setTotal] = useState(0);
+  // ──────────── M40.1 Phase 2: useKnowledgeList hook ────────────
+  // KB list 状态 + CRUD + blocker modal 全部搬进 hook。下面只保留
+  // document / search / upload / modal 状态(Phase 3~6 拆)。
 
-  // Search state
-  const [selectedKB, setSelectedKB] = useState<KnowledgeBase | null>(null);
+  // Search state(Phase 5 useDocumentSearch 接管)
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searching, setSearching] = useState(false);
 
-  // Documents state
+  // Documents state(Phase 4 useDocumentList 接管)
   const [documents, setDocuments] = useState<DocumentResponse[]>([]);
   const [loadingDocs, setLoadingDocs] = useState(false);
   const [detailModalVisible, setDetailModalVisible] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState<SearchResult | null>(null);
 
-  // Upload state
+  // Upload state(Phase 3 useDocumentUpload 接管)
   const [selectedDocType, setSelectedDocType] = useState<string>("");
 
-  // Search options state
+  // Search options state(Phase 5 useDocumentSearch 接管)
   const [searchOptions, setSearchOptions] = useState({
     k: 5,
     alpha: 0.5,
@@ -144,35 +138,14 @@ export default function KnowledgePage() {
     fieldWeights: "",
   });
 
-  // Search weights state
-  const [searchWeights, setSearchWeights] = useState({
-    title: 10.0,
-    important_kw: 30.0,
-    question_kw: 20.0,
-    text: 2.0,
-  });
-
-  // Embedding models loaded by the create modal's <EmbeddingModelSelect/>.
-  // The child pushes the list up via `onLoaded`; we use it to auto-pick
-  // a default the moment the create modal opens (no empty-then-filled
-  // flash, no manual click). Cached at the page level so re-opening the
-  // modal after a cancel/submit is instant.
+  // Embedding models 缓存 —— EmbeddingModelSelect.onLoaded 回调写到这。
+  // useKnowledgeList 通过 args.loadedEmbeddingModels 读取(form auto-default 用)。
+  // 这里 page 层维护 cache 是为了避免 hook 跟组件内 fetch 抢。
   const [loadedEmbeddingModels, setLoadedEmbeddingModels] = useState<
     ModelConfig[]
   >([]);
 
-  // Edit modal state
-  const [editModalVisible, setEditModalVisible] = useState(false);
-  const [editForm] = Form.useForm();
-  const [editingKB, setEditingKB] = useState<KnowledgeBase | null>(null);
-  const [editSearchWeights, setEditSearchWeights] = useState({
-    title: 10.0,
-    important_kw: 30.0,
-    question_kw: 20.0,
-    text: 2.0,
-  });
-
-  // Document list modal state
+  // Document list modal state(Phase 4 useDocumentList 接管)
   const [docListModalVisible, setDocListModalVisible] = useState(false);
   const [docListKB, setDocListKB] = useState<KnowledgeBase | null>(null);
   const [docList, setDocList] = useState<DocumentResponse[]>([]);
@@ -186,21 +159,7 @@ export default function KnowledgePage() {
   // impossible.
   const [deletingDocId, setDeletingDocId] = useState<number | null>(null);
 
-  // M28: 删 KB 被 agent/document 引用 → 后端 422 + blockers 列表。
-  // toast 3 秒就消失,根本看不清要解绑哪个 agent,改成 Modal 持久展示。
-  const [blockerModal, setBlockerModal] = useState<{
-    visible: boolean;
-    message: string;
-    agents: { id: number; name: string }[];
-    documents: { id: number; filename: string }[];
-    truncated: boolean;
-  }>({
-    visible: false,
-    message: "",
-    agents: [],
-    documents: [],
-    truncated: false,
-  });
+  // M40.1 Phase 2: blocker modal state 搬到 useKnowledgeList hook。
 
   // View-chunks modal state
   const [chunksModalOpen, setChunksModalOpen] = useState(false);
@@ -230,18 +189,35 @@ export default function KnowledgePage() {
 
   const searchParams = useSearchParams();
 
-  // M40.1 Phase 1: workspace/folder navigation + 4 modal + 8 handler 集中到 hook。
-  // 通过 onKbChange 回调通知 KB 切换(由 page 接 → fetchDocuments / 清 search)。
-  // 必须在所有 useEffect / inline function 之前声明,否则 inline dep 会 TDZ。
-  const ws = useWorkspaceTree({
-    selectedKB,
-    onKbChange: (kb) => {
-      setSelectedKB(kb);
+  // M40.1 Phase 2: useKnowledgeList hook —— KB 列表 + CRUD + blocker modal。
+  // 必须在 useWorkspaceTree 之前创建:ws.selectedKB / ws.onKbChange 引用 kb。
+  // selectedWorkspaceId 通过 useRef 同步:kb init 时 ws 还没建,直接读 ws.selectedWorkspaceId
+  // 是 null(handler closure 拿到 init 时刻的值)。
+  const wsRef = useRef<number | null>(null);
+  const kb = useKnowledgeList({
+    selectedWorkspaceId: wsRef.current,
+    loadedEmbeddingModels,
+    onKbChangeCleanup: (newKB) => {
       setSearchResults([]);
       setSearchQuery("");
       setDocuments([]);
     },
+    onKbSelectFetchDocs: (kbId) => {
+      fetchDocuments(kbId, null);
+    },
   });
+
+  // M40.1 Phase 1: workspace/folder navigation + 4 modal + 8 handler 集中到 hook。
+  // ws.selectedKB 读 kb hook 持有的选中状态;ws.onKbChange 通过 kb.handleSelectKB
+  // 转发给 kb hook(内部 setSelectedFolderId + onKbChangeCleanup + onKbSelectFetchDocs)。
+  const ws = useWorkspaceTree({
+    selectedKB: kb.selectedKB,
+    onKbChange: (newKB) => {
+      kb.handleSelectKB(newKB);
+    },
+  });
+  // 同步 selectedWorkspaceId 给 kb hook(closure refresh)
+  wsRef.current = ws.selectedWorkspaceId;
 
   useEffect(() => {
     // Subscribe to incoming notifications; refetch the current KB's doc
@@ -252,8 +228,8 @@ export default function KnowledgePage() {
       if (!newest) return;
       if (
         newest.resource_type === "document" &&
-        selectedKB !== null &&
-        newest.metadata?.kb_id === selectedKB.id &&
+        kb.selectedKB !== null &&
+        newest.metadata?.kb_id === kb.selectedKB.id &&
         // Only react to length growth (WS push, refetchUnread backfill, loadMore).
         // Pure state swaps like markRead/markAllRead/reset don't change length,
         // so they don't trigger a refetch.
@@ -261,23 +237,23 @@ export default function KnowledgePage() {
       ) {
         // M38.2: 通知触发的刷新也得带上 folder 过滤 —— 否则在 folder 视图下
         // 收到的 doc 通知会污染显示成「全部文档」。
-        fetchDocuments(selectedKB.id);
+        fetchDocuments(kb.selectedKB.id);
       }
     });
     return () => { unsub(); };
     // M40.1: ws.selectedFolderId 进入依赖 —— 切换 folder 时也要重订一次订阅
     // (虽然 subscribe 本身不需要,但保持 deps 干净,eslint 不报警)。
-  }, [selectedKB?.id, ws.selectedFolderId]);
+  }, [kb.selectedKB?.id, ws.selectedFolderId]);
 
   // M40.1: sidebar 切 folder → 重新拉文档。hook 化前由 handleSelectFolder 内联调
   // fetchDocuments,hook 化后 hook 不持有 page 层 fetchDocuments,改用 effect 监听
   // folder 变化。Phase 2 useDocumentList 接管后会改走 query,本 effect 临时作为桥接。
   useEffect(() => {
-    if (selectedKB) {
-      fetchDocuments(selectedKB.id, ws.selectedFolderId);
+    if (kb.selectedKB) {
+      fetchDocuments(kb.selectedKB.id, ws.selectedFolderId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ws.selectedFolderId, selectedKB?.id]);
+  }, [ws.selectedFolderId, kb.selectedKB?.id]);
 
   // Highlight a specific doc when the URL has ?doc=<id> — used by the
   // notification "Open" action to deep-link into the KB page.
@@ -313,11 +289,11 @@ export default function KnowledgePage() {
       }
       // Refresh the KB list so the document-count badge on the row
       // updates immediately after upload (otherwise it stays stale).
-      fetchData();
+      kb.refreshKbList();
       // Refresh the right-side document list if a KB is selected
-      if (selectedKB) {
-        queryClient.invalidateQueries({ queryKey: ["documents", selectedKB.id] });
-        fetchDocuments(selectedKB.id);
+      if (kb.selectedKB) {
+        queryClient.invalidateQueries({ queryKey: ["documents", kb.selectedKB.id] });
+        fetchDocuments(kb.selectedKB.id);
       }
     },
     onError: (error: any) => {
@@ -330,21 +306,10 @@ export default function KnowledgePage() {
     },
   });
 
-  const fetchData = async () => {
-    setLoading(true);
-    try {
-      // M40.1: workspace 筛选由 useWorkspaceTree 提供;null → 不传。
-      const response = await knowledgeApi.list(page, pageSize, ws.selectedWorkspaceId ?? undefined);
-      if (response.data.code === 200) {
-        setData(response.data.data || []);
-        setTotal(response.data.total || 0);
-      }
-    } catch (error) {
-      message.error("获取知识库列表失败");
-    } finally {
-      setLoading(false);
-    }
-  };
+  // M40.1 Phase 2: kb.refreshKbList / kb.handleSelectKB / kb.handleCreate / kb.handleDelete /
+// kb.handleEdit / kb.handleUpdate 全部搬到 useKnowledgeList hook。
+// 下面的 fetchDocuments 仍在 page 层(Phase 4 useDocumentList 接管),
+// 通过 args.onKbSelectFetchDocs 传给 hook 做 KB 切换时拉文档用。
 
   const fetchDocuments = async (kbId: number, folderId?: number | null) => {
     setLoadingDocs(true);
@@ -361,151 +326,6 @@ export default function KnowledgePage() {
       message.error("加载文档列表失败");
     } finally {
       setLoadingDocs(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, ws.selectedWorkspaceId]);
-
-  // Auto-default the create-KB form's `embedding_model_config_id` to
-  // the user's `is_default` embedding model (or the first available).
-  // Runs whenever the create modal opens AND the embedding list is
-  // already in hand (cached after first load by React Query). The
-  // empty-then-filled guard is so we never clobber a value the user
-  // just picked manually.
-  useEffect(() => {
-    if (!modalVisible) return;
-    if (loadedEmbeddingModels.length === 0) return;
-    const current = form.getFieldValue("embedding_model_config_id");
-    if (current) return;
-    const def =
-      loadedEmbeddingModels.find((m) => m.is_default) ||
-      loadedEmbeddingModels[0];
-    form.setFieldValue("embedding_model_config_id", def.id);
-  }, [modalVisible, loadedEmbeddingModels, form]);
-
-  const handleSelectKB = (kb: KnowledgeBase | null) => {
-    setSelectedKB(kb);
-    setSearchResults([]);
-    setSearchQuery("");
-    // M40.1: KB 切换 → 默认重置 folder 选择(根目录),等用户从侧边栏点 folder 再 fetch。
-    ws.setSelectedFolderId(null);
-    if (kb) {
-      fetchDocuments(kb.id);
-    } else {
-      setDocuments([]);
-    }
-  };
-
-  const handleCreate = async (values: any) => {
-    try {
-      // Spread the form values (name, description,
-      // embedding_model_config_id, default_parser, chunk_*); AntD
-      // gives us exactly the form's named fields.
-      const payload = {
-        ...values,
-        search_weights: searchWeights,
-      };
-      // M40.1: 当前 workspace 选中时新建 KB 自动挂到该 workspace 下;
-      // -1 / null(未分组)时不传 workspace_id,KB 落到 tenant 根。
-      const wsArg =
-        ws.selectedWorkspaceId != null && ws.selectedWorkspaceId > 0
-          ? ws.selectedWorkspaceId
-          : undefined;
-      const response = await knowledgeApi.create(payload, wsArg);
-      if (response.data.code === 200) {
-        message.success("创建成功");
-        setModalVisible(false);
-        form.resetFields();
-        fetchData();
-      }
-    } catch (error) {
-      message.error("创建失败");
-    }
-  };
-
-  const handleDelete = async (id: number) => {
-    try {
-      await knowledgeApi.delete(id);
-      message.success("删除成功");
-      if (selectedKB?.id === id) {
-        handleSelectKB(null);
-      }
-      fetchData();
-    } catch (error: any) {
-      // M28: 422 = 引用计数拦截 → 用 Modal 展示具体是哪个 agent / 哪份文档在卡,
-      // 不再让用户对着一个 "agent_count: 1" 冷数字猜去哪儿解绑。
-      const status = error?.response?.status;
-      const detail = error?.response?.data?.detail;
-      if (status === 422 && detail && typeof detail === "object") {
-        setBlockerModal({
-          visible: true,
-          message:
-            typeof detail.message === "string"
-              ? detail.message
-              : "该知识库仍被其他资源引用,无法删除。",
-          agents: Array.isArray(detail.blocking_agents) ? detail.blocking_agents : [],
-          documents: Array.isArray(detail.blocking_documents)
-            ? detail.blocking_documents
-            : [],
-          truncated: detail.truncated === true,
-        });
-        return;
-      }
-      // 兜底:detail 是 string (如 400/404) → message.error 显示原文
-      const fallback = typeof detail === "string" ? detail : "删除失败";
-      message.error(fallback);
-    }
-  };
-
-  const handleEdit = (kb: KnowledgeBase) => {
-    setEditingKB(kb);
-    // Initialize form with existing values
-    editForm.setFieldsValue({
-      name: kb.name,
-      description: kb.description,
-      // Prefer the new FK; fall back to the legacy string for KBs
-      // that haven't yet been back-filled by the migration script.
-      embedding_model_config_id:
-        kb.embedding_model_config_id ?? undefined,
-      default_parser: kb.default_parser || "general",
-      chunk_size: kb.chunk_size || 500,
-      chunk_overlap: kb.chunk_overlap || 50,
-    });
-    // Initialize search weights
-    if (kb.search_weights) {
-      setEditSearchWeights({
-        title: kb.search_weights.title || 10.0,
-        important_kw: kb.search_weights.important_kw || 30.0,
-        question_kw: kb.search_weights.question_kw || 20.0,
-        text: kb.search_weights.text || 2.0,
-      });
-    }
-    setEditModalVisible(true);
-  };
-
-  const handleUpdate = async (values: any) => {
-    if (!editingKB) return;
-    try {
-      const payload = {
-        ...values,
-        search_weights: editSearchWeights,
-      };
-      const response = await knowledgeApi.update(editingKB.id, payload);
-      if (response.data.code === 200) {
-        message.success("更新成功");
-        setEditModalVisible(false);
-        editForm.resetFields();
-        fetchData();
-        // Update selectedKB if it's the one being edited
-        if (selectedKB?.id === editingKB.id) {
-          setSelectedKB({ ...selectedKB, ...response.data.data });
-        }
-      }
-    } catch (error) {
-      message.error("更新失败");
     }
   };
 
@@ -547,8 +367,8 @@ export default function KnowledgePage() {
         if (docListModalVisible && docListKB) {
           await handleViewDocs(docListKB);
         }
-        if (selectedKB) {
-          await fetchDocuments(selectedKB.id);
+        if (kb.selectedKB) {
+          await fetchDocuments(kb.selectedKB.id);
         }
       } else {
         message.error(response.data.message || "重试失败");
@@ -579,18 +399,18 @@ export default function KnowledgePage() {
         // Refresh whichever lists show this doc. The modal and the
         // inline list share a single document set when they refer to
         // the same KB — refreshing the modal also keeps the inline
-        // list in sync via the next fetchData().
+        // list in sync via the next kb.refreshKbList().
         if (docListModalVisible && docListKB) {
           await handleViewDocs(docListKB);
-          if (selectedKB && selectedKB.id !== docListKB.id) {
-            await fetchDocuments(selectedKB.id);
+          if (kb.selectedKB && kb.selectedKB.id !== docListKB.id) {
+            await fetchDocuments(kb.selectedKB.id);
           }
-        } else if (selectedKB) {
-          await fetchDocuments(selectedKB.id);
+        } else if (kb.selectedKB) {
+          await fetchDocuments(kb.selectedKB.id);
         }
         // KB row's `document_count` is derived in the service layer;
-        // the manual fetchData() refetch below updates the badge.
-        await fetchData();
+        // the manual kb.refreshKbList() refetch below updates the badge.
+        await kb.refreshKbList();
       } else {
         message.error(response.data.message || "删除失败");
       }
@@ -630,14 +450,14 @@ export default function KnowledgePage() {
     setRechunkDoc(doc);
     // Pre-fill form with the doc's currently-stored doc_type and the
     // parent KB's chunking settings as a sensible default.
-    const kb = doc.knowledge_base_id
-      ? data.find((k) => k.id === doc.knowledge_base_id) || selectedKB
+    const parentKB = doc.knowledge_base_id
+      ? kb.data.find((k) => k.id === doc.knowledge_base_id) || kb.selectedKB
       : null;
     const existingDocType = doc.doc_metadata?.doc_type;
     rechunkForm.setFieldsValue({
       chunking_strategy: "fixed",
-      chunk_size: (kb as any)?.chunk_size ?? 500,
-      chunk_overlap: (kb as any)?.chunk_overlap ?? 50,
+      chunk_size: (parentKB as any)?.chunk_size ?? 500,
+      chunk_overlap: (parentKB as any)?.chunk_overlap ?? 50,
       doc_type: existingDocType,
     });
     setRechunkModalOpen(true);
@@ -660,8 +480,8 @@ export default function KnowledgePage() {
         if (docListModalVisible && docListKB) {
           await handleViewDocs(docListKB);
         }
-        if (selectedKB) {
-          await fetchDocuments(selectedKB.id);
+        if (kb.selectedKB) {
+          await fetchDocuments(kb.selectedKB.id);
         }
       } else {
         message.error(response.data.message || "重新分块失败");
@@ -675,7 +495,7 @@ export default function KnowledgePage() {
   };
 
   const handleSearch = async () => {
-    if (!selectedKB || !searchQuery.trim()) {
+    if (!kb.selectedKB || !searchQuery.trim()) {
       message.warning("请选择知识库并输入搜索内容");
       return;
     }
@@ -688,7 +508,7 @@ export default function KnowledgePage() {
         rerank_top_n: searchOptions.rerankTopN,
         field_weights: searchOptions.fieldWeights || undefined,
       };
-      const response = await knowledgeApi.search(selectedKB.id, searchQuery, options);
+      const response = await knowledgeApi.search(kb.selectedKB.id, searchQuery, options);
       if (response.data.code === 200) {
         setSearchResults(response.data.data || []);
         if ((response.data.data || []).length === 0) {
@@ -805,13 +625,13 @@ export default function KnowledgePage() {
         <Space>
           <Button
             size="small"
-            type={selectedKB?.id === record.id ? "primary" : "default"}
+            type={kb.selectedKB?.id === record.id ? "primary" : "default"}
             icon={<SearchOutlined />}
-            onClick={() => handleSelectKB(selectedKB?.id === record.id ? null : record)}
+            onClick={() => kb.handleSelectKB(kb.selectedKB?.id === record.id ? null : record)}
           >
-            {selectedKB?.id === record.id ? "取消选择" : "查看"}
+            {kb.selectedKB?.id === record.id ? "取消选择" : "查看"}
           </Button>
-          <Button size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)}>
+          <Button size="small" icon={<EditOutlined />} onClick={() => kb.handleEdit(record)}>
             编辑
           </Button>
           <Upload
@@ -828,7 +648,7 @@ export default function KnowledgePage() {
           </Upload>
           <Popconfirm
             title="确认删除?"
-            onConfirm={() => handleDelete(record.id)}
+            onConfirm={() => kb.handleDelete(record.id)}
           >
             <Button size="small" danger icon={<DeleteOutlined />}>
               删除
@@ -849,7 +669,7 @@ export default function KnowledgePage() {
       >
         <WorkspaceTree
           selectedWorkspaceId={ws.selectedWorkspaceId}
-          selectedKbId={selectedKB?.id ?? null}
+          selectedKbId={kb.selectedKB?.id ?? null}
           selectedFolderId={ws.selectedFolderId}
           treesByWorkspace={ws.treesByWorkspace}
           loading={ws.workspaceTreeLoading}
@@ -859,7 +679,7 @@ export default function KnowledgePage() {
           onCreateWorkspace={() => ws.setCreateWsOpen(true)}
           onCreateFolder={(_wsId, kbId) => {
             // Sider 入口:KB 必须先选中才能新建 folder。
-            if (!selectedKB || selectedKB.id !== kbId) {
+            if (!kb.selectedKB || kb.selectedKB.id !== kbId) {
               knowledgeApi.get(kbId).then((r) => {
                 if (r.data.code === 200 && r.data.data) ws.handleSelectKb(null, kbId);
               });
@@ -886,7 +706,7 @@ export default function KnowledgePage() {
                     `Workspace #${ws.selectedWorkspaceId}`
                   : "未分组",
             },
-            ...(selectedKB
+            ...(kb.selectedKB
                 ? [
                     {
                       title: (
@@ -894,11 +714,11 @@ export default function KnowledgePage() {
                           onClick={(e) => {
                             e.preventDefault();
                             ws.setSelectedFolderId(null);
-                            if (selectedKB) fetchDocuments(selectedKB.id);
+                            if (kb.selectedKB) fetchDocuments(kb.selectedKB.id);
                           }}
                           href="#"
                         >
-                          {selectedKB.name}
+                          {kb.selectedKB.name}
                         </a>
                       ),
                     },
@@ -911,7 +731,7 @@ export default function KnowledgePage() {
                   },
                 ]
               : []),
-            ...(selectedKB && ws.selectedFolderId == null
+            ...(kb.selectedKB && ws.selectedFolderId == null
               ? [{ title: "KB 根目录" }]
               : []),
           ]}
@@ -922,7 +742,7 @@ export default function KnowledgePage() {
           <Button
             type="primary"
             icon={<PlusOutlined />}
-            onClick={() => setModalVisible(true)}
+            onClick={() => kb.setModalVisible(true)}
           >
             创建知识库
           </Button>
@@ -943,18 +763,18 @@ export default function KnowledgePage() {
         </div>
         <Table
           columns={columns}
-          dataSource={data}
+          dataSource={kb.data}
           rowKey="id"
-          loading={loading}
+          loading={kb.loading}
           pagination={{
-            current: page,
-            pageSize,
-            total,
+            current: kb.page,
+            pageSize: kb.pageSize,
+            total: kb.total,
             showSizeChanger: true,
             showTotal: (t) => `共 ${t} 条`,
             onChange: (p, ps) => {
-              setPage(p);
-              setPageSize(ps);
+              kb.setPage(p);
+              kb.setPageSize(ps);
             },
           }}
           size="small"
@@ -962,20 +782,20 @@ export default function KnowledgePage() {
       </Card>
 
       {/* Selected KB Detail and Documents */}
-      {selectedKB && (
+      {kb.selectedKB && (
         <>
-          <Card title={`知识库详情: ${selectedKB.name}`} style={{ marginBottom: 16 }}>
-            <p><Text strong>ID:</Text> {selectedKB.id}</p>
-            <p><Text strong>描述:</Text> {selectedKB.description || "无"}</p>
-            <p><Text strong>Embedding模型:</Text> {selectedKB.embedding_model}</p>
+          <Card title={`知识库详情: ${kb.selectedKB.name}`} style={{ marginBottom: 16 }}>
+            <p><Text strong>ID:</Text> {kb.selectedKB.id}</p>
+            <p><Text strong>描述:</Text> {kb.selectedKB.description || "无"}</p>
+            <p><Text strong>Embedding模型:</Text> {kb.selectedKB.embedding_model}</p>
             <p><Text strong>默认解析器:</Text> {
-              (selectedKB as any).default_parser ?
-                (parserTypes.find((t: any) => t.type === (selectedKB as any).default_parser)?.label || (selectedKB as any).default_parser)
+              (kb.selectedKB as any).default_parser ?
+                (parserTypes.find((t: any) => t.type === (kb.selectedKB as any).default_parser)?.label || (kb.selectedKB as any).default_parser)
                 : "通用文档"
             }</p>
-            <p><Text strong>分块配置:</Text> 块大小 {(selectedKB as any).chunk_size || 500} / 重叠 {(selectedKB as any).chunk_overlap || 50}</p>
-            <p><Text strong>状态:</Text> <Tag color={selectedKB.status === "active" ? "green" : "default"}>{selectedKB.status}</Tag></p>
-            <p><Text strong>创建时间:</Text> {selectedKB.created_at}</p>
+            <p><Text strong>分块配置:</Text> 块大小 {(kb.selectedKB as any).chunk_size || 500} / 重叠 {(kb.selectedKB as any).chunk_overlap || 50}</p>
+            <p><Text strong>状态:</Text> <Tag color={kb.selectedKB.status === "active" ? "green" : "default"}>{kb.selectedKB.status}</Tag></p>
+            <p><Text strong>创建时间:</Text> {kb.selectedKB.created_at}</p>
           </Card>
 
           {/* Documents + Q&A Section — Tabs (M31) */}
@@ -1002,12 +822,15 @@ export default function KnowledgePage() {
                         />
                         <Upload
                           showUploadList={false}
-                          beforeUpload={(file) => handleUpload(selectedKB.id, file)}
+                          beforeUpload={(file) => {
+                            if (kb.selectedKB) handleUpload(kb.selectedKB.id, file);
+                            return false;
+                          }}
                         >
                           <Button
                             size="small"
                             icon={<UploadOutlined />}
-                            loading={uploadMutation.isPending && uploadMutation.variables?.kbId === selectedKB.id}
+                            loading={uploadMutation.isPending && uploadMutation.variables?.kbId === kb.selectedKB.id}
                           >
                             上传文档
                           </Button>
@@ -1117,7 +940,7 @@ export default function KnowledgePage() {
                 {
                   key: "faq",
                   label: "Q&A 问答",
-                  children: <FAQTab kbId={selectedKB.id} />,
+                  children: <FAQTab kbId={kb.selectedKB.id} />,
                 },
               ]}
             />
@@ -1274,14 +1097,14 @@ export default function KnowledgePage() {
       {/* Create Modal */}
       <Modal
         title="创建知识库"
-        open={modalVisible}
+        open={kb.modalVisible}
         onCancel={() => {
-          setModalVisible(false);
-          form.resetFields();
+          kb.setModalVisible(false);
+          kb.form.resetFields();
         }}
         footer={null}
       >
-        <Form form={form} layout="vertical" onFinish={handleCreate}>
+        <Form form={kb.form} layout="vertical" onFinish={kb.handleCreate}>
           <Form.Item
             name="name"
             label="名称"
@@ -1329,20 +1152,20 @@ export default function KnowledgePage() {
             <Panel header="搜索权重配置" key="weights">
               <Space direction="vertical" style={{ width: '100%' }}>
                 <div>
-                  <Text>title: {searchWeights.title}</Text>
-                  <Slider min={0} max={100} value={searchWeights.title} onChange={(v) => setSearchWeights({...searchWeights, title: v})} />
+                  <Text>title: {kb.searchWeights.title}</Text>
+                  <Slider min={0} max={100} value={kb.searchWeights.title} onChange={(v) => kb.setSearchWeights({...kb.searchWeights, title: v})} />
                 </div>
                 <div>
-                  <Text>important_kw: {searchWeights.important_kw}</Text>
-                  <Slider min={0} max={100} value={searchWeights.important_kw} onChange={(v) => setSearchWeights({...searchWeights, important_kw: v})} />
+                  <Text>important_kw: {kb.searchWeights.important_kw}</Text>
+                  <Slider min={0} max={100} value={kb.searchWeights.important_kw} onChange={(v) => kb.setSearchWeights({...kb.searchWeights, important_kw: v})} />
                 </div>
                 <div>
-                  <Text>question_kw: {searchWeights.question_kw}</Text>
-                  <Slider min={0} max={100} value={searchWeights.question_kw} onChange={(v) => setSearchWeights({...searchWeights, question_kw: v})} />
+                  <Text>question_kw: {kb.searchWeights.question_kw}</Text>
+                  <Slider min={0} max={100} value={kb.searchWeights.question_kw} onChange={(v) => kb.setSearchWeights({...kb.searchWeights, question_kw: v})} />
                 </div>
                 <div>
-                  <Text>text: {searchWeights.text}</Text>
-                  <Slider min={0} max={100} value={searchWeights.text} onChange={(v) => setSearchWeights({...searchWeights, text: v})} />
+                  <Text>text: {kb.searchWeights.text}</Text>
+                  <Slider min={0} max={100} value={kb.searchWeights.text} onChange={(v) => kb.setSearchWeights({...kb.searchWeights, text: v})} />
                 </div>
               </Space>
             </Panel>
@@ -1352,7 +1175,7 @@ export default function KnowledgePage() {
               <Button type="primary" htmlType="submit">
                 创建
               </Button>
-              <Button onClick={() => setModalVisible(false)}>取消</Button>
+              <Button onClick={() => kb.setModalVisible(false)}>取消</Button>
             </Space>
           </Form.Item>
         </Form>
@@ -1360,16 +1183,16 @@ export default function KnowledgePage() {
 
       {/* Edit Modal */}
       <Modal
-        title={`编辑知识库: ${editingKB?.name || ''}`}
-        open={editModalVisible}
+        title={`编辑知识库: ${kb.editingKB?.name || ''}`}
+        open={kb.editModalVisible}
         onCancel={() => {
-          setEditModalVisible(false);
-          editForm.resetFields();
+          kb.setEditModalVisible(false);
+          kb.editForm.resetFields();
         }}
         footer={null}
         width={600}
       >
-        <Form form={editForm} layout="vertical" onFinish={handleUpdate}>
+        <Form form={kb.editForm} layout="vertical" onFinish={kb.handleUpdate}>
           <Form.Item
             name="name"
             label="名称"
@@ -1411,20 +1234,20 @@ export default function KnowledgePage() {
             <Panel header="搜索权重配置" key="weights">
               <Space direction="vertical" style={{ width: '100%' }}>
                 <div>
-                  <Text>title: {editSearchWeights.title}</Text>
-                  <Slider min={0} max={100} value={editSearchWeights.title} onChange={(v) => setEditSearchWeights({...editSearchWeights, title: v})} />
+                  <Text>title: {kb.editSearchWeights.title}</Text>
+                  <Slider min={0} max={100} value={kb.editSearchWeights.title} onChange={(v) => kb.setEditSearchWeights({...kb.editSearchWeights, title: v})} />
                 </div>
                 <div>
-                  <Text>important_kw: {editSearchWeights.important_kw}</Text>
-                  <Slider min={0} max={100} value={editSearchWeights.important_kw} onChange={(v) => setEditSearchWeights({...editSearchWeights, important_kw: v})} />
+                  <Text>important_kw: {kb.editSearchWeights.important_kw}</Text>
+                  <Slider min={0} max={100} value={kb.editSearchWeights.important_kw} onChange={(v) => kb.setEditSearchWeights({...kb.editSearchWeights, important_kw: v})} />
                 </div>
                 <div>
-                  <Text>question_kw: {editSearchWeights.question_kw}</Text>
-                  <Slider min={0} max={100} value={editSearchWeights.question_kw} onChange={(v) => setEditSearchWeights({...editSearchWeights, question_kw: v})} />
+                  <Text>question_kw: {kb.editSearchWeights.question_kw}</Text>
+                  <Slider min={0} max={100} value={kb.editSearchWeights.question_kw} onChange={(v) => kb.setEditSearchWeights({...kb.editSearchWeights, question_kw: v})} />
                 </div>
                 <div>
-                  <Text>text: {editSearchWeights.text}</Text>
-                  <Slider min={0} max={100} value={editSearchWeights.text} onChange={(v) => setEditSearchWeights({...editSearchWeights, text: v})} />
+                  <Text>text: {kb.editSearchWeights.text}</Text>
+                  <Slider min={0} max={100} value={kb.editSearchWeights.text} onChange={(v) => kb.setEditSearchWeights({...kb.editSearchWeights, text: v})} />
                 </div>
               </Space>
             </Panel>
@@ -1434,7 +1257,7 @@ export default function KnowledgePage() {
               <Button type="primary" htmlType="submit">
                 保存
               </Button>
-              <Button onClick={() => setEditModalVisible(false)}>取消</Button>
+              <Button onClick={() => kb.setEditModalVisible(false)}>取消</Button>
             </Space>
           </Form.Item>
         </Form>
@@ -1700,27 +1523,27 @@ export default function KnowledgePage() {
           用户根本来不及想「我该去哪个 agent 解绑」,改成持久 Modal。 */}
       <Modal
         title="无法删除知识库"
-        open={blockerModal.visible}
-        onCancel={() => setBlockerModal((prev) => ({ ...prev, visible: false }))}
+        open={kb.blockerModal.visible}
+        onCancel={() => kb.setBlockerModal((prev) => ({ ...prev, visible: false }))}
         footer={[
           <Button
             key="ok"
             type="primary"
-            onClick={() => setBlockerModal((prev) => ({ ...prev, visible: false }))}
+            onClick={() => kb.setBlockerModal((prev) => ({ ...prev, visible: false }))}
           >
             知道了
           </Button>,
         ]}
       >
-        <p style={{ marginBottom: 16 }}>{blockerModal.message}</p>
+        <p style={{ marginBottom: 16 }}>{kb.blockerModal.message}</p>
 
-        {blockerModal.agents.length > 0 && (
+        {kb.blockerModal.agents.length > 0 && (
           <div style={{ marginBottom: 12 }}>
             <Typography.Text strong>引用此知识库的 Agent</Typography.Text>
             <List
               size="small"
               style={{ marginTop: 4 }}
-              dataSource={blockerModal.agents}
+              dataSource={kb.blockerModal.agents}
               renderItem={(a) => (
                 <List.Item>
                   <span>
@@ -1736,13 +1559,13 @@ export default function KnowledgePage() {
           </div>
         )}
 
-        {blockerModal.documents.length > 0 && (
+        {kb.blockerModal.documents.length > 0 && (
           <div style={{ marginBottom: 12 }}>
             <Typography.Text strong>关联的文档</Typography.Text>
             <List
               size="small"
               style={{ marginTop: 4 }}
-              dataSource={blockerModal.documents}
+              dataSource={kb.blockerModal.documents}
               renderItem={(d) => (
                 <List.Item>
                   <span>
@@ -1758,7 +1581,7 @@ export default function KnowledgePage() {
           </div>
         )}
 
-        {blockerModal.truncated && (
+        {kb.blockerModal.truncated && (
           <Typography.Text type="warning" style={{ fontSize: 12 }}>
             列表已截断(后端每次最多返回 10 条),实际 blocker 数量可能更多。
           </Typography.Text>
@@ -1776,10 +1599,10 @@ export default function KnowledgePage() {
       {/* M38.2: 新建 folder modal —— 当前选中 KB 必须存在。
           folders 给 tree 形态供 parent_choice 选择;defaultParentId 留给
           「右键新建子文件夹」等场景,当前 UI 暂不暴露入口。 */}
-      {selectedKB && (
+      {kb.selectedKB && (
         <CreateFolderModal
           open={ws.createFolderOpen}
-          kbId={selectedKB.id}
+          kbId={kb.selectedKB.id}
           folders={ws.folderTree}
           onCancel={() => ws.setCreateFolderOpen(false)}
           onSubmit={ws.handleCreateFolder}
@@ -1788,7 +1611,7 @@ export default function KnowledgePage() {
 
       {/* M38.2: 移动文档 modal —— 给「从当前 folder 移到别处」用。
           movingDoc 为 null 时 modal 不渲染,避免无效状态。 */}
-      {ws.movingDoc && selectedKB && (
+      {ws.movingDoc && kb.selectedKB && (
         <MoveDocumentModal
           open={ws.moveDocOpen}
           documentId={ws.movingDoc.id}
