@@ -1,7 +1,32 @@
+import logging as _logging_secret_validator
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 from typing import Optional
+
+
+# Boot-time sentinel prefixes — placeholder strings shipped in-tree as
+# defaults that must NEVER reach a production deploy. The
+# ``_check_secret_hygiene`` ``model_validator`` below refuses to boot
+# (``DEBUG=False``) or warns loudly (``DEBUG=True``) when any field
+# whose name carries ``*_SECRET`` / ``*_KEY`` / ``*_TOKEN`` still holds
+# a string beginning with one of these prefixes. Mirrors the historical
+# ``EXTERNAL_JWT_SECRET`` guard in ``app.main`` (see M14 / external
+# chat widget spec § 5) — this centralises the policy across every
+# key-shaped field so future config additions get the same treatment
+# for free. Empty / ``None`` values are NOT considered placeholders
+# because several keys (``S3_SECRET_KEY`` / ``BROADCAST_INTERNAL_SECRET``
+# / ``MINIMAX_API_KEY`` / ``OAUTH2_CLIENT_SECRET``) default to empty
+# or ``None`` to represent "feature not configured" — refusing to
+# boot in that case would block legitimate dev setups.
+_SECRET_PLACEHOLDER_PREFIXES: tuple[str, ...] = (
+    "your-secret-key-",
+    "dev-secret-key-",
+    "dev-only-",
+    "external-dev-only-",
+    "change-in-production-",
+)
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]  # backend/
 DEFAULT_STORAGE_DIR = BACKEND_ROOT / "storage"
@@ -228,6 +253,58 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+
+    @model_validator(mode="after")
+    def _check_secret_hygiene(self) -> "Settings":
+        """Refuse to boot if SECRET / KEY / TOKEN fields still hold dev placeholders.
+
+        Centralises the historical ``EXTERNAL_JWT_SECRET`` guard that
+        used to live in ``app.main`` (M14 spec § 5) so every
+        ``*_SECRET`` / ``*_KEY`` / ``*_TOKEN`` field on ``Settings`` is
+        enforced with the same policy. ``DEBUG=True`` only emits a
+        WARNING so the pytest suite can still boot; ``DEBUG=False``
+        raises ``ValueError`` to halt the process before it accepts
+        traffic — deploying with a guessable JWT signing key or a
+        hard-coded WX app_secret cipher is a P0 exposure (see
+        ``docs/reviews/2026-10-04-nitpick.md`` C1 + C2).
+        """
+        # Scan all declared fields. Only string-typed key-shaped names
+        # are inspected; ``Optional[str] = None`` keys (e.g. OAuth
+        # client secret) and ``str = ""`` defaults representing
+        # "feature disabled" are deliberately skipped via the
+        # ``not value`` short-circuit.
+        bad: list[tuple[str, str]] = []
+        for name in type(self).model_fields:
+            uname = name.upper()
+            if not (
+                "_SECRET" in uname
+                or uname.endswith("_KEY")
+                or "_KEY_" in uname
+                or "_TOKEN" in uname
+                or uname.endswith("_TOKEN")
+            ):
+                continue
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                continue
+            if any(value.startswith(p) for p in _SECRET_PLACEHOLDER_PREFIXES):
+                preview = value[:24] + ("..." if len(value) > 24 else "")
+                bad.append((name, preview))
+        if not bad:
+            return self
+        summary = ", ".join(f"{n}={v}" for n, v in bad)
+        if self.DEBUG:
+            _logging_secret_validator.getLogger("lumen_core.config").warning(
+                "SECRET/KEY/TOKEN 字段仍为 dev placeholder (%s); "
+                "DEBUG=True 仅 WARN,生产 (DEBUG=False) 会拒绝启动。",
+                summary,
+            )
+        else:
+            raise ValueError(
+                "SECRET/KEY/TOKEN 字段仍为 dev placeholder,生产环境拒绝启动: "
+                f"{summary}; 请通过环境变量覆盖 (例 SECRET_KEY=...)"
+            )
+        return self
 
 
 settings = Settings()

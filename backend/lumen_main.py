@@ -266,22 +266,13 @@ if setup_tracing(
 # /live / /ready 一起 ship 免得后续 K8s 迁移再补。
 _startup_complete: bool = False
 
-# Refuse to boot if EXTERNAL_JWT_SECRET is still the dev placeholder.
-# Mirrors the well-known dev-only-default check pattern from production
-# frameworks; protects against deploying a build where the external
-# widget would be wide-open because tokens are signed with a guessable
-# key. Logging the warning is the actionable signal — the ValueError
-# halts the process before it accepts traffic. In DEBUG mode (local
-# dev + pytest) we only warn so the suite can still start.
-import logging as _logging
-if settings.EXTERNAL_JWT_SECRET.startswith("external-dev-only"):
-    if not settings.DEBUG:
-        raise ValueError(
-            "EXTERNAL_JWT_SECRET is still the dev default; set a real value in production"
-        )
-    _logging.getLogger(__name__).warning(
-        "EXTERNAL_JWT_SECRET is dev-only; OK for DEBUG, REFUSED in production"
-    )
+# EXTERNAL_JWT_SECRET / SECRET_KEY / WX_PUBLISHER_FERNET_KEY 等
+# SECRET/KEY/TOKEN 字段的 dev placeholder 守门统一在
+# ``lumen_core.config.Settings._check_secret_hygiene`` (model_validator,
+# DEBUG=True 仅 WARN / DEBUG=False 抛 ValueError 拒绝启动)。
+# 历史上一段独立的 EXTERNAL_JWT_SECRET 硬编码守门挪走后这里只剩
+# celery_app 预加载,见 ``tests/unit/test_external_jwt_secret_validation.py``
+# 锁住的 invariant 仍然有效 (默认值以 sentinel 开头 + DEBUG=True)。
 
 # Preload celery_app to break the celery_app <-> document_tasks
 # circular import. celery_app.py:31 does
