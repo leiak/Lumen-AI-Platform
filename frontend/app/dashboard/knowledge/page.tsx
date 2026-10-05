@@ -47,7 +47,6 @@ import type { KnowledgeBase } from "@/types/api";
 import EmbeddingModelSelect from "@/components/EmbeddingModelSelect";
 import FAQTab from "@/components/knowledge/FAQTab";
 import { ModelConfig } from "@/services/models";
-import { useNotificationsStore } from "@/store/notifications";
 // M38.2: workspace + folder navigation + 3 个 modal。
 import WorkspaceTree from "@/components/knowledge/WorkspaceTree";
 import CreateWorkspaceModal from "@/components/knowledge/CreateWorkspaceModal";
@@ -59,6 +58,8 @@ import { useWorkspaceTree } from "@/app/dashboard/knowledge/hooks/useWorkspaceTr
 import { useKnowledgeList } from "@/app/dashboard/knowledge/hooks/useKnowledgeList";
 // M40.1 Phase 3: useDocumentUpload hook —— 上传 mutation + doc type picker。
 import { useDocumentUpload } from "@/app/dashboard/knowledge/hooks/useDocumentUpload";
+// M40.1 Phase 4: useDocumentList hook —— documents + 重试/删除/分块/重新分块 + 通知订阅。
+import { useDocumentList } from "@/app/dashboard/knowledge/hooks/useDocumentList";
 // M38.2.x v2: workspace RBAC members 管理 + useCanI gate
 import { WorkspaceMembersModal } from "@/components/knowledge/WorkspaceMembersModal";
 import { useCanI } from "@/hooks/useWorkspacePermissions";
@@ -121,14 +122,8 @@ export default function KnowledgePage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searching, setSearching] = useState(false);
-
-  // Documents state(Phase 4 useDocumentList 接管)
-  const [documents, setDocuments] = useState<DocumentResponse[]>([]);
-  const [loadingDocs, setLoadingDocs] = useState(false);
   const [detailModalVisible, setDetailModalVisible] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState<SearchResult | null>(null);
-
-  // M40.1 Phase 3: 上传 state 搬到 useDocumentUpload hook。
 
   // Search options state(Phase 5 useDocumentSearch 接管)
   const [searchOptions, setSearchOptions] = useState({
@@ -145,36 +140,6 @@ export default function KnowledgePage() {
   const [loadedEmbeddingModels, setLoadedEmbeddingModels] = useState<
     ModelConfig[]
   >([]);
-
-  // Document list modal state(Phase 4 useDocumentList 接管)
-  const [docListModalVisible, setDocListModalVisible] = useState(false);
-  const [docListKB, setDocListKB] = useState<KnowledgeBase | null>(null);
-  const [docList, setDocList] = useState<DocumentResponse[]>([]);
-  const [docListLoading, setDocListLoading] = useState(false);
-
-  // Per-doc loading state for the retry button (one spinner at a time).
-  const [retryingDocId, setRetryingDocId] = useState<number | null>(null);
-
-  // Per-doc loading state for the delete button. Spinner is shown on
-  // the row that's currently being deleted so concurrent deletes are
-  // impossible.
-  const [deletingDocId, setDeletingDocId] = useState<number | null>(null);
-
-  // M40.1 Phase 2: blocker modal state 搬到 useKnowledgeList hook。
-
-  // View-chunks modal state
-  const [chunksModalOpen, setChunksModalOpen] = useState(false);
-  const [chunksDoc, setChunksDoc] = useState<DocumentResponse | null>(null);
-  const [chunks, setChunks] = useState<DocumentChunk[]>([]);
-  const [chunksLoading, setChunksLoading] = useState(false);
-  const [chunksPage, setChunksPage] = useState(1);
-  const [chunksPageSize, setChunksPageSize] = useState(20);
-
-  // Re-chunk modal state
-  const [rechunkModalOpen, setRechunkModalOpen] = useState(false);
-  const [rechunkDoc, setRechunkDoc] = useState<DocumentResponse | null>(null);
-  const [rechunkSubmitting, setRechunkSubmitting] = useState(false);
-  const [rechunkForm] = Form.useForm();
 
   // M40.1 Phase 1: workspace/folder/rbac 状态全部搬到 useWorkspaceTree hook。
   // 这里只剩 KB / document / search 相关的 state。
@@ -201,10 +166,12 @@ export default function KnowledgePage() {
     onKbChangeCleanup: (newKB) => {
       setSearchResults([]);
       setSearchQuery("");
-      setDocuments([]);
+      // documents 已搬到 useDocumentList,hook 内 bridge effect 监听 selectedKB 变化自动 fetch
     },
     onKbSelectFetchDocs: (kbId) => {
-      fetchDocuments(kbId, null);
+      // 兼容 kb hook 接口 —— c1 hook 自己 effect 已响应 selectedKB 变化,
+      // 这里 noop(否则会重复 fetchDocuments 一次)
+      void kbId;
     },
   });
 
@@ -228,46 +195,19 @@ export default function KnowledgePage() {
       kb.refreshKbList();
       if (kb.selectedKB && kb.selectedKB.id === kbId) {
         queryClient.invalidateQueries({ queryKey: ["documents", kbId] });
-        fetchDocuments(kbId);
+        c1.refreshDocuments();
       }
     },
   });
 
-  useEffect(() => {
-    // Subscribe to incoming notifications; refetch the current KB's doc
-    // list when a doc-related notification for that KB arrives.
-    const unsub = useNotificationsStore.subscribe((state, prev) => {
-      if (state.items === prev.items) return;
-      const newest = state.items[0];
-      if (!newest) return;
-      if (
-        newest.resource_type === "document" &&
-        kb.selectedKB !== null &&
-        newest.metadata?.kb_id === kb.selectedKB.id &&
-        // Only react to length growth (WS push, refetchUnread backfill, loadMore).
-        // Pure state swaps like markRead/markAllRead/reset don't change length,
-        // so they don't trigger a refetch.
-        prev.items.length < state.items.length
-      ) {
-        // M38.2: 通知触发的刷新也得带上 folder 过滤 —— 否则在 folder 视图下
-        // 收到的 doc 通知会污染显示成「全部文档」。
-        fetchDocuments(kb.selectedKB.id);
-      }
-    });
-    return () => { unsub(); };
-    // M40.1: ws.selectedFolderId 进入依赖 —— 切换 folder 时也要重订一次订阅
-    // (虽然 subscribe 本身不需要,但保持 deps 干净,eslint 不报警)。
-  }, [kb.selectedKB?.id, ws.selectedFolderId]);
-
-  // M40.1: sidebar 切 folder → 重新拉文档。hook 化前由 handleSelectFolder 内联调
-  // fetchDocuments,hook 化后 hook 不持有 page 层 fetchDocuments,改用 effect 监听
-  // folder 变化。Phase 2 useDocumentList 接管后会改走 query,本 effect 临时作为桥接。
-  useEffect(() => {
-    if (kb.selectedKB) {
-      fetchDocuments(kb.selectedKB.id, ws.selectedFolderId);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ws.selectedFolderId, kb.selectedKB?.id]);
+  // M40.1 Phase 4: useDocumentList hook —— documents + docList/chunks/rechunk modal + 通知订阅。
+  // 在 up 之后:c1.documents.length / c1.docList.length 用于 deep-link effect。
+  const c1 = useDocumentList({
+    selectedKB: kb.selectedKB,
+    selectedFolderId: ws.selectedFolderId,
+    refreshKbList: kb.refreshKbList,
+    allKBs: kb.data,
+  });
 
   // Highlight a specific doc when the URL has ?doc=<id> — used by the
   // notification "Open" action to deep-link into the KB page.
@@ -285,188 +225,14 @@ export default function KnowledgePage() {
       }
     }, 300);
     return () => clearTimeout(t);
-  }, [docParam, documents.length, docList.length]);
+  }, [docParam, c1.documents.length, c1.docList.length]);
 
   // M40.1 Phase 3: uploadMutation + handleUpload 搬到 useDocumentUpload hook。
 
   // M40.1 Phase 2: kb.refreshKbList / kb.handleSelectKB / kb.handleCreate / kb.handleDelete /
 // kb.handleEdit / kb.handleUpdate 全部搬到 useKnowledgeList hook。
-// 下面的 fetchDocuments 仍在 page 层(Phase 4 useDocumentList 接管),
-// 通过 args.onKbSelectFetchDocs 传给 hook 做 KB 切换时拉文档用。
-
-  const fetchDocuments = async (kbId: number, folderId?: number | null) => {
-    setLoadingDocs(true);
-    try {
-      // M40.1: folder 来自 useWorkspaceTree。null = 不过滤(全部),number = 那个 folder。
-      // folderId 优先用入参,fallback 到 hook state —— sidebar 切换 folder 时入参
-      // 是新值,hook state 还是旧值,避免 stale closure 拿到错的 folder_id。
-      const fId = folderId !== undefined ? folderId : ws.selectedFolderId;
-      const response = await knowledgeApi.getDocuments(kbId, fId ?? undefined);
-      if (response.data.code === 200) {
-        setDocuments(response.data.data || []);
-      }
-    } catch (error) {
-      message.error("加载文档列表失败");
-    } finally {
-      setLoadingDocs(false);
-    }
-  };
-
-  // M40.1 Phase 3: handleUpload 搬到 useDocumentUpload hook。
-
-  const handleViewDocs = async (kb: KnowledgeBase) => {
-    setDocListKB(kb);
-    setDocListModalVisible(true);
-    setDocListLoading(true);
-    try {
-      const response = await knowledgeApi.getDocuments(kb.id);
-      if (response.data.code === 200) {
-        setDocList(response.data.data || []);
-      }
-    } catch (error) {
-      message.error("加载文档列表失败");
-      setDocList([]);
-    } finally {
-      setDocListLoading(false);
-    }
-  };
-
-  const handleRetry = async (doc: DocumentResponse) => {
-    setRetryingDocId(doc.id);
-    try {
-      const response = await knowledgeApi.retry(doc.id);
-      if (response.data.code === 200) {
-        message.success("已重新加入处理队列");
-        // Refresh whichever list currently shows this doc.
-        if (docListModalVisible && docListKB) {
-          await handleViewDocs(docListKB);
-        }
-        if (kb.selectedKB) {
-          await fetchDocuments(kb.selectedKB.id);
-        }
-      } else {
-        message.error(response.data.message || "重试失败");
-      }
-    } catch (error: any) {
-      const detail = error?.response?.data?.detail || error?.message || "重试失败";
-      message.error(detail);
-    } finally {
-      setRetryingDocId(null);
-    }
-  };
-
-  const handleDeleteDocument = async (doc: DocumentResponse) => {
-    setDeletingDocId(doc.id);
-    try {
-      const response = await knowledgeApi.deleteDocument(doc.id);
-      if (response.data.code === 200) {
-        const payload = response.data.data as
-          | { deleted_chunks: number; vector_cleanup_failed: boolean }
-          | undefined;
-        const chunksNote = payload?.deleted_chunks
-          ? `,清除 ${payload.deleted_chunks} 个分块`
-          : "";
-        const vectorNote = payload?.vector_cleanup_failed
-          ? "（向量清理未完全成功,可重试或忽略）"
-          : "";
-        message.success(`文档已删除${chunksNote}${vectorNote}`);
-        // Refresh whichever lists show this doc. The modal and the
-        // inline list share a single document set when they refer to
-        // the same KB — refreshing the modal also keeps the inline
-        // list in sync via the next kb.refreshKbList().
-        if (docListModalVisible && docListKB) {
-          await handleViewDocs(docListKB);
-          if (kb.selectedKB && kb.selectedKB.id !== docListKB.id) {
-            await fetchDocuments(kb.selectedKB.id);
-          }
-        } else if (kb.selectedKB) {
-          await fetchDocuments(kb.selectedKB.id);
-        }
-        // KB row's `document_count` is derived in the service layer;
-        // the manual kb.refreshKbList() refetch below updates the badge.
-        await kb.refreshKbList();
-      } else {
-        message.error(response.data.message || "删除失败");
-      }
-    } catch (error: any) {
-      const detail =
-        error?.response?.data?.detail || error?.message || "删除失败";
-      message.error(typeof detail === "string" ? detail : JSON.stringify(detail));
-    } finally {
-      setDeletingDocId(null);
-    }
-  };
-
-  const fetchChunks = async (docId: number, page: number, pageSize: number) => {
-    setChunksLoading(true);
-    try {
-      const response = await knowledgeApi.listChunks(docId, page, pageSize);
-      if (response.data.code === 200) {
-        setChunks(response.data.data || []);
-      }
-    } catch (error: any) {
-      const detail = error?.response?.data?.detail || error?.message || "加载分块失败";
-      message.error(detail);
-      setChunks([]);
-    } finally {
-      setChunksLoading(false);
-    }
-  };
-
-  const handleViewChunks = (doc: DocumentResponse) => {
-    setChunksDoc(doc);
-    setChunksPage(1);
-    setChunksModalOpen(true);
-    fetchChunks(doc.id, 1, chunksPageSize);
-  };
-
-  const handleRechunk = (doc: DocumentResponse) => {
-    setRechunkDoc(doc);
-    // Pre-fill form with the doc's currently-stored doc_type and the
-    // parent KB's chunking settings as a sensible default.
-    const parentKB = doc.knowledge_base_id
-      ? kb.data.find((k) => k.id === doc.knowledge_base_id) || kb.selectedKB
-      : null;
-    const existingDocType = doc.doc_metadata?.doc_type;
-    rechunkForm.setFieldsValue({
-      chunking_strategy: "fixed",
-      chunk_size: (parentKB as any)?.chunk_size ?? 500,
-      chunk_overlap: (parentKB as any)?.chunk_overlap ?? 50,
-      doc_type: existingDocType,
-    });
-    setRechunkModalOpen(true);
-  };
-
-  const handleRechunkSubmit = async (values: {
-    chunking_strategy: string;
-    chunk_size: number;
-    chunk_overlap: number;
-    doc_type?: string;
-  }) => {
-    if (!rechunkDoc) return;
-    setRechunkSubmitting(true);
-    try {
-      const response = await knowledgeApi.rechunk(rechunkDoc.id, values);
-      if (response.data.code === 200) {
-        message.success("已提交重新分块任务");
-        setRechunkModalOpen(false);
-        rechunkForm.resetFields();
-        if (docListModalVisible && docListKB) {
-          await handleViewDocs(docListKB);
-        }
-        if (kb.selectedKB) {
-          await fetchDocuments(kb.selectedKB.id);
-        }
-      } else {
-        message.error(response.data.message || "重新分块失败");
-      }
-    } catch (error: any) {
-      const detail = error?.response?.data?.detail || error?.message || "重新分块失败";
-      message.error(detail);
-    } finally {
-      setRechunkSubmitting(false);
-    }
-  };
+// M40.1 Phase 4:fetchDocuments / handleRetry / handleDeleteDocument / handleViewDocs /
+// fetchChunks / handleViewChunks / handleRechunk / handleRechunkSubmit 全部搬到 useDocumentList hook。
 
   const handleSearch = async () => {
     if (!kb.selectedKB || !searchQuery.trim()) {
@@ -579,7 +345,7 @@ export default function KnowledgePage() {
         <Button
           size="small"
           type="link"
-          onClick={() => handleViewDocs(record)}
+          onClick={() => c1.openDocList(record)}
         >
           {record.document_count ?? 0} 个文档
         </Button>
@@ -688,7 +454,7 @@ export default function KnowledgePage() {
                           onClick={(e) => {
                             e.preventDefault();
                             ws.setSelectedFolderId(null);
-                            if (kb.selectedKB) fetchDocuments(kb.selectedKB.id);
+                            if (kb.selectedKB) c1.refreshDocuments();
                           }}
                           href="#"
                         >
@@ -818,14 +584,14 @@ export default function KnowledgePage() {
                           新建 folder
                         </Button>
                       </Space>
-                      {loadingDocs ? (
+                      {c1.loadingDocs ? (
                         <Text type="secondary">加载中...</Text>
-                      ) : documents.length === 0 ? (
+                      ) : c1.documents.length === 0 ? (
                         <Text type="secondary">暂无文档，请上传</Text>
                       ) : (
                         <List
                           size="small"
-                          dataSource={documents}
+                          dataSource={c1.documents}
                           renderItem={(doc) => {
                             const docType = doc.doc_metadata?.doc_type;
                             const retriable = ["pending", "queued", "processing"].includes(doc.status);
@@ -839,7 +605,7 @@ export default function KnowledgePage() {
                                     size="small"
                                     type="link"
                                     icon={<BarsOutlined />}
-                                    onClick={() => handleViewChunks(doc)}
+                                    onClick={() => c1.openChunksModal(doc)}
                                   >
                                     查看分块
                                   </Button>
@@ -849,7 +615,7 @@ export default function KnowledgePage() {
                                   size="small"
                                   type="link"
                                   icon={<AppstoreOutlined />}
-                                  onClick={() => handleRechunk(doc)}
+                                  onClick={() => c1.openRechunkModal(doc)}
                                 >
                                   重新分块
                                 </Button>,
@@ -870,21 +636,21 @@ export default function KnowledgePage() {
                                   <Popconfirm
                                     key="retry"
                                     title="确定要重新处理此文档吗？之前的分块会被清除。"
-                                    onConfirm={() => handleRetry(doc)}
+                                    onConfirm={() => c1.handleRetry(doc)}
                                   >
                                     <Button
                                       size="small"
                                       type="link"
                                       icon={<RedoOutlined />}
-                                      loading={retryingDocId === doc.id}
+                                      loading={c1.retryingDocId === doc.id}
                                     >
                                       重试
                                     </Button>
                                   </Popconfirm>
                                 ),
                                 <DeleteDocumentAction
-                                  loading={deletingDocId === doc.id}
-                                  onConfirm={() => handleDeleteDocument(doc)}
+                                  loading={c1.deletingDocId === doc.id}
+                                  onConfirm={() => c1.handleDeleteDocument(doc)}
                                 />,
                                 docType && (
                                   <Tag key="type" color="blue">
@@ -1239,20 +1005,20 @@ export default function KnowledgePage() {
 
       {/* Document List Modal */}
       <Modal
-        title={`文档列表: ${docListKB?.name || ''}`}
-        open={docListModalVisible}
-        onCancel={() => setDocListModalVisible(false)}
+        title={`文档列表: ${c1.docListKB?.name || ''}`}
+        open={c1.docListModalVisible}
+        onCancel={() => c1.setDocListModalVisible(false)}
         footer={null}
         width={800}
       >
-        {docListLoading ? (
+        {c1.docListLoading ? (
           <Text type="secondary">加载中...</Text>
-        ) : docList.length === 0 ? (
+        ) : c1.docList.length === 0 ? (
           <Text type="secondary">暂无文档</Text>
         ) : (
           <List
             size="small"
-            dataSource={docList}
+            dataSource={c1.docList}
             renderItem={(doc) => {
               const docType = doc.doc_metadata?.doc_type;
               const retriable = ["pending", "queued", "processing"].includes(doc.status);
@@ -1266,7 +1032,7 @@ export default function KnowledgePage() {
                       size="small"
                       type="link"
                       icon={<BarsOutlined />}
-                      onClick={() => handleViewChunks(doc)}
+                      onClick={() => c1.openChunksModal(doc)}
                     >
                       查看分块
                     </Button>
@@ -1276,7 +1042,7 @@ export default function KnowledgePage() {
                     size="small"
                     type="link"
                     icon={<AppstoreOutlined />}
-                    onClick={() => handleRechunk(doc)}
+                    onClick={() => c1.openRechunkModal(doc)}
                   >
                     重新分块
                   </Button>,
@@ -1297,21 +1063,21 @@ export default function KnowledgePage() {
                     <Popconfirm
                       key="retry"
                       title="确定要重新处理此文档吗？之前的分块会被清除。"
-                      onConfirm={() => handleRetry(doc)}
+                      onConfirm={() => c1.handleRetry(doc)}
                     >
                       <Button
                         size="small"
                         type="link"
                         icon={<RedoOutlined />}
-                        loading={retryingDocId === doc.id}
+                        loading={c1.retryingDocId === doc.id}
                       >
                         重试
                       </Button>
                     </Popconfirm>
                   ),
                   <DeleteDocumentAction
-                    loading={deletingDocId === doc.id}
-                    onConfirm={() => handleDeleteDocument(doc)}
+                    loading={c1.deletingDocId === doc.id}
+                    onConfirm={() => c1.handleDeleteDocument(doc)}
                   />,
                   docType && (
                     <Tag key="type" color="blue">
@@ -1339,34 +1105,34 @@ export default function KnowledgePage() {
 
       {/* View Chunks Modal */}
       <Modal
-        title={`分块详情: ${chunksDoc?.filename || ''}`}
-        open={chunksModalOpen}
-        onCancel={() => setChunksModalOpen(false)}
+        title={`分块详情: ${c1.chunksDoc?.filename || ''}`}
+        open={c1.chunksModalOpen}
+        onCancel={() => c1.setChunksModalOpen(false)}
         footer={null}
         width={800}
       >
-        {chunksDoc && (
+        {c1.chunksDoc && (
           <>
             <div style={{ marginBottom: 12 }}>
               <Text type="secondary">
-                共 {chunksDoc.chunk_count ?? 0} 个分块
+                共 {c1.chunksDoc.chunk_count ?? 0} 个分块
               </Text>
             </div>
             <Table<DocumentChunk>
               size="small"
-              dataSource={chunks}
+              dataSource={c1.chunks}
               rowKey="id"
-              loading={chunksLoading}
+              loading={c1.chunksLoading}
               pagination={{
-                current: chunksPage,
-                pageSize: chunksPageSize,
-                total: chunksDoc.chunk_count ?? 0,
+                current: c1.chunksPage,
+                pageSize: c1.chunksPageSize,
+                total: c1.chunksDoc.chunk_count ?? 0,
                 showSizeChanger: true,
                 pageSizeOptions: [10, 20, 50, 100],
                 onChange: (p, ps) => {
-                  setChunksPage(p);
-                  setChunksPageSize(ps);
-                  fetchChunks(chunksDoc.id, p, ps);
+                  c1.setChunksPage(p);
+                  c1.setChunksPageSize(ps);
+                  // hook 内 bridge effect 监听 chunksPage/PageSize 自动 fetchChunks
                 },
               }}
               columns={[
@@ -1420,19 +1186,19 @@ export default function KnowledgePage() {
 
       {/* Re-chunk Modal */}
       <Modal
-        title={`重新分块: ${rechunkDoc?.filename || ''}`}
-        open={rechunkModalOpen}
+        title={`重新分块: ${c1.rechunkDoc?.filename || ''}`}
+        open={c1.rechunkModalOpen}
         onCancel={() => {
-          setRechunkModalOpen(false);
-          rechunkForm.resetFields();
+          c1.setRechunkModalOpen(false);
+          c1.rechunkForm.resetFields();
         }}
         footer={null}
         width={560}
       >
         <Form
-          form={rechunkForm}
+          form={c1.rechunkForm}
           layout="vertical"
-          onFinish={handleRechunkSubmit}
+          onFinish={c1.handleRechunkSubmit}
         >
           <Form.Item
             name="chunking_strategy"
@@ -1476,14 +1242,14 @@ export default function KnowledgePage() {
               <Button
                 type="primary"
                 htmlType="submit"
-                loading={rechunkSubmitting}
+                loading={c1.rechunkSubmitting}
               >
                 提交
               </Button>
               <Button
                 onClick={() => {
-                  setRechunkModalOpen(false);
-                  rechunkForm.resetFields();
+                  c1.setRechunkModalOpen(false);
+                  c1.rechunkForm.resetFields();
                 }}
               >
                 取消
