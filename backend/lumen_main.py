@@ -1,6 +1,8 @@
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -374,29 +376,45 @@ def _should_run_scheduler_for_worker() -> bool:
     return worker_rank == 0
 
 
-async def _shutdown_cleanup(
-    started_scheduler: bool,
-    celery_queue_monitor_task: "asyncio.Task | None" = None,
-    celery_queue_monitor_shutdown: "asyncio.Event | None" = None,
-    slo_budget_calculator_task: "asyncio.Task | None" = None,
-    slo_budget_calculator_shutdown: "asyncio.Event | None" = None,
-) -> None:
-    """Phase 1 Group A 1.1 (2026-09-03): lifespan finally 块的清理逻辑。
+@dataclass
+class LifespanState:
+    """lifespan 期间持有的资源句柄 — startup 创建,shutdown 关闭。
 
-    仅 `started_scheduler=True` 时调 scheduler.stop()(避免空 stop 抛错
-    — _scheduler singleton 已 start 才能 shutdown);最后必 engine.dispose()
-    防止 MySQL MDL 孤儿连接(2026-06-08 踩到,KILL 脚本恢复)。
+    集中 dataclass 替代之前散传的 ``*args``(Phase 1 Group A 1.1
+    早期 ``_shutdown_cleanup(started_scheduler, task1, event1, task2, event2)``
+    模式)。新增后台 task 时只需在 ``LifespanState`` 加一行 + ``_start_*``
+    创建 / ``_shutdown`` 关闭各加一段,``_lifespan`` 顶层不变。
 
-    Phase 1 Group B 2.4.5 (2026-09-04):celery_queue_monitor 通过 Event + task
-    传参优雅退出(set Event → 等 task 5s → 超时则 cancel),避免后台 task 在
-    Redis 连接 close 后还在 tick。
-
-    Phase 1 Group B B2b 4.6 (2026-09-04):slo_budget_calculator 同款 Event +
-    task 优雅退出模式。
-
-    抽成 helper 是为了单测 —— 整 lifespan 太重,直接调这个验 dispose 触发。
+    Why this dataclass exists(nitpick 2026-10-04 F3 / 系统性 4):
+    原 lifespan 一个 function 塞 startup + shutdown 全部逻辑,280 行没人
+    能一眼看清。新加后台 task 时容易漏写 finally 块清理 → task 在
+    Redis 连接 close 后还 tick → ConnectionError 噪音。集中到 dataclass
+    后,所有须关闭的资源都列在 LifespanState 字段,review 扫一眼就齐。
     """
-    if started_scheduler:
+    should_run_scheduler: bool
+    celery_queue_monitor_task: Optional["asyncio.Task"] = None
+    celery_queue_monitor_shutdown: Optional["asyncio.Event"] = None
+    slo_budget_calculator_task: Optional["asyncio.Task"] = None
+    slo_budget_calculator_shutdown: Optional["asyncio.Event"] = None
+
+
+async def _shutdown(state: LifespanState) -> None:
+    """lifespan shutdown 清理逻辑(从 ``_shutdown_cleanup`` 改名而来)。
+
+    原 ``_shutdown_cleanup(started_scheduler, *tasks, *events)`` 模式 2026-09
+    起被 ``tests/unit/test_health_endpoints.py:606,624`` 直调 —— 老单测
+    不能破,所以保留 ``_shutdown_cleanup`` 作为 shim delegate 到本函数,
+    新代码统一走 ``_shutdown(LifespanState(...))``。
+
+    顺序很关键(nitpick 2026-10-04 F3):
+      1. scheduler.stop(关 APScheduler 后台 cron job)
+      2. celery_queue_monitor Event + wait_for + cancel(优雅退出后台 task)
+      3. slo_budget_calculator Event + wait_for + cancel(同上)
+      4. OTel force_flush(span + metric + log 一次性推 collector)
+      5. CheckpointerService.close(关 LangGraph PG ConnectionPool)
+      6. engine.dispose(关 SQLAlchemy 连接池,防 taskkill 留 MySQL MDL 孤儿)
+    """
+    if state.should_run_scheduler:
         try:
             from lumen_services.workflow_scheduler import get_scheduler_service
             get_scheduler_service().stop()
@@ -408,12 +426,12 @@ async def _shutdown_cleanup(
     # Phase 1 Group B 2.4.5 (2026-09-04):celery_queue_monitor 优雅退出。
     # set Event 让 loop 退出 wait_for,最多等 5s,超时则 cancel —— 避免
     # 后台 task 在 Redis connection 已 close 后还在 tick 抛 ConnectionError。
-    if celery_queue_monitor_task is not None and celery_queue_monitor_shutdown is not None:
-        celery_queue_monitor_shutdown.set()
+    if state.celery_queue_monitor_task is not None and state.celery_queue_monitor_shutdown is not None:
+        state.celery_queue_monitor_shutdown.set()
         try:
-            await asyncio.wait_for(celery_queue_monitor_task, timeout=5.0)
+            await asyncio.wait_for(state.celery_queue_monitor_task, timeout=5.0)
         except asyncio.TimeoutError:
-            celery_queue_monitor_task.cancel()
+            state.celery_queue_monitor_task.cancel()
             import logging as _shutdown_logger
             _shutdown_logger.getLogger(__name__).warning(
                 "celery_queue_monitor didn't exit in 5s; cancelled"
@@ -425,12 +443,12 @@ async def _shutdown_cleanup(
             )
     # Phase 1 Group B B2b 4.6 (2026-09-04):slo_budget_calculator 优雅退出。
     # 同 celery_queue_monitor 套路 —— Event + wait_for 5s + cancel。
-    if slo_budget_calculator_task is not None and slo_budget_calculator_shutdown is not None:
-        slo_budget_calculator_shutdown.set()
+    if state.slo_budget_calculator_task is not None and state.slo_budget_calculator_shutdown is not None:
+        state.slo_budget_calculator_shutdown.set()
         try:
-            await asyncio.wait_for(slo_budget_calculator_task, timeout=5.0)
+            await asyncio.wait_for(state.slo_budget_calculator_task, timeout=5.0)
         except asyncio.TimeoutError:
-            slo_budget_calculator_task.cancel()
+            state.slo_budget_calculator_task.cancel()
             import logging as _shutdown_logger
             _shutdown_logger.getLogger(__name__).warning(
                 "slo_budget_calculator didn't exit in 5s; cancelled"
@@ -481,34 +499,122 @@ async def _shutdown_cleanup(
     engine.dispose()
 
 
-@asynccontextmanager
-async def _lifespan(app: FastAPI):
-    """Phase 1 Group A 1.1 (2026-09-03): lifespan 上下文替代 @app.on_event。
+async def _shutdown_cleanup(
+    started_scheduler: bool,
+    celery_queue_monitor_task: "asyncio.Task | None" = None,
+    celery_queue_monitor_shutdown: "asyncio.Event | None" = None,
+    slo_budget_calculator_task: "asyncio.Task | None" = None,
+    slo_budget_calculator_shutdown: "asyncio.Event | None" = None,
+) -> None:
+    """向后兼容 shim(被 ``tests/unit/test_health_endpoints.py:606,624`` 直调)。
 
-    为什么不用 @app.on_event("startup")/("shutdown"):
-    FastAPI 0.93+ 推荐 lifespan,语义更明确(上下文管理器 yield 前 = startup,
-    yield 后 = shutdown),而且 gunicorn UvicornWorker 在 fork 后子进程触发
-    lifespan startup —— 多 worker 模式下,所有 worker 都会跑一次 lifespan,
-    所以 WORKER_RANK 守门是 scheduler 启动的核心。
-
-    WORKER_RANK 守门逻辑:
-    - "true":强制启 scheduler(单 worker dev / 调试用)
-    - "false":强制不启
-    - "auto"(默认):WORKER_RANK=0 才启,gunicorn 0..N-1 编号
+    老单测 ``_shutdown_cleanup(started_scheduler=True/False)`` 不能破,本函数
+    把旧位置参数打包成 ``LifespanState`` 再 delegate 到 ``_shutdown(state)``。
+    新代码请直接 ``_shutdown(LifespanState(...))``。
     """
-    # Phase 0 Unit 5 4.1 (2026-09-02):结构化 JSON 日志。
-    # 必须在 ensure_* 迁移之前调,让迁移期间的 logger.error 也能 JSON 化。
-    # LOG_FORMAT=json (生产 / ELK)  或 dev (中文 string, dev 友好);
-    # 通过 LOG_LEVEL 控制全局级别。
-    from lumen_core.logging_config import setup_default_logging, setup_json_logging
-    fmt = settings.LOG_FORMAT.lower()
-    if fmt == "json":
-        setup_json_logging(level=settings.LOG_LEVEL)
-    elif fmt == "dev":
-        setup_default_logging(level=settings.LOG_LEVEL)
-    else:
-        # 未知值兜底走 json,避免 typo 静默走默认中文
-        setup_json_logging(level=settings.LOG_LEVEL)
+    state = LifespanState(
+        should_run_scheduler=started_scheduler,
+        celery_queue_monitor_task=celery_queue_monitor_task,
+        celery_queue_monitor_shutdown=celery_queue_monitor_shutdown,
+        slo_budget_calculator_task=slo_budget_calculator_task,
+        slo_budget_calculator_shutdown=slo_budget_calculator_shutdown,
+    )
+    await _shutdown(state)
+
+
+def _run_ensure_migrations() -> None:
+    """Run all ``ensure_*`` idempotent column / table migrations + dev seed.
+
+    Why this helper exists(nitpick 2026-10-04 F3):
+    原 ``_lifespan`` 内部 inline 60+ ``ensure_*()`` 调用,从 ``create_tables()``
+    到 ``seed_dev_external_app()``,整段 ~120 行。新加 M* 迁移时容易混进
+    中间,把顺序敏感的 FK chain(例如 M38.4 multimodal configs 表必须先建,
+    knowledge_bases.multimodal_config_id FK 才能解析)打断。集中到本函数后:
+      - 一眼看清全 60+ ensure 调用 + 顺序约束
+      - 新加 M* 迁移只在尾部追加(无需深入 _lifespan 找位置)
+      - review 时可独立 review "startup 都跑了什么"
+    """
+    from lumen_core.database import (
+        create_tables,
+        ensure_workflow_runs_trigger_source,
+        ensure_workflow_indexes,
+        ensure_document_chunks_embedding_status,
+        ensure_workflow_model_refs_migrated,
+        ensure_workflow_v2_migrated,
+        ensure_workflow_versions_table,
+        ensure_workflow_version_column,
+        bootstrap_workflow_versions,
+        ensure_documents_created_by,
+        ensure_documents_storage_columns,
+        ensure_workspaces_table,
+        ensure_document_folders_table,
+        ensure_knowledge_bases_workspace_column,
+        ensure_documents_folder_column,
+        ensure_multimodal_embedding_configs_table,
+        ensure_image_assets_table,
+        ensure_documents_multimodal_columns,
+        ensure_document_chunks_multimodal_columns,
+        ensure_knowledge_bases_multimodal_columns,
+        ensure_agent_team_runs_table,
+        ensure_conversations_last_run_id,
+        ensure_messages_run_id,
+        ensure_conversations_deleted_at,
+        ensure_conversations_team_id,
+        ensure_conversations_user_id_nullable,
+        ensure_conversations_external_fks,
+        ensure_external_apps_tables,
+        ensure_model_configs_purpose_flags,
+        ensure_embedding_model_config_migrated,
+        ensure_global_memories_conversation_id,
+        ensure_messages_time_index,
+        ensure_marketplace_type_column,
+        ensure_agent_kb_retrieval_config,
+        ensure_model_configs_image_flag,
+        ensure_model_configs_tts_subtitle_flags,
+        ensure_model_configs_video_flag,
+        ensure_settings_model_fk_columns,
+        ensure_generated_images_table,
+        ensure_generated_audios_table,
+        ensure_subtitles_table,
+        ensure_playbooks_table,
+        ensure_generated_videos_table,
+        ensure_stock_assets_table,
+        ensure_stock_musics_table,
+        ensure_llm_call_logs_table,
+        ensure_embedding_call_logs_table,
+        ensure_soft_delete_columns,
+        ensure_faq_entries_table,
+        ensure_wx_accounts_table,
+        ensure_wx_templates_table,
+        ensure_wx_drafts_table,
+        ensure_wx_draft_sections_table,
+        ensure_wx_materials_table,
+        ensure_wx_publish_records_table,
+        ensure_customers_table,
+        ensure_customer_follow_ups_table,
+        ensure_customer_field_definitions_table,
+        ensure_text2sql_data_sources_table,
+        ensure_text2sql_queries_table,
+        ensure_system_configs_table,
+        ensure_skills_tenant_id,
+        ensure_skill_type_column,
+        ensure_eval_datasets_table,
+        ensure_eval_runs_table,
+        ensure_workspace_member_permissions_table,
+        ensure_failed_tasks_table,
+        ensure_users_unique_dedup,
+        ensure_model_configs_unique_dedup,
+        ensure_mec_unique_dedup,
+        ensure_external_apps_unique_dedup,
+        ensure_wx_accounts_unique_dedup,
+        ensure_roles_unique_dedup,
+        ensure_skills_unique_dedup,
+        ensure_customer_field_definitions_unique_dedup,
+    )
+    from lumen_models.tenant import Tenant  # noqa: F401  # 触发 Tenant 类注册(Base.metadata FK 解析需要)
+    from lumen_core.notification_migration import ensure_notifications_table
+    from lumen_scripts.seed_external_app import seed_dev_external_app
+
     create_tables()
     # Idempotent column migrations for tables that predate their current
     # schema. `Base.metadata.create_all` only creates missing tables, not
@@ -632,104 +738,147 @@ async def _lifespan(app: FastAPI):
     # Seed a demo ExternalApp for local dev (idempotent). Runs after
     # ensure_external_apps_tables() so the parent table is guaranteed
     # to exist, and before scheduler reload so the DB is fresh.
-    from lumen_scripts.seed_external_app import seed_dev_external_app
     seed_dev_external_app()
 
-    # Phase 1 Group A 1.1 (2026-09-03): scheduler 单 worker 守门。
-    # gunicorn 多 worker 模式下,每个 worker 都会跑 lifespan startup。
-    # scheduler 是单例 + 内存 job store —— 跑在 N 个 worker 会重复触发 +
-    # race 写 DB。仅 WORKER_RANK=0 才启(其他 worker 跳过)。
-    _should_run_scheduler = _should_run_scheduler_for_worker()
-    if _should_run_scheduler:
-        from lumen_services.workflow_scheduler import get_scheduler_service
-        from lumen_core.database import SessionLocal
-        scheduler_service = get_scheduler_service()
-        scheduler_service.start()
-        # Repopulate in-memory job store from the database. The in-memory
-        # APScheduler store is wiped on every process restart, so without
-        # this hook every active schedule would silently stop firing.
-        db = SessionLocal()
-        try:
-            scheduler_service.reload_schedules(db)
-        finally:
-            db.close()
-        # M27: register retention cron jobs on the SAME scheduler
-        # (singleton from workflow_scheduler.get_scheduler()). Runs daily
-        # at 02:17 (hard) and 02:27 (soft) per the M27 spec.
-        from lumen_services.retention_scheduler import register_retention_jobs
-        register_retention_jobs()
-        # 2.1 C.1: register chat retention cron job on the SAME scheduler.
-        # 30d 窗口 hard-delete soft-deleted conversations,audit_logs /
-        # llm_call_logs / embedding_call_logs 的 conversation_id 引用同时
-        # NULL out。每 02:37 跑(避开 02:17 retention hard + 02:27 retention soft)。
-        from lumen_services.chat_retention_scheduler import register_chat_retention_jobs
-        register_chat_retention_jobs()
-        import logging as _lifespan_logger
-        _lifespan_logger.getLogger(__name__).info(
-            "scheduler started (WORKER_RANK=%s RUN_SCHEDULER=%s)",
-            os.getenv("WORKER_RANK", "0"), os.getenv("RUN_SCHEDULER", "auto"),
-        )
-    else:
+
+def _start_background_services(state: LifespanState) -> None:
+    """启动 scheduler / celery_queue_monitor / slo_budget_calculator。
+
+    全部走 ``state.should_run_scheduler`` 守门 — gunicorn 多 worker 模式下
+    只有 rank=0 启,避免多 worker 重复触发 + race 写 DB / Gauge。
+
+    LangGraph checkpointer **不**在这里 —— 它在 ``_lifespan`` 单独走,
+    因为 setup 失败要能 flip ``_startup_complete = False`` 让 K8s 不接流量,
+    跟其他 background task 的失败容忍度不同。
+
+    Why this helper exists(nitpick 2026-10-04 F3):
+    原 ``_lifespan`` 中间塞了 scheduler / monitor / SLO 三段启动 + 错误
+    catch + log。新加后台 task 时容易漏写 try/except 让单一 task 失败搞挂
+    整个 startup。集中到本函数后每个 task 独立 try/except,失败只 warn,
+    不影响 ``_startup_complete = True``。
+    """
+    if not state.should_run_scheduler:
         import logging as _lifespan_logger
         _lifespan_logger.getLogger(__name__).info(
             "scheduler SKIPPED (WORKER_RANK=%s RUN_SCHEDULER=%s)",
             os.getenv("WORKER_RANK", "0"), os.getenv("RUN_SCHEDULER", "auto"),
         )
+        return
+
+    import logging as _lifespan_logger
+    # Phase 1 Group A 1.1 (2026-09-03): scheduler 单 worker 守门。
+    # gunicorn 多 worker 模式下,每个 worker 都会跑 lifespan startup。
+    # scheduler 是单例 + 内存 job store —— 跑在 N 个 worker 会重复触发 +
+    # race 写 DB。仅 WORKER_RANK=0 才启(其他 worker 跳过)。
+    from lumen_services.workflow_scheduler import get_scheduler_service
+    from lumen_core.database import SessionLocal
+    scheduler_service = get_scheduler_service()
+    scheduler_service.start()
+    # Repopulate in-memory job store from the database. The in-memory
+    # APScheduler store is wiped on every process restart, so without
+    # this hook every active schedule would silently stop firing.
+    db = SessionLocal()
+    try:
+        scheduler_service.reload_schedules(db)
+    finally:
+        db.close()
+    # M27: register retention cron jobs on the SAME scheduler
+    # (singleton from workflow_scheduler.get_scheduler()). Runs daily
+    # at 02:17 (hard) and 02:27 (soft) per the M27 spec.
+    from lumen_services.retention_scheduler import register_retention_jobs
+    register_retention_jobs()
+    # 2.1 C.1: register chat retention cron job on the SAME scheduler.
+    # 30d 窗口 hard-delete soft-deleted conversations,audit_logs /
+    # llm_call_logs / embedding_call_logs 的 conversation_id 引用同时
+    # NULL out。每 02:37 跑(避开 02:17 retention hard + 02:27 retention soft)。
+    from lumen_services.chat_retention_scheduler import register_chat_retention_jobs
+    register_chat_retention_jobs()
+    _lifespan_logger.getLogger(__name__).info(
+        "scheduler started (WORKER_RANK=%s RUN_SCHEDULER=%s)",
+        os.getenv("WORKER_RANK", "0"), os.getenv("RUN_SCHEDULER", "auto"),
+    )
 
     # Phase 1 Group B 2.4.5 (2026-09-04):启 Celery 队列深度后台监控。
     # 每 30s 一次 ``redis llen <queue>`` 更新 ``lumen_celery_queue_depth`` Gauge,
     # Grafana Overview 看板 + B2c Alertmanager 告警共用。
-    # 注:**仅** WORKER_RANK=0 跑 —— gunicorn 多 worker 下每个 worker 都启会
-    # 浪费 N 倍 Redis 连接;同时只有 1 个 worker 写 gauge 也避免冲突。
-    celery_queue_monitor_task: "asyncio.Task | None" = None
-    celery_queue_monitor_shutdown: "asyncio.Event | None" = None
-    if _should_run_scheduler:  # 同 scheduler 守门规则
-        try:
-            from lumen_core.celery_queue_monitor import celery_queue_monitor_loop
-            redis_url = (
-                f"redis://{os.getenv('REDIS_HOST', 'localhost')}"
-                f":{os.getenv('REDIS_PORT', '26380')}"
-                f"/{os.getenv('REDIS_DB', '0')}"
-            )
-            celery_queue_monitor_shutdown = asyncio.Event()
-            celery_queue_monitor_task = asyncio.create_task(
-                celery_queue_monitor_loop(redis_url, celery_queue_monitor_shutdown),
-                name="lumen.celery_queue_monitor",
-            )
-            import logging as _lifespan_logger
-            _lifespan_logger.getLogger(__name__).info(
-                "celery_queue_monitor started (redis=%s)", redis_url,
-            )
-        except Exception as e:  # noqa: BLE001
-            import logging as _lifespan_logger
-            _lifespan_logger.getLogger(__name__).warning(
-                "celery_queue_monitor start failed (%s); metrics will stay at default 0", e,
-            )
+    try:
+        from lumen_core.celery_queue_monitor import celery_queue_monitor_loop
+        redis_url = (
+            f"redis://{os.getenv('REDIS_HOST', 'localhost')}"
+            f":{os.getenv('REDIS_PORT', '26380')}"
+            f"/{os.getenv('REDIS_DB', '0')}"
+        )
+        state.celery_queue_monitor_shutdown = asyncio.Event()
+        state.celery_queue_monitor_task = asyncio.create_task(
+            celery_queue_monitor_loop(redis_url, state.celery_queue_monitor_shutdown),
+            name="lumen.celery_queue_monitor",
+        )
+        _lifespan_logger.getLogger(__name__).info(
+            "celery_queue_monitor started (redis=%s)", redis_url,
+        )
+    except Exception as e:  # noqa: BLE001
+        _lifespan_logger.getLogger(__name__).warning(
+            "celery_queue_monitor start failed (%s); metrics will stay at default 0", e,
+        )
 
     # Phase 1 Group B B2b 4.6 (2026-09-04):启 SLO 错误预算后台计算器。
     # 每 30s 读本地 prometheus_client REGISTRY + slo_definitions.yaml,
     # 算 6 个 SLO 的 budget remaining + burn rate → 写 lumen_slo_* Gauge。
     # Grafana SLO 看板 status bar 直接读这两个 Gauge。
-    # 注:同样仅 WORKER_RANK=0 跑 —— 避免多 worker 重复算同一个 SLO 写 Gauge 冲突。
-    slo_budget_calculator_task: "asyncio.Task | None" = None
-    slo_budget_calculator_shutdown: "asyncio.Event | None" = None
-    if _should_run_scheduler:
-        try:
-            from lumen_core.slo_budget_calculator import slo_budget_calculator_loop
-            slo_budget_calculator_shutdown = asyncio.Event()
-            slo_budget_calculator_task = asyncio.create_task(
-                slo_budget_calculator_loop(slo_budget_calculator_shutdown),
-                name="lumen.slo_budget_calculator",
-            )
-            import logging as _lifespan_logger
-            _lifespan_logger.getLogger(__name__).info(
-                "slo_budget_calculator started",
-            )
-        except Exception as e:  # noqa: BLE001
-            import logging as _lifespan_logger
-            _lifespan_logger.getLogger(__name__).warning(
-                "slo_budget_calculator start failed (%s); SLO gauges will stay at default", e,
-            )
+    try:
+        from lumen_core.slo_budget_calculator import slo_budget_calculator_loop
+        state.slo_budget_calculator_shutdown = asyncio.Event()
+        state.slo_budget_calculator_task = asyncio.create_task(
+            slo_budget_calculator_loop(state.slo_budget_calculator_shutdown),
+            name="lumen.slo_budget_calculator",
+        )
+        _lifespan_logger.getLogger(__name__).info("slo_budget_calculator started")
+    except Exception as e:  # noqa: BLE001
+        _lifespan_logger.getLogger(__name__).warning(
+            "slo_budget_calculator start failed (%s); SLO gauges will stay at default", e,
+        )
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Phase 1 Group A 1.1 (2026-09-03): lifespan 上下文替代 @app.on_event。
+
+    为什么不用 @app.on_event("startup")/("shutdown"):
+    FastAPI 0.93+ 推荐 lifespan,语义更明确(上下文管理器 yield 前 = startup,
+    yield 后 = shutdown),而且 gunicorn UvicornWorker 在 fork 后子进程触发
+    lifespan startup —— 多 worker 模式下,所有 worker 都会跑一次 lifespan,
+    所以 WORKER_RANK 守门是 scheduler 启动的核心。
+
+    WORKER_RANK 守门逻辑:
+    - "true":强制启 scheduler(单 worker dev / 调试用)
+    - "false":强制不启
+    - "auto"(默认):WORKER_RANK=0 才启,gunicorn 0..N-1 编号
+    """
+    # === startup ===
+    # Phase 0 Unit 5 4.1 (2026-09-02):结构化 JSON 日志。
+    # 必须在 ensure_* 迁移之前调,让迁移期间的 logger.error 也能 JSON 化。
+    # LOG_FORMAT=json (生产 / ELK)  或 dev (中文 string, dev 友好);
+    # 通过 LOG_LEVEL 控制全局级别。
+    from lumen_core.logging_config import setup_default_logging, setup_json_logging
+    fmt = settings.LOG_FORMAT.lower()
+    if fmt == "json":
+        setup_json_logging(level=settings.LOG_LEVEL)
+    elif fmt == "dev":
+        setup_default_logging(level=settings.LOG_LEVEL)
+    else:
+        # 未知值兜底走 json,避免 typo 静默走默认中文
+        setup_json_logging(level=settings.LOG_LEVEL)
+
+    # 1. 60+ ensure_* 迁移 + dev seed —— 集中到 _run_ensure_migrations()。
+    # 顺序约束(M38.4 multimodal configs 表先建 / M39 agent_team_runs 表
+    # 先建 / M32 wx_* 6 张表等)集中在本函数内维护,review 一眼看完。
+    _run_ensure_migrations()
+
+    # 2. 后台 scheduler / celery_queue_monitor / slo_budget_calculator。
+    # state 持有所有须 graceful shutdown 的后台 task 句柄(LifespanState),
+    # _lifespan 不需要感知 —— _shutdown(state) 一次性全关。
+    state = LifespanState(should_run_scheduler=_should_run_scheduler_for_worker())
+    _start_background_services(state)
 
     # M39 T1.4 (2026-09-29):LangGraph Checkpointer lifespan 集成。
     # 放 startup 末尾 —— 让 scheduler / monitor 任务先启(它们不依赖
@@ -749,15 +898,12 @@ async def _lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # shutdown: 与原 @app.on_event("shutdown") 行为一致 —— 抽到
-        # _shutdown_cleanup helper,单测可直调(整 lifespan 太重)。
-        await _shutdown_cleanup(
-            started_scheduler=_should_run_scheduler,
-            celery_queue_monitor_task=celery_queue_monitor_task,
-            celery_queue_monitor_shutdown=celery_queue_monitor_shutdown,
-            slo_budget_calculator_task=slo_budget_calculator_task,
-            slo_budget_calculator_shutdown=slo_budget_calculator_shutdown,
-        )
+        # === shutdown ===
+        # _shutdown(state) 集中处理 scheduler.stop / monitor + SLO Event wait /
+        # OTel force_flush / Checkpointer close / engine.dispose,顺序见
+        # _shutdown docstring。state 在 startup 创建时持有 task 句柄,
+        # 这里只需要一次性 delegate。
+        await _shutdown(state)
 
 
 # 注入 lifespan —— 必须在 app 创建后、所有中间件注册前设置(虽然技术上中间件
