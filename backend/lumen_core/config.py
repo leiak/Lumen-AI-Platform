@@ -93,7 +93,12 @@ class Settings(BaseSettings):
 
     # JWT
     SECRET_KEY: str = "your-secret-key-change-in-production"
-    ALGORITHM: str = "HS256"
+    # ALGORITHM 在 M39 nitpick 2026-10-04 C4 修复中删掉:decode 处
+    # 改成硬编码 ``algorithms=["HS256"]``,防止运维误把 ``ALGORITHM`` 配成
+    # ``none`` / 弱算法 → token 可被伪造 (alg confusion attack)。Encode
+    # 一并硬编码以保持对称。历史 dev 用户如果 .env 里有 ALGORITHM=xxx 仍
+    # 可被 pydantic 容忍读取,但本字段已不再 consult;保留 doc 注释:
+    #   ALGORITHM = "HS256"  # historical — see lumen_core/security.py
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
     # External (widget) JWT — independent secret so a leaked user-JWT
@@ -253,6 +258,12 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        # M39 nitpick 2026-10-04 C4 follow-up: 删除 ``ALGORITHM`` 字段后,
+        # 如果 .env 里残留 ``ALGORITHM=xxx``,pydantic v2 默认 forbid 会
+        # 拒绝启动。改 ``ignore`` 容忍这种 dev 残留 — secret 字段仍走
+        # model_validator 守门,死字段的存在与否不影响安全。生产 .env 应
+        # 清理掉死字段,但 dev 期不要求。
+        extra = "ignore"
 
     @model_validator(mode="after")
     def _check_secret_hygiene(self) -> "Settings":

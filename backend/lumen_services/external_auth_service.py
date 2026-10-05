@@ -87,7 +87,8 @@ def create_external_token(payload: dict, *, ttl_seconds: Optional[int] = None) -
     body = dict(payload)
     body["iss"] = "external-app"
     body["exp"] = int(time.time()) + (ttl_seconds if ttl_seconds is not None else settings.EXTERNAL_TOKEN_TTL_SECONDS)
-    return jwt.encode(body, settings.EXTERNAL_JWT_SECRET, algorithm=settings.ALGORITHM)
+    # M39 nitpick 2026-10-04 C4: 硬编码 HS256,跟 lumen_core.security 对齐。
+    return jwt.encode(body, settings.EXTERNAL_JWT_SECRET, algorithm="HS256")
 
 
 def decode_external_token(token: str) -> Optional[dict]:
@@ -96,10 +97,13 @@ def decode_external_token(token: str) -> Optional[dict]:
     Returns ``None`` for: bad signature, expired token, malformed token.
     The caller should treat ``None`` as "unauthorized" — never trust the
     payload without checking this return value first.
+
+    M39 nitpick 2026-10-04 C4: ``algorithms`` 硬编码 ``["HS256"]``,防止
+    ``settings.ALGORITHM`` 被误配成 ``none`` / 弱算法。
     """
     try:
         return jwt.decode(
-            token, settings.EXTERNAL_JWT_SECRET, algorithms=[settings.ALGORITHM]
+            token, settings.EXTERNAL_JWT_SECRET, algorithms=["HS256"]
         )
     except JWTError:
         return None
