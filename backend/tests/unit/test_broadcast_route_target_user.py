@@ -1,7 +1,43 @@
-"""/broadcast route honors target_user_id when X-Internal-Broadcast is correct"""
+"""/broadcast route honors target_user_id when X-Internal-Broadcast is correct
+
+After M39 nitpick 2026-10-04 C3 the route is admin-only (``Depends
+(require_admin)``). An autouse fixture overrides ``require_admin`` /
+``get_current_user`` to a synthetic superuser so these unit tests
+focus on the secret / ``target_user_id`` semantics, not the auth
+guard. The auth guard behaviour itself is covered by
+``test_electron_ws_auth.py``.
+"""
 import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 from fastapi.testclient import TestClient
+
+
+@pytest.fixture(autouse=True)
+def _admin_override():
+    """Replace ``require_admin`` / ``get_current_user`` with a mock superuser.
+
+    These route tests target the secret + ``target_user_id`` semantics
+    added in M27; the admin guard added in M39 lives in
+    ``test_electron_ws_auth.py``. We don't want every assertion below
+    to repeat the auth path — the synthetic superuser keeps the focus
+    on the secret / target_user_id logic.
+    """
+    from lumen_main import app
+    from lumen_api.v1.auth import require_admin, get_current_user
+
+    admin_user = MagicMock()
+    admin_user.id = 1
+    admin_user.username = "test_admin"
+    admin_user.is_superuser = True
+    admin_user.is_active = True
+    admin_user.tenant_id = 1
+    app.dependency_overrides[require_admin] = lambda: admin_user
+    app.dependency_overrides[get_current_user] = lambda: admin_user
+    try:
+        yield
+    finally:
+        app.dependency_overrides.pop(require_admin, None)
+        app.dependency_overrides.pop(get_current_user, None)
 
 
 @pytest.fixture

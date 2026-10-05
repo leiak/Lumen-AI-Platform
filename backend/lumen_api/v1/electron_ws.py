@@ -1,7 +1,18 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, Request, Header, HTTPException
+from fastapi import (
+    APIRouter,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from typing import List, Optional
 from lumen_services.electron_service import electron_service, ElectronConnection
 from lumen_core.config import settings
+from lumen_api.v1.auth import get_current_user, require_admin
+from lumen_models.user import User
 
 router = APIRouter(tags=["electron"])
 
@@ -68,11 +79,17 @@ async def electron_websocket(
 
 
 @router.get("/electron/status")
-async def get_electron_status():
+async def get_electron_status(
+    admin: User = Depends(require_admin),
+):
     """
-    获取 Electron 服务状态
+    获取 Electron 服务状态(admin only)
 
     Returns information about the service and active connections.
+    admin-only because the response can leak the count and rough
+    shape of internal Electron clients — useful recon for an attacker
+    who has reached this endpoint on the internal network.
+    ``nitpick 2026-10-04 C3``.
     """
     status = await electron_service.handle_message({
         "action": "status"
@@ -81,8 +98,17 @@ async def get_electron_status():
 
 
 @router.get("/electron/connections")
-async def list_connections():
-    """列出所有活动的 Electron 连接"""
+async def list_connections(
+    admin: User = Depends(require_admin),
+):
+    """列出所有活动的 Electron 连接(admin only)。
+
+    Each connection entry exposes the owning ``user_id`` /
+    ``tenant_id``, so this endpoint MUST be admin-only. The previous
+    version was completely unauthenticated (nitpick 2026-10-04 C3) —
+    any user on the internal network could enumerate all live
+    Electron clients and their tenant ids.
+    """
     connections = electron_service.get_active_connections()
     return {
         "connections": [conn.to_dict() for conn in connections],
@@ -94,20 +120,27 @@ async def list_connections():
 async def broadcast_message(
     request: Request,
     x_internal_broadcast: str = Header(default=""),
+    admin: User = Depends(require_admin),
 ):
-    """向所有活跃 WebSocket 客户端广播消息。
+    """向所有活跃 WebSocket 客户端广播消息 (admin-only,可选 secret)。
 
     Accepts the canonical envelope:
         {"type": "broadcast", "event": <event>, "payload": <payload>,
          "target_user_id": <int|None>}
 
-    The optional ``target_user_id`` scopes the broadcast to one user (across
-    all their browser tabs). It is ONLY honored when the caller presents
-    a matching ``X-Internal-Broadcast: <BROADCAST_INTERNAL_SECRET>`` header.
-    Without the secret (or with the wrong value), ``target_user_id`` is
-    dropped and the broadcast fans out to every connected client — the
-    existing Electron-compatible behavior. This prevents untrusted Electron
-    clients from spoofing "send only to user X".
+    Authentication:
+
+    - ``require_admin`` — admin-only (nitpick 2026-10-04 C3 / C6).
+      Anonymous or regular users get 401 / 403.
+
+    The optional ``target_user_id`` scopes the broadcast to one user
+    (across all their browser tabs). It is ONLY honored when the
+    caller presents a matching ``X-Internal-Broadcast:
+    <BROADCAST_INTERNAL_SECRET>`` header. Without the secret (or with
+    the wrong value), ``target_user_id`` is dropped and the broadcast
+    fans out to every connected client — the existing Electron-
+    compatible behavior. This prevents admin users from being tricked
+    by an upstream caller into scoping to a user they did not intend.
 
     For backward compatibility, if the caller posts a flat dict (no
     "payload" key), all non-`type` keys are promoted into the payload
@@ -126,8 +159,10 @@ async def broadcast_message(
     if target_user_id is not None:
         secret = settings.BROADCAST_INTERNAL_SECRET
         if not secret or x_internal_broadcast != secret:
-            # Untrusted caller tried to scope the broadcast; fall back to
-            # fan-out-to-all so the existing Electron path keeps working.
+            # Admin caller did not present the secret; drop the scope
+            # and fan out to all (legacy Electron-compatible behavior).
+            # The admin guard is what actually kept this endpoint from
+            # being wide-open in the first place.
             target_user_id = None
 
     event = body.get("event")
@@ -145,8 +180,17 @@ async def broadcast_message(
 
 
 @router.get("/electron/health")
-async def electron_health():
-    """Electron 服务健康检查"""
+async def electron_health(
+    current_user: User = Depends(get_current_user),
+):
+    """Electron 服务健康检查(认证用户可访问)。
+
+    Kept open to authenticated (non-admin) users because the
+    frontend dashboard polls this to render the Electron panel
+    status indicator. If you want to lock it down further, change
+    to ``require_admin`` — but K8s readiness probes should hit a
+    separate public endpoint (``/live`` / ``/ready``) instead.
+    """
     try:
         health = await electron_service.handle_message({"action": "health"})
         return {
