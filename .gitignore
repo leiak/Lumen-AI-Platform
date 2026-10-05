@@ -130,7 +130,12 @@ docs-internal/
 # 这些都 dev-only,需用 scripts/dump_schema_ddl.py 或 scripts/dump_dev_db.py 重新生成。
 # /*.sql 通配兜底掉所有 root 临时 SQL dump(lumen_schema_*.sql / ai_platform.sql 等)
 /*.sql
+# OpenAPI spec dump — dev 用 `python -c "from lumen_main import app;
+# import json; json.dump(app.openapi(), open('backend/openapi.json', 'w'))"`
+# 调试生成 (538KB)。两份路径都 gitignore:M40 nitpick 2026-10-04 F10
+# 修了一个误 tracked 的 backend/openapi.json (538KB)。
 /openapi.json
+/backend/openapi.json
 /Modelfile.fix
 
 # Root imgs/ — 整个目录是 dev 调试产物(产品截图 / Snipaste / 测试 docx)不上 release
@@ -186,3 +191,13 @@ backend/chunks_1089.json
 # diag_eval_*.py / diag_schema.py / diag_teams.py / verify_cleanup.py 全是 ad-hoc 跑过即弃。
 # 需要时可重新写,不入 git。
 backend/scripts/diag/
+
+# 2026-09-14 e2e 修复链端到端验证产物 — 一次性 dev 调试截图(7 PNG +
+# 1 celery 日志),review 后不再使用。M40 nitpick 2026-10-04 系统性 5
+# repo hygiene 列入 ignore。
+backend/scripts/imgs/
+
+# BM25 pickle index — 后台运行时落盘,不入 git。已有
+# backend/data/faiss/*.index / *.meta,这条补 *.pkl(M40 nitpick 指出的
+# 漏规则)。
+backend/data/faiss/*.pkl

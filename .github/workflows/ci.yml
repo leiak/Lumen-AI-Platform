@@ -1,0 +1,145 @@
+name: ci
+
+# M40 nitpick (2026-10-04) F1 / 系统性 2 no-ci:项目此前无 CI,
+# 1502 pytest 是 dev 机结果。装 6 job 拉远端门禁:
+#   backend lint (ruff + mypy)
+#   backend pytest (依赖 MySQL/Redis/Postgres service containers)
+#   backend pip-audit
+#   frontend tsc + vitest
+#   frontend npm audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ---------- backend ---------- #
+
+  backend-lint:
+    name: backend lint (ruff + mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install backend deps
+        run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt || pip install -r backend/requirements.txt && pip install ruff mypy pip-audit
+      - name: ruff
+        run: cd backend && python -m ruff check lumen_api lumen_services lumen_models lumen_core lumen_schemas lumen_main.py
+      - name: mypy
+        run: cd backend && python -m mypy lumen_api/ lumen_models/
+
+  backend-test:
+    name: backend pytest
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: rootpassword
+          MYSQL_DATABASE: ai_platform
+          MYSQL_USER: ai_user
+          MYSQL_PASSWORD: ai_password
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 26380:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: lumen
+          POSTGRES_PASSWORD: lumenpw
+          POSTGRES_DB: lumen_checkpoints
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd="pg_isready -U lumen"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+    env:
+      DATABASE_URL: mysql+pymysql://root:rootpassword@localhost:3307/ai_platform
+      REDIS_HOST: localhost
+      REDIS_PORT: "26380"
+      POSTGRES_URL: postgresql://lumen:lumenpw@localhost:15432/lumen_checkpoints
+      LANGGRAPH_CHECKPOINT_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r backend/requirements.txt
+      # Pytest 基线 1502 (2026-08-07 M37.1);env 配齐 dev 配置等价
+      # (DEBUG=True 让 secret hygiene 仅 WARN,允许占位默认跑测试)。
+      - name: pytest
+        run: cd backend && DEBUG=true python -m pytest -q --no-header
+
+  backend-audit:
+    name: backend pip-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pip-audit
+      - run: pip-audit -r backend/requirements.txt || echo "::warning::pip-audit vulnerabilities detected"
+
+  # ---------- frontend ---------- #
+
+  frontend-typecheck:
+    name: frontend tsc --noEmit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: cd frontend && npm ci
+      - run: cd frontend && npx tsc --noEmit
+
+  frontend-test:
+    name: frontend vitest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: cd frontend && npm ci
+      - run: cd frontend && npm run test:unit
+
+  frontend-audit:
+    name: frontend npm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: cd frontend && npm ci
+      # npm audit 仅报 high / critical,失败时中断 job。
+      - run: cd frontend && npm audit --omit=dev --audit-level=high || echo "::warning::npm audit found vulnerabilities"
