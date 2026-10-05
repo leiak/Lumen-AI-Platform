@@ -10,7 +10,9 @@ from lumen_api.v1.auth import get_current_user, require_admin
 from lumen_models.user import User
 from lumen_models.model_config import ModelConfig
 from lumen_schemas.model_config import (
-    ModelConfigCreate, ModelConfigUpdate, ModelConfigResponse
+    ModelConfigCreate, ModelConfigUpdate, ModelConfigResponse,
+    OllamaImportResponse, OllamaModelInfo,
+    BulkCreateModelsResponse, BulkCreateRowResult,
 )
 from lumen_schemas.common import SingleResponse, PaginatedResponse
 
@@ -226,7 +228,7 @@ class _ImportFromOllamaBody(BaseModel):
     base_url: Optional[str] = None
 
 
-@router.post("/import-from-ollama", response_model=SingleResponse[dict])
+@router.post("/import-from-ollama", response_model=SingleResponse[OllamaImportResponse])
 async def import_from_ollama(
     body: _ImportFromOllamaBody,
     current_user: User = Depends(get_current_user),
@@ -238,7 +240,6 @@ async def import_from_ollama(
     The frontend uses the result to pre-fill the bulk-create modal.
     """
     base_url = (body.base_url or settings.OLLAMA_API_BASE).rstrip("/")
-    out: dict = {"base_url": base_url, "reachable": False, "models": []}
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -246,11 +247,18 @@ async def import_from_ollama(
             tags_resp.raise_for_status()
             tags_data = tags_resp.json()
     except Exception as e:
-        out["error_message"] = f"{type(e).__name__}: {e}"
-        return SingleResponse(data=out)
+        # M40.1: unreachable 路径也走强类型 schema,error_message 字段
+        # 直接挂到 OllamaImportResponse 上,前端 OpenAPI codegen 可见。
+        return SingleResponse(
+            data=OllamaImportResponse(
+                base_url=base_url,
+                reachable=False,
+                models=[],
+                error_message=f"{type(e).__name__}: {e}",
+            )
+        )
 
-    out["reachable"] = True
-    models_out = []
+    models_out: list = []
     for m in tags_data.get("models", []):
         name = m.get("name", "")
         # Try to fetch capabilities — failure is non-fatal.
@@ -278,22 +286,27 @@ async def import_from_ollama(
             )
             .first()
         )
-        models_out.append({
-            "name": name,
-            "size": m.get("size"),
-            "modified_at": m.get("modified_at"),
-            "family": family,
-            "capabilities": capabilities,
-            "is_embedding_capable": "embedding" in capabilities,
-            "is_chat_capable": "completion" in capabilities or "chat" in capabilities,
-            "exists_in_db": existing is not None,
-            "existing_config_id": existing.id if existing else None,
-        })
-    out["models"] = models_out
-    return SingleResponse(data=out)
+        models_out.append(OllamaModelInfo(
+            name=name,
+            size=m.get("size"),
+            modified_at=m.get("modified_at"),
+            family=family,
+            capabilities=capabilities,
+            is_embedding_capable="embedding" in capabilities,
+            is_chat_capable="completion" in capabilities or "chat" in capabilities,
+            exists_in_db=existing is not None,
+            existing_config_id=existing.id if existing else None,
+        ))
+    return SingleResponse(
+        data=OllamaImportResponse(
+            base_url=base_url,
+            reachable=True,
+            models=models_out,
+        )
+    )
 
 
-@router.post("/bulk-create", response_model=SingleResponse[dict])
+@router.post("/bulk-create", response_model=SingleResponse[BulkCreateModelsResponse])
 async def bulk_create_models(
     rows: List[ModelConfigCreate],
     current_user: User = Depends(require_admin),
@@ -328,12 +341,14 @@ async def bulk_create_models(
                 .first()
             )
             if existing is not None:
-                results.append({
-                    "requested_model_name": row.model_name,
-                    "status": "skipped",
-                    "reason": "duplicate",
-                    "existing_config_id": existing.id,
-                })
+                # M40.1: 强类型 BulkCreateRowResult 替代裸 dict,前端 OpenAPI
+                # codegen 可见 reason="duplicate" / existing_config_id。
+                results.append(BulkCreateRowResult(
+                    requested_model_name=row.model_name,
+                    status="skipped",
+                    reason="duplicate",
+                    existing_config_id=existing.id,
+                ))
                 continue
 
             new_cfg = ModelConfig(
@@ -352,17 +367,17 @@ async def bulk_create_models(
                 ).model_dump(mode="json")
             except Exception:
                 config_payload = {"id": new_cfg.id}
-            results.append({
-                "requested_model_name": row.model_name,
-                "status": "created",
-                "config": config_payload,
-            })
+            results.append(BulkCreateRowResult(
+                requested_model_name=row.model_name,
+                status="created",
+                config=config_payload,
+            ))
         except Exception as e:
-            results.append({
-                "requested_model_name": row.model_name,
-                "status": "error",
-                "error": f"{type(e).__name__}: {e}",
-            })
+            results.append(BulkCreateRowResult(
+                requested_model_name=row.model_name,
+                status="error",
+                error=f"{type(e).__name__}: {e}",
+            ))
 
     db.commit()
-    return SingleResponse(data={"results": results})
+    return SingleResponse(data=BulkCreateModelsResponse(results=results))

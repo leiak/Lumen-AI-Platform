@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -104,6 +106,24 @@ class AgentUpdateModel(BaseModel):
         if self.model_config_id is None and not self.model_name:
             raise ValueError("model_config_id 或 model_name 至少传一个")
         return self
+
+
+class AgentModelUpdateResponse(BaseModel):
+    """Response for ``PUT /api/v1/agents/{id}/model``(替代 SingleResponse[dict] leak)。
+
+    nitpick 2026-10-04 F8 / 系统性 6:原 endpoint ``response_model=SingleResponse[dict]``
+    让 OpenAPI 看不到返回 shape,前端只能手填类型 + 后端删 dict 字段不报错。
+    锁定到 Pydantic schema 后:
+      - /docs 直接展示 5 个字段(agent / old_model_name / new_model_name /
+        changed / reason)
+      - 前端 codegen(openapi-typescript)自动拿类型
+      - 后端删字段立刻 500 regression,不再 silent drift
+    """
+    agent: AgentResponse
+    old_model_name: str
+    new_model_name: str
+    changed: bool
+    reason: Optional[str] = None
 
 
 class AgentResponse(AgentBase):

@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from pydantic import BaseModel, Field, ConfigDict, field_validator
-from typing import Optional, Any
+from typing import Optional, Any, Dict, List
 from datetime import datetime
 
 
@@ -94,3 +96,55 @@ class ModelConfigResponse(ModelConfigBase):
     tenant_id: Optional[int]
     created_at: datetime
     updated_at: datetime
+
+
+# --- M40.1 quick wins: 2 个 SingleResponse[dict] leak 补 schema ---
+
+class OllamaModelInfo(BaseModel):
+    """M13: POST /models/import-from-ollama 单条 model entry。
+
+    字段对齐 ``lumen_api/v1/models.py`` ``import_from_ollama`` 返回的
+    ``models_out`` 字典。``size`` / ``modified_at`` / ``family`` 三个字段
+    可能为 None(Ollama 老版本 /api/tags / /api/show 不返回),前端可空。
+    """
+    name: str
+    size: Optional[int] = None
+    modified_at: Optional[str] = None
+    family: Optional[str] = None
+    capabilities: List[str] = Field(default_factory=list)
+    is_embedding_capable: bool = False
+    is_chat_capable: bool = False
+    exists_in_db: bool = False
+    existing_config_id: Optional[int] = None
+
+
+class OllamaImportResponse(BaseModel):
+    """M40.1: POST /models/import-from-ollama 强类型响应(替代 SingleResponse[dict])。
+
+    reachable=False 时 ``models`` 是空 list,``error_message`` 描述失败原因;
+    reachable=True 时 ``models`` 是每条 ollama tag 的 enriched info。
+    """
+    base_url: str
+    reachable: bool
+    models: List[OllamaModelInfo] = Field(default_factory=list)
+    error_message: Optional[str] = None
+
+
+class BulkCreateRowResult(BaseModel):
+    """M40.1: POST /models/bulk-create 单条 row 结局。
+
+    - ``created``: 新 row 写入成功,``config`` 是 ``ModelConfigResponse.model_dump(mode="json")`` 序列化结果。
+    - ``skipped``: 已有 (model_type, model_name) 命中,``existing_config_id`` 返回旧 row id。
+    - ``error``: 该 row 出意外(一般是 DB constraint),``error`` 含人类可读消息。
+    """
+    requested_model_name: str
+    status: str  # "created" | "skipped" | "error"
+    reason: Optional[str] = None
+    existing_config_id: Optional[int] = None
+    config: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+class BulkCreateModelsResponse(BaseModel):
+    """M40.1: POST /models/bulk-create 强类型响应(替代 SingleResponse[dict])。"""
+    results: List[BulkCreateRowResult]

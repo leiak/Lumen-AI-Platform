@@ -2,6 +2,8 @@
 
 Spec: §4.3
 """
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Optional, Dict, Any
 from pydantic import BaseModel, ConfigDict, Field
@@ -53,3 +55,19 @@ class ImageGenerationDetail(ImageGenerationListItem):
     params: Optional[Dict[str, Any]]
     error_message: Optional[str]
     updated_at: datetime
+
+
+# --- M40.1 quick wins: 2 个 SingleResponse[dict] leak 补 schema ---
+
+class ImageGenerationCreated(BaseModel):
+    """M40.1: POST /image-generation/ 和 POST /{id}/regenerate 强类型响应。
+
+    替代 ``SingleResponse[dict]``:同步返回行 id / status / batch_id /
+    model_config_id / created_at,bytes 由 background task 后续落盘 + GET /{id}
+    拉详情。``batch_id`` 在 n=1 时为 None,n>1 时同 batch 行共享。
+    """
+    id: int
+    status: str
+    batch_id: Optional[str] = None
+    model_config_id: int
+    created_at: datetime

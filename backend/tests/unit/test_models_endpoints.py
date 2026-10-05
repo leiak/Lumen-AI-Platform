@@ -41,14 +41,14 @@ async def test_import_from_ollama_happy_path():
             body=MagicMock(base_url=None), current_user=current_user, db=db,
         )
 
-    assert result.data["reachable"] is True
-    assert len(result.data["models"]) == 2
-    nomic = next(m for m in result.data["models"] if "nomic" in m["name"])
-    assert nomic["is_embedding_capable"] is True
-    assert nomic["is_chat_capable"] is False
-    qwen = next(m for m in result.data["models"] if "qwen" in m["name"])
-    assert qwen["is_embedding_capable"] is False
-    assert qwen["is_chat_capable"] is True
+    assert result.data.reachable is True
+    assert len(result.data.models) == 2
+    nomic = next(m for m in result.data.models if "nomic" in m.name)
+    assert nomic.is_embedding_capable is True
+    assert nomic.is_chat_capable is False
+    qwen = next(m for m in result.data.models if "qwen" in m.name)
+    assert qwen.is_embedding_capable is False
+    assert qwen.is_chat_capable is True
 
 
 @pytest.mark.asyncio
@@ -67,8 +67,8 @@ async def test_import_from_ollama_unreachable():
             current_user=MagicMock(tenant_id=1),
             db=MagicMock(),
         )
-    assert result.data["reachable"] is False
-    assert "error_message" in result.data
+    assert result.data.reachable is False
+    assert result.data.error_message
 
 
 @pytest.mark.asyncio
@@ -127,7 +127,7 @@ async def test_bulk_create_creates_new_skips_duplicates():
 
     result = await bulk_create_models(rows=rows, current_user=current_user, db=db)
 
-    statuses = {r["requested_model_name"]: r["status"] for r in result.data["results"]}
+    statuses = {r.requested_model_name: r.status for r in result.data.results}
     assert statuses["nomic-embed-text"] == "created"
     assert statuses["qwen2.5:7b"] == "skipped"
 

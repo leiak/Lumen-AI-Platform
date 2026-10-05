@@ -19,6 +19,7 @@ from lumen_schemas.image_generation import (
     ImageGenerationCreate,
     ImageGenerationDetail,
     ImageGenerationListItem,
+    ImageGenerationCreated,
 )
 from lumen_services.image_generation_service import ImageGenerationService
 
@@ -59,7 +60,7 @@ def _build_list_item(r: GeneratedImage, mc: Optional[ModelConfig]) -> ImageGener
     )
 
 
-@router.post("/", response_model=SingleResponse[dict])
+@router.post("/", response_model=SingleResponse[ImageGenerationCreated])
 def create(
     data: ImageGenerationCreate,
     background_tasks: BackgroundTasks,
@@ -91,13 +92,15 @@ def create(
     if not rows:
         raise HTTPException(404, "Model config not found in this tenant")
     first = rows[0]
-    return SingleResponse(data={
-        "id": first.id,
-        "status": first.status,
-        "batch_id": first.batch_id,
-        "model_config_id": first.model_config_id,
-        "created_at": first.created_at.isoformat(),
-    })
+    # M40.1: 强类型 ImageGenerationCreated 替代裸 dict,OpenAPI /docs
+    # 直接展示 5 字段,前端 openapi-typescript codegen 自动拿类型。
+    return SingleResponse(data=ImageGenerationCreated(
+        id=first.id,  # type: ignore[arg-type]
+        status=first.status,  # type: ignore[arg-type]
+        batch_id=first.batch_id,
+        model_config_id=first.model_config_id,  # type: ignore[arg-type]
+        created_at=first.created_at,  # type: ignore[arg-type]
+    ))
 
 
 @router.get("/", response_model=PaginatedResponse[ImageGenerationListItem])
@@ -201,7 +204,7 @@ def get_thumbnail(
     return Response(content=row.thumbnail, media_type="image/jpeg")
 
 
-@router.post("/{image_id}/regenerate", response_model=SingleResponse[dict])
+@router.post("/{image_id}/regenerate", response_model=SingleResponse[ImageGenerationCreated])
 def regenerate(
     image_id: int,
     background_tasks: BackgroundTasks,
@@ -220,12 +223,15 @@ def regenerate(
     if not rows:
         raise HTTPException(404, "Image not found")
     first = rows[0]
-    return SingleResponse(data={
-        "id": first.id,
-        "status": first.status,
-        "model_config_id": first.model_config_id,
-        "created_at": first.created_at.isoformat(),
-    })
+    # M40.1: regenerate 也复用 ImageGenerationCreated,regenerate 路径无 batch_id
+    # (单条新建),OpenAPI 与 POST / 共用 schema 减少 codegen 重复。
+    return SingleResponse(data=ImageGenerationCreated(
+        id=first.id,  # type: ignore[arg-type]
+        status=first.status,  # type: ignore[arg-type]
+        batch_id=first.batch_id,
+        model_config_id=first.model_config_id,  # type: ignore[arg-type]
+        created_at=first.created_at,  # type: ignore[arg-type]
+    ))
 
 
 @router.delete("/{image_id}", status_code=204)

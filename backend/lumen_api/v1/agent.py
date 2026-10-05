@@ -12,7 +12,7 @@ from lumen_models.agent import Agent
 from lumen_models.model_config import ModelConfig
 from lumen_schemas.agent import (
     AgentCreate, AgentUpdate, AgentResponse,
-    AgentUpdateModel,
+    AgentUpdateModel, AgentModelUpdateResponse,
     ChatRequest, ChatMessage
 )
 from lumen_schemas.common import SingleResponse, PaginatedResponse
@@ -143,7 +143,7 @@ async def delete_agent(
 
 @router.put(
     "/{agent_id}/model",
-    response_model=SingleResponse[dict],
+    response_model=SingleResponse[AgentModelUpdateResponse],
     summary="Admin-only:切换 Agent 引用 ModelConfig",
     description=(
         "Agent 调 chat API 时由 agent.model_name 反查 model_configs 表拿 "
@@ -236,14 +236,16 @@ async def update_agent_model(
 
     # 4. 返完整 agent 详情 + 切换 delta,前端可以原地刷新列表,也能展示
     #    「这次切到了哪个 model / 是否变了」用于确认 toast。
+    # nitpick 2026-10-04 F8:用 AgentModelUpdateResponse 强类型替代裸 dict,
+    # OpenAPI /docs 暴露字段 + 前端 codegen 拿类型 + 后端删字段立刻 500 regression。
     return SingleResponse(
-        data={
+        data=AgentModelUpdateResponse.model_validate({
             "agent": _to_agent_response(agent),
             "old_model_name": old_model_name,
             "new_model_name": agent.model_name,
             "changed": old_model_name != agent.model_name,
             "reason": payload.reason,
-        }
+        })
     )
 
 

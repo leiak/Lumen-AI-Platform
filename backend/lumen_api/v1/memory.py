@@ -7,7 +7,7 @@ from lumen_models.user import User
 from lumen_models.chat import Conversation
 from lumen_services.memory_service import MemoryService
 from lumen_schemas.common import SingleResponse
-from pydantic import BaseModel
+from lumen_schemas.memory import MemoryMessage, MemoryWriteResponse
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 
@@ -22,16 +22,6 @@ def verify_conversation(conversation_id: int, current_user: User, db: Session):
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conv
-
-
-class MemoryMessage(BaseModel):
-    role: str
-    content: str
-    metadata: Optional[dict] = None
-    # M15: source conversation. None for legacy rows and for any future
-    # caller that doesn't know the source. The UI uses it to dim/filter
-    # current-conv rows in the global context panel.
-    conversation_id: Optional[int] = None
 
 
 @router.get("/conversations/{conversation_id}", response_model=SingleResponse[List[MemoryMessage]])
@@ -53,7 +43,7 @@ async def get_conversation_memory(
     return SingleResponse(data=[MemoryMessage(**h) for h in history])
 
 
-@router.post("/conversations/{conversation_id}/messages", response_model=SingleResponse[dict])
+@router.post("/conversations/{conversation_id}/messages", response_model=SingleResponse[MemoryWriteResponse])
 async def add_memory_message(
     conversation_id: int,
     message: MemoryMessage,
@@ -85,7 +75,9 @@ async def add_memory_message(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to add memory message: {str(e)}")
-    return SingleResponse(data={"status": "added"})
+    # M40.1: 强类型 MemoryWriteResponse 替代裸 dict,OpenAPI 暴露 status 字段,
+    # 前端 codegen 直接拿 type 而不是从 SingleResponse.data: {status: "added"} 抠。
+    return SingleResponse(data=MemoryWriteResponse(status="added"))
 
 
 @router.get("/conversations/{conversation_id}/search", response_model=SingleResponse[List[MemoryMessage]])
@@ -107,7 +99,7 @@ async def search_conversation_memory(
     return SingleResponse(data=[MemoryMessage(**r) for r in results])
 
 
-@router.delete("/conversations/{conversation_id}", response_model=SingleResponse[dict])
+@router.delete("/conversations/{conversation_id}", response_model=SingleResponse[MemoryWriteResponse])
 async def clear_conversation_memory(
     conversation_id: int,
     current_user: User = Depends(get_current_user),
@@ -120,7 +112,8 @@ async def clear_conversation_memory(
         service.clear_conversation_memory(db, conversation_id, current_user.tenant_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to clear memory: {str(e)}")
-    return SingleResponse(data={"status": "cleared"})
+    # M40.1: 同上,MemoryWriteResponse(status="cleared") 替代裸 dict。
+    return SingleResponse(data=MemoryWriteResponse(status="cleared"))
 
 
 @router.get("/global", response_model=SingleResponse[List[MemoryMessage]])
@@ -142,7 +135,7 @@ async def get_global_context(
     return SingleResponse(data=[MemoryMessage(**c) for c in context])
 
 
-@router.delete("/global", response_model=SingleResponse[dict])
+@router.delete("/global", response_model=SingleResponse[MemoryWriteResponse])
 async def clear_global_memory(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -153,4 +146,5 @@ async def clear_global_memory(
         service.clear_global_memory(db, current_user.tenant_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to clear global memory: {str(e)}")
-    return SingleResponse(data={"status": "cleared"})
+    # M40.1: 同上,MemoryWriteResponse(status="cleared") 替代裸 dict。
+    return SingleResponse(data=MemoryWriteResponse(status="cleared"))
