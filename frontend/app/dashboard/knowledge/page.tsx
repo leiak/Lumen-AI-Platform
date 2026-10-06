@@ -60,6 +60,11 @@ import { useKnowledgeList } from "@/app/dashboard/knowledge/hooks/useKnowledgeLi
 import { useDocumentUpload } from "@/app/dashboard/knowledge/hooks/useDocumentUpload";
 // M40.1 Phase 4: useDocumentList hook —— documents + 重试/删除/分块/重新分块 + 通知订阅。
 import { useDocumentList } from "@/app/dashboard/knowledge/hooks/useDocumentList";
+// M40.1 Phase 5: useDocumentSearch hook —— 搜索 + 高级选项 + detail modal。
+import {
+  useDocumentSearch,
+  type SearchResult,
+} from "@/app/dashboard/knowledge/hooks/useDocumentSearch";
 // M38.2.x v2: workspace RBAC members 管理 + useCanI gate
 import { WorkspaceMembersModal } from "@/components/knowledge/WorkspaceMembersModal";
 import { useCanI } from "@/hooks/useWorkspacePermissions";
@@ -69,17 +74,7 @@ const { Text } = Typography;
 const { Panel } = Collapse;
 const { Sider, Content } = Layout;
 
-interface SearchResult {
-  id: string;
-  text: string;
-  distance: number;
-  metadata: {
-    chunk_id: number;
-    document_id: number;
-    tenant_id: number;
-    kb_id: number;
-  };
-}
+// SearchResult 类型搬到 useDocumentSearch hook 内并 export,page 层 import 复用。
 
 // Shared "delete this document" action — used by the inline list and
 // the docListModal. Keeping the confirm copy and the danger styling in
@@ -116,23 +111,9 @@ function DeleteDocumentAction({
 export default function KnowledgePage() {
   // ──────────── M40.1 Phase 2: useKnowledgeList hook ────────────
   // KB list 状态 + CRUD + blocker modal 全部搬进 hook。下面只保留
-  // document / search / upload / modal 状态(Phase 3~6 拆)。
+  // upload 状态(Phase 3 拆)+ modal 状态(后续 fold 进 hook)。
 
-  // Search state(Phase 5 useDocumentSearch 接管)
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-  const [searching, setSearching] = useState(false);
-  const [detailModalVisible, setDetailModalVisible] = useState(false);
-  const [selectedDoc, setSelectedDoc] = useState<SearchResult | null>(null);
-
-  // Search options state(Phase 5 useDocumentSearch 接管)
-  const [searchOptions, setSearchOptions] = useState({
-    k: 5,
-    alpha: 0.5,
-    rerank: true,
-    rerankTopN: 10,
-    fieldWeights: "",
-  });
+  // M40.1 Phase 5: search state 全部搬到 useDocumentSearch hook。
 
   // Embedding models 缓存 —— EmbeddingModelSelect.onLoaded 回调写到这。
   // useKnowledgeList 通过 args.loadedEmbeddingModels 读取(form auto-default 用)。
@@ -163,10 +144,10 @@ export default function KnowledgePage() {
   const kb = useKnowledgeList({
     selectedWorkspaceId: wsRef.current,
     loadedEmbeddingModels,
-    onKbChangeCleanup: (newKB) => {
-      setSearchResults([]);
-      setSearchQuery("");
-      // documents 已搬到 useDocumentList,hook 内 bridge effect 监听 selectedKB 变化自动 fetch
+    onKbChangeCleanup: (_newKB) => {
+      // documents 已搬到 useDocumentList,hook 内 bridge effect 监听 selectedKB 变化自动 fetch;
+      // searchResults / searchQuery 已在 useDocumentSearch hook 内通过 KB 切换 reset。
+      void _newKB;
     },
     onKbSelectFetchDocs: (kbId) => {
       // 兼容 kb hook 接口 —— c1 hook 自己 effect 已响应 selectedKB 变化,
@@ -209,6 +190,11 @@ export default function KnowledgePage() {
     allKBs: kb.data,
   });
 
+  // M40.1 Phase 5: useDocumentSearch hook —— 搜索 query / options / results + detail modal。
+  const s2 = useDocumentSearch({
+    selectedKB: kb.selectedKB,
+  });
+
   // Highlight a specific doc when the URL has ?doc=<id> — used by the
   // notification "Open" action to deep-link into the KB page.
   const docParam = searchParams.get("doc");
@@ -233,40 +219,7 @@ export default function KnowledgePage() {
 // kb.handleEdit / kb.handleUpdate 全部搬到 useKnowledgeList hook。
 // M40.1 Phase 4:fetchDocuments / handleRetry / handleDeleteDocument / handleViewDocs /
 // fetchChunks / handleViewChunks / handleRechunk / handleRechunkSubmit 全部搬到 useDocumentList hook。
-
-  const handleSearch = async () => {
-    if (!kb.selectedKB || !searchQuery.trim()) {
-      message.warning("请选择知识库并输入搜索内容");
-      return;
-    }
-    setSearching(true);
-    try {
-      const options = {
-        k: searchOptions.k,
-        alpha: searchOptions.alpha,
-        rerank: searchOptions.rerank,
-        rerank_top_n: searchOptions.rerankTopN,
-        field_weights: searchOptions.fieldWeights || undefined,
-      };
-      const response = await knowledgeApi.search(kb.selectedKB.id, searchQuery, options);
-      if (response.data.code === 200) {
-        setSearchResults(response.data.data || []);
-        if ((response.data.data || []).length === 0) {
-          message.info("未找到相关结果");
-        }
-      }
-    } catch (error) {
-      message.error("搜索失败");
-      setSearchResults([]);
-    } finally {
-      setSearching(false);
-    }
-  };
-
-  const showDetail = (result: SearchResult) => {
-    setSelectedDoc(result);
-    setDetailModalVisible(true);
-  };
+// M40.1 Phase 5:handleSearch / showDetail 全部搬到 useDocumentSearch hook。
 
   const formatFileSize = (bytes: number) => {
     if (bytes < 1024) return bytes + " B";
@@ -691,11 +644,11 @@ export default function KnowledgePage() {
             <Space direction="vertical" style={{ width: "100%" }} size="middle">
               <TextArea
                 placeholder="输入搜索内容..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                value={s2.searchQuery}
+                onChange={(e) => s2.setSearchQuery(e.target.value)}
                 onPressEnter={(e) => {
                   e.preventDefault();
-                  handleSearch();
+                  s2.handleSearch();
                 }}
                 rows={3}
               />
@@ -704,42 +657,42 @@ export default function KnowledgePage() {
                 <Panel header={<Space><SettingOutlined />高级选项</Space>} key="advanced">
                   <Space direction="vertical" style={{ width: "100%" }} size="small">
                     <div>
-                      <Text>返回数量 (k): {searchOptions.k}</Text>
+                      <Text>返回数量 (k): {s2.searchOptions.k}</Text>
                       <Slider
                         min={1}
                         max={50}
-                        value={searchOptions.k}
-                        onChange={(value) => setSearchOptions({ ...searchOptions, k: value })}
+                        value={s2.searchOptions.k}
+                        onChange={(value) => s2.setSearchOptions({ ...s2.searchOptions, k: value })}
                       />
                     </div>
                     <div>
-                      <Text>向量权重 (alpha): {searchOptions.alpha.toFixed(2)}</Text>
+                      <Text>向量权重 (alpha): {s2.searchOptions.alpha.toFixed(2)}</Text>
                       <Slider
                         min={0}
                         max={1}
                         step={0.1}
-                        value={searchOptions.alpha}
-                        onChange={(value) => setSearchOptions({ ...searchOptions, alpha: value })}
+                        value={s2.searchOptions.alpha}
+                        onChange={(value) => s2.setSearchOptions({ ...s2.searchOptions, alpha: value })}
                       />
                     </div>
                     <div>
                       <Space>
                         <Switch
                           size="small"
-                          checked={searchOptions.rerank}
-                          onChange={(checked) => setSearchOptions({ ...searchOptions, rerank: checked })}
+                          checked={s2.searchOptions.rerank}
+                          onChange={(checked) => s2.setSearchOptions({ ...s2.searchOptions, rerank: checked })}
                         />
                         <Text>启用重排 (Rerank)</Text>
                       </Space>
                     </div>
-                    {searchOptions.rerank && (
+                    {s2.searchOptions.rerank && (
                       <div>
-                        <Text>重排候选数: {searchOptions.rerankTopN}</Text>
+                        <Text>重排候选数: {s2.searchOptions.rerankTopN}</Text>
                         <Slider
                           min={5}
                           max={50}
-                          value={searchOptions.rerankTopN}
-                          onChange={(value) => setSearchOptions({ ...searchOptions, rerankTopN: value })}
+                          value={s2.searchOptions.rerankTopN}
+                          onChange={(value) => s2.setSearchOptions({ ...s2.searchOptions, rerankTopN: value })}
                         />
                       </div>
                     )}
@@ -750,27 +703,27 @@ export default function KnowledgePage() {
               <Button
                 type="primary"
                 icon={<SearchOutlined />}
-                onClick={handleSearch}
-                loading={searching}
+                onClick={s2.handleSearch}
+                loading={s2.searching}
               >
                 搜索
               </Button>
             </Space>
 
             {/* Search Results */}
-            {searchResults.length > 0 && (
+            {s2.searchResults.length > 0 && (
               <div style={{ marginTop: 24 }}>
                 <Divider orientation="left">
-                  找到 {searchResults.length} 条相关结果
+                  找到 {s2.searchResults.length} 条相关结果
                 </Divider>
                 <List
                   size="small"
-                  dataSource={searchResults}
+                  dataSource={s2.searchResults}
                   style={{ maxHeight: 400, overflow: "auto" }}
                   renderItem={(item) => (
                     <List.Item
                       style={{ cursor: "pointer" }}
-                      onClick={() => showDetail(item)}
+                      onClick={() => s2.showDetail(item)}
                     >
                       <List.Item.Meta
                         avatar={<FileTextOutlined />}
@@ -792,7 +745,7 @@ export default function KnowledgePage() {
               </div>
             )}
 
-            {searchResults.length === 0 && searchQuery && !searching && (
+            {s2.searchResults.length === 0 && s2.searchQuery && !s2.searching && (
               <Text type="secondary" style={{ marginTop: 16, display: "block" }}>
                 未找到相关结果
               </Text>
@@ -804,16 +757,16 @@ export default function KnowledgePage() {
       {/* Detail Modal */}
       <Modal
         title="文档片段详情"
-        open={detailModalVisible}
-        onCancel={() => setDetailModalVisible(false)}
+        open={s2.detailModalVisible}
+        onCancel={() => s2.setDetailModalVisible(false)}
         footer={null}
         width={700}
       >
-        {selectedDoc && (
+        {s2.selectedDoc && (
           <div>
-            <p><Text strong>Chunk ID:</Text> {selectedDoc.metadata.chunk_id}</p>
-            <p><Text strong>Document ID:</Text> {selectedDoc.metadata.document_id}</p>
-            <p><Text strong>距离得分:</Text> {selectedDoc.distance.toFixed(6)}</p>
+            <p><Text strong>Chunk ID:</Text> {s2.selectedDoc.metadata.chunk_id}</p>
+            <p><Text strong>Document ID:</Text> {s2.selectedDoc.metadata.document_id}</p>
+            <p><Text strong>距离得分:</Text> {s2.selectedDoc.distance.toFixed(6)}</p>
             <div style={{ marginTop: 16 }}>
               <Text strong>内容:</Text>
               <div
@@ -827,7 +780,7 @@ export default function KnowledgePage() {
                   fontFamily: "monospace",
                 }}
               >
-                {selectedDoc.text}
+                {s2.selectedDoc.text}
               </div>
             </div>
           </div>
