@@ -4,6 +4,43 @@
 
 ---
 
+## 2026-10-06 — M40.1 knowledge page god component refactor ship
+
+### 背景
+
+M40 nitpick 2026-10-04 系统性 7 标记 `frontend/app/dashboard/knowledge/page.tsx` 2098 行 god component(M21~M38.2 持续叠加 + 5 modal + workspace/folder/rbac 三层 navigation 全揉一起)。M30b 已 ship `chat/page.tsx` 938 → 270 行(commit `0ce9ab1`),6 hooks + 6 components 模式,本任务照同款打 knowledge 页。
+
+### 主要工作
+- **`page.tsx`**:2098 → **1000 行**(-52.3%),纯 hook 编排层
+- **6 hooks**(新文件,`frontend/app/dashboard/knowledge/hooks/`):
+  - `useWorkspaceTree` (424 行) — workspace/folder 查询 + 4 modal + 8 handler
+  - `useKnowledgeList` (390 行) — KB 列表 + CRUD + blocker modal
+  - `useDocumentUpload` (105 行) — 上传 mutation + doc type picker
+  - `useDocumentList` (439 行) — documents + 重试/删除/分块/重新分块 + WS 通知订阅
+  - `useDocumentSearch` (178 行) — 搜索 + 高级选项 + detail modal
+- **5 子组件**(新文件,`frontend/components/knowledge/`):
+  - `<CreateKBModal>` (188) — 创建 KB modal
+  - `<EditKBModal>` (188) — 编辑 KB modal,Embedding 锁定
+  - `<BlockerModal>` (91) — M28 422 拦截
+  - `<SearchCard>` (226) — 搜索 Card + 高级选项 + 结果列表
+  - `<ViewChunksModal>` (127) — 分块详情 + 末 8 位 vector_id
+- **`hooks/README.md`**(新文件):6 hooks 总览 + 5 子组件 + 调用顺序 + 跨 hook 通信矩阵 + 加新 feature 时怎么 hook 化
+- **测试**:`__tests__/knowledge/` 6 文件 / 34 测试全过,`tsc --noEmit` 0 knowledge 错误
+
+### 关键 invariant
+
+1. **跨 hook 通信走 props-down + callbacks-up,不上 Context** — Context 在每个 state 变化时 re-render 所有 hook consumer,5 个 hook × ~30 state slot 会让 React.memo 失效。lift 到 page.tsx ~10 行/hook 但可调试。
+2. **TDZ 同步用 `useRef` 桥** — hook init 顺序 `kb → ws → up → c1 → s2`,`kb.data` 过滤依赖 `ws.selectedWorkspaceId`。`wsRef.current = ws.selectedWorkspaceId` 每次 render 同步给 kb,handler 内部读 `wsIdRef.current` 拿最新值。
+3. **bridge useEffect 内部** — selectedKB / selectedFolderId 变化 → 自动 fetchDocuments / fetchChunks(免暴露 fetchXxx 接口给 page 层)。
+4. **setter prop 类型对齐** — hook 暴露 `(v: T) => void` setter,子组件 prop 也用 `(v: T) => void`,**不要** `Dispatch<SetStateAction<T>>`(后者支持 prev callback,hook 不需要这复杂度)。
+5. **与 chat refactor 模式完全一致**(2026-06-16 commit `0ce9ab1`)。
+
+### 与 M40 nitpick 修复包合并 ship
+
+本任务跟 M40 nitpick P0 安全洞 + M40.1 quick wins(lifespan 拆 startup/shutdown + 5 个 SingleResponse[dict] leak 补 Pydantic schema)一起 ship,统一在 2026-10-05~06 周窗口内 commit。
+
+---
+
 ## 2026-08-27 — M38.2.x v2 Workspace RBAC ship
 
 ### 背景

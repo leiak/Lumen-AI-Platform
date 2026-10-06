@@ -158,6 +158,8 @@ docs-internal/
 /*.tmp
 /*.bak
 /*.orig
+# pip install 生成的 lockfile 临时文件,命名形如 requirements.txt.tmp.<random>
+*.tmp.*
 /*.rej
 /coverage/
 /.nyc_output/

@@ -486,5 +486,57 @@ async def retrieve(
 
 ---
 
+## 13. 前端架构(M40.1 refactor 2026-10-06)
+
+KB 页(`frontend/app/dashboard/knowledge/page.tsx`)M40.1 拆 hooks 后架构:
+
+```
+page.tsx (1000 行,纯 hook 编排 + Layout 渲染)
+├── hooks/useWorkspaceTree (424) — workspace/folder 查询 + 4 modal + 8 handler
+├── hooks/useKnowledgeList (390) — KB 列表 + CRUD + blocker modal
+├── hooks/useDocumentUpload (105) — 上传 mutation + doc type picker
+├── hooks/useDocumentList (439) — documents + 重试/删除/分块 + WS 通知订阅
+└── hooks/useDocumentSearch (178) — 搜索 + 高级选项 + detail modal
+    ↓ 子组件
+├── components/knowledge/CreateKBModal (188)
+├── components/knowledge/EditKBModal (188)
+├── components/knowledge/BlockerModal (91)
+├── components/knowledge/SearchCard (226)
+├── components/knowledge/ViewChunksModal (127)
+└── (其他复用):WorkspaceTree / CreateWorkspaceModal / CreateFolderModal /
+              MoveDocumentModal / WorkspaceMembersModal / FAQTab
+```
+
+### 13.1 跨 hook 通信模式
+
+**props-down + callbacks-up,不上 Context。** hook 顺序 `kb → ws → up → c1 → s2`,
+`kb.data` 过滤依赖 `ws.selectedWorkspaceId`。**TDZ 同步**用 `useRef` 桥:
+
+```tsx
+const wsRef = useRef<number | null>(null);
+const kb = useKnowledgeList({ selectedWorkspaceId: wsRef.current, ... });
+const ws = useWorkspaceTree({ ... });
+wsRef.current = ws.selectedWorkspaceId;   // 每次 render 同步给 kb
+```
+
+### 13.2 加新 feature 怎么 hook 化
+
+| 场景 | 归属 |
+|---|---|
+| 加新 modal | `components/knowledge/XxxModal.tsx` 纯 JSX,state 进对应 hook |
+| 只 KB list 影响 | `kb` |
+| 跨 KB + workspace 联动 | `ws` |
+| 跨多 hook | 抽新 hook,page 层 inline 编排 |
+
+详见 [`hooks/README.md`](../../frontend/app/dashboard/knowledge/hooks/README.md)。
+
+### 13.3 与 chat refactor 一致性
+
+chat/page.tsx-2026-06-16 commit `0ce9ab1`(M30b)跟 knowledge 页 M40.1 完全同模式:
+hooks 目录 `app/dashboard/<feature>/hooks/` + 组件 `components/<feature>/` +
+单 hook < 400 LOC + props-down/callbacks-up + 测试 mock 不变。
+
+---
+
 **维护者**:全栈架构师
-**最近更新**:2026-08-27(M38.2.x v2 ship:Workspace RBAC 19 perm + owner/admin bypass + chat/workflow KB graceful skip)
+**最近更新**:2026-10-06(M40.1 knowledge page god component refactor ship:page.tsx 2098→1000,-52.3%,6 hooks + 5 子组件)
