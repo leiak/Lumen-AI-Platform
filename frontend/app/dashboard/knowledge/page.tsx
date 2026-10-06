@@ -52,6 +52,12 @@ import WorkspaceTree from "@/components/knowledge/WorkspaceTree";
 import CreateWorkspaceModal from "@/components/knowledge/CreateWorkspaceModal";
 import CreateFolderModal from "@/components/knowledge/CreateFolderModal";
 import MoveDocumentModal from "@/components/knowledge/MoveDocumentModal";
+// M40.1 Phase 6: KB CRUD + blocker / search / chunks 子组件拆分。
+import CreateKBModal from "@/components/knowledge/CreateKBModal";
+import EditKBModal from "@/components/knowledge/EditKBModal";
+import BlockerModal from "@/components/knowledge/BlockerModal";
+import SearchCard from "@/components/knowledge/SearchCard";
+import ViewChunksModal from "@/components/knowledge/ViewChunksModal";
 // M40.1 Phase 1: useWorkspaceTree hook —— workspace/folder/rbac 状态 + 4 modal + 8 handler。
 import { useWorkspaceTree } from "@/app/dashboard/knowledge/hooks/useWorkspaceTree";
 // M40.1 Phase 2: useKnowledgeList hook —— KB list 状态 + CRUD + blocker modal。
@@ -640,117 +646,16 @@ export default function KnowledgePage() {
           </Card>
 
           {/* Search Section */}
-          <Card title="文档搜索">
-            <Space direction="vertical" style={{ width: "100%" }} size="middle">
-              <TextArea
-                placeholder="输入搜索内容..."
-                value={s2.searchQuery}
-                onChange={(e) => s2.setSearchQuery(e.target.value)}
-                onPressEnter={(e) => {
-                  e.preventDefault();
-                  s2.handleSearch();
-                }}
-                rows={3}
-              />
-
-              <Collapse ghost>
-                <Panel header={<Space><SettingOutlined />高级选项</Space>} key="advanced">
-                  <Space direction="vertical" style={{ width: "100%" }} size="small">
-                    <div>
-                      <Text>返回数量 (k): {s2.searchOptions.k}</Text>
-                      <Slider
-                        min={1}
-                        max={50}
-                        value={s2.searchOptions.k}
-                        onChange={(value) => s2.setSearchOptions({ ...s2.searchOptions, k: value })}
-                      />
-                    </div>
-                    <div>
-                      <Text>向量权重 (alpha): {s2.searchOptions.alpha.toFixed(2)}</Text>
-                      <Slider
-                        min={0}
-                        max={1}
-                        step={0.1}
-                        value={s2.searchOptions.alpha}
-                        onChange={(value) => s2.setSearchOptions({ ...s2.searchOptions, alpha: value })}
-                      />
-                    </div>
-                    <div>
-                      <Space>
-                        <Switch
-                          size="small"
-                          checked={s2.searchOptions.rerank}
-                          onChange={(checked) => s2.setSearchOptions({ ...s2.searchOptions, rerank: checked })}
-                        />
-                        <Text>启用重排 (Rerank)</Text>
-                      </Space>
-                    </div>
-                    {s2.searchOptions.rerank && (
-                      <div>
-                        <Text>重排候选数: {s2.searchOptions.rerankTopN}</Text>
-                        <Slider
-                          min={5}
-                          max={50}
-                          value={s2.searchOptions.rerankTopN}
-                          onChange={(value) => s2.setSearchOptions({ ...s2.searchOptions, rerankTopN: value })}
-                        />
-                      </div>
-                    )}
-                  </Space>
-                </Panel>
-              </Collapse>
-
-              <Button
-                type="primary"
-                icon={<SearchOutlined />}
-                onClick={s2.handleSearch}
-                loading={s2.searching}
-              >
-                搜索
-              </Button>
-            </Space>
-
-            {/* Search Results */}
-            {s2.searchResults.length > 0 && (
-              <div style={{ marginTop: 24 }}>
-                <Divider orientation="left">
-                  找到 {s2.searchResults.length} 条相关结果
-                </Divider>
-                <List
-                  size="small"
-                  dataSource={s2.searchResults}
-                  style={{ maxHeight: 400, overflow: "auto" }}
-                  renderItem={(item) => (
-                    <List.Item
-                      style={{ cursor: "pointer" }}
-                      onClick={() => s2.showDetail(item)}
-                    >
-                      <List.Item.Meta
-                        avatar={<FileTextOutlined />}
-                        title={
-                          <Text ellipsis style={{ maxWidth: 600 }}>
-                            {item.text}
-                          </Text>
-                        }
-                        description={
-                          <Space size="small">
-                            <Tag>距离: {item.distance.toFixed(4)}</Tag>
-                            <Tag>Chunk: {item.metadata.chunk_id}</Tag>
-                          </Space>
-                        }
-                      />
-                    </List.Item>
-                  )}
-                />
-              </div>
-            )}
-
-            {s2.searchResults.length === 0 && s2.searchQuery && !s2.searching && (
-              <Text type="secondary" style={{ marginTop: 16, display: "block" }}>
-                未找到相关结果
-              </Text>
-            )}
-          </Card>
+          <SearchCard
+            searchQuery={s2.searchQuery}
+            setSearchQuery={s2.setSearchQuery}
+            searchOptions={s2.searchOptions}
+            setSearchOptions={s2.setSearchOptions}
+            searching={s2.searching}
+            searchResults={s2.searchResults}
+            handleSearch={s2.handleSearch}
+            showDetail={s2.showDetail}
+          />
         </>
       )}
 
@@ -788,173 +693,26 @@ export default function KnowledgePage() {
       </Modal>
 
       {/* Create Modal */}
-      <Modal
-        title="创建知识库"
+      <CreateKBModal
         open={kb.modalVisible}
-        onCancel={() => {
-          kb.setModalVisible(false);
-          kb.form.resetFields();
-        }}
-        footer={null}
-      >
-        <Form form={kb.form} layout="vertical" onFinish={kb.handleCreate}>
-          <Form.Item
-            name="name"
-            label="名称"
-            rules={[{ required: true, message: "请输入名称" }]}
-          >
-            <Input placeholder="请输入知识库名称" />
-          </Form.Item>
-          <Form.Item name="description" label="描述">
-            <Input.TextArea placeholder="请输入描述" />
-          </Form.Item>
-          {/* Embedding 模型 — sourced from model_configs (T18 component),
-              not hardcoded. `embedding_model_config_id` is the FK the
-              backend now requires on create. `onLoaded` pushes the
-              loaded list up so the useEffect above can auto-default
-              the field when the modal opens. */}
-          <Form.Item
-            name="embedding_model_config_id"
-            label="Embedding 模型"
-            rules={[{ required: true, message: "请选择 Embedding 模型" }]}
-          >
-            <EmbeddingModelSelect onLoaded={setLoadedEmbeddingModels} />
-          </Form.Item>
-          {/* 默认解析器 */}
-          <Form.Item name="default_parser" label="默认解析器" initialValue="general">
-            <Select>
-              <Select.Option value="general">通用文档</Select.Option>
-              <Select.Option value="paper">学术论文</Select.Option>
-              <Select.Option value="qa">问答文档</Select.Option>
-              <Select.Option value="table">表格文档</Select.Option>
-              <Select.Option value="manual">用户手册</Select.Option>
-              <Select.Option value="laws">法律文档</Select.Option>
-            </Select>
-          </Form.Item>
-          {/* 分块大小和重叠 */}
-          <Space>
-            <Form.Item name="chunk_size" label="分块大小" initialValue={500}>
-              <InputNumber min={100} max={2000} />
-            </Form.Item>
-            <Form.Item name="chunk_overlap" label="重叠token" initialValue={50}>
-              <InputNumber min={0} max={200} />
-            </Form.Item>
-          </Space>
-          {/* 搜索权重 Collapse */}
-          <Collapse ghost>
-            <Panel header="搜索权重配置" key="weights">
-              <Space direction="vertical" style={{ width: '100%' }}>
-                <div>
-                  <Text>title: {kb.searchWeights.title}</Text>
-                  <Slider min={0} max={100} value={kb.searchWeights.title} onChange={(v) => kb.setSearchWeights({...kb.searchWeights, title: v})} />
-                </div>
-                <div>
-                  <Text>important_kw: {kb.searchWeights.important_kw}</Text>
-                  <Slider min={0} max={100} value={kb.searchWeights.important_kw} onChange={(v) => kb.setSearchWeights({...kb.searchWeights, important_kw: v})} />
-                </div>
-                <div>
-                  <Text>question_kw: {kb.searchWeights.question_kw}</Text>
-                  <Slider min={0} max={100} value={kb.searchWeights.question_kw} onChange={(v) => kb.setSearchWeights({...kb.searchWeights, question_kw: v})} />
-                </div>
-                <div>
-                  <Text>text: {kb.searchWeights.text}</Text>
-                  <Slider min={0} max={100} value={kb.searchWeights.text} onChange={(v) => kb.setSearchWeights({...kb.searchWeights, text: v})} />
-                </div>
-              </Space>
-            </Panel>
-          </Collapse>
-          <Form.Item>
-            <Space>
-              <Button type="primary" htmlType="submit">
-                创建
-              </Button>
-              <Button onClick={() => kb.setModalVisible(false)}>取消</Button>
-            </Space>
-          </Form.Item>
-        </Form>
-      </Modal>
+        form={kb.form}
+        searchWeights={kb.searchWeights}
+        setSearchWeights={kb.setSearchWeights}
+        handleCreate={kb.handleCreate}
+        setModalVisible={kb.setModalVisible}
+        setLoadedEmbeddingModels={setLoadedEmbeddingModels}
+      />
 
       {/* Edit Modal */}
-      <Modal
-        title={`编辑知识库: ${kb.editingKB?.name || ''}`}
+      <EditKBModal
+        editingKB={kb.editingKB}
         open={kb.editModalVisible}
-        onCancel={() => {
-          kb.setEditModalVisible(false);
-          kb.editForm.resetFields();
-        }}
-        footer={null}
-        width={600}
-      >
-        <Form form={kb.editForm} layout="vertical" onFinish={kb.handleUpdate}>
-          <Form.Item
-            name="name"
-            label="名称"
-            rules={[{ required: true, message: "请输入名称" }]}
-          >
-            <Input placeholder="请输入知识库名称" />
-          </Form.Item>
-          <Form.Item name="description" label="描述">
-            <Input.TextArea placeholder="请输入描述" />
-          </Form.Item>
-          {/* Embedding 模型 — locked once a KB is created. The
-              EmbeddingModelSelect renders the disabled hint itself
-              when `disabled` is true. */}
-          <Form.Item name="embedding_model_config_id" label="Embedding 模型">
-            <EmbeddingModelSelect disabled />
-          </Form.Item>
-          {/* 默认解析器 */}
-          <Form.Item name="default_parser" label="默认解析器">
-            <Select>
-              <Select.Option value="general">通用文档</Select.Option>
-              <Select.Option value="paper">学术论文</Select.Option>
-              <Select.Option value="qa">问答文档</Select.Option>
-              <Select.Option value="table">表格文档</Select.Option>
-              <Select.Option value="manual">用户手册</Select.Option>
-              <Select.Option value="laws">法律文档</Select.Option>
-            </Select>
-          </Form.Item>
-          {/* 分块大小和重叠 */}
-          <Space>
-            <Form.Item name="chunk_size" label="分块大小">
-              <InputNumber min={100} max={2000} />
-            </Form.Item>
-            <Form.Item name="chunk_overlap" label="重叠token">
-              <InputNumber min={0} max={200} />
-            </Form.Item>
-          </Space>
-          {/* 搜索权重 Collapse */}
-          <Collapse ghost>
-            <Panel header="搜索权重配置" key="weights">
-              <Space direction="vertical" style={{ width: '100%' }}>
-                <div>
-                  <Text>title: {kb.editSearchWeights.title}</Text>
-                  <Slider min={0} max={100} value={kb.editSearchWeights.title} onChange={(v) => kb.setEditSearchWeights({...kb.editSearchWeights, title: v})} />
-                </div>
-                <div>
-                  <Text>important_kw: {kb.editSearchWeights.important_kw}</Text>
-                  <Slider min={0} max={100} value={kb.editSearchWeights.important_kw} onChange={(v) => kb.setEditSearchWeights({...kb.editSearchWeights, important_kw: v})} />
-                </div>
-                <div>
-                  <Text>question_kw: {kb.editSearchWeights.question_kw}</Text>
-                  <Slider min={0} max={100} value={kb.editSearchWeights.question_kw} onChange={(v) => kb.setEditSearchWeights({...kb.editSearchWeights, question_kw: v})} />
-                </div>
-                <div>
-                  <Text>text: {kb.editSearchWeights.text}</Text>
-                  <Slider min={0} max={100} value={kb.editSearchWeights.text} onChange={(v) => kb.setEditSearchWeights({...kb.editSearchWeights, text: v})} />
-                </div>
-              </Space>
-            </Panel>
-          </Collapse>
-          <Form.Item>
-            <Space>
-              <Button type="primary" htmlType="submit">
-                保存
-              </Button>
-              <Button onClick={() => kb.setEditModalVisible(false)}>取消</Button>
-            </Space>
-          </Form.Item>
-        </Form>
-      </Modal>
+        editForm={kb.editForm}
+        editSearchWeights={kb.editSearchWeights}
+        setEditSearchWeights={kb.setEditSearchWeights}
+        handleUpdate={kb.handleUpdate}
+        setEditModalVisible={kb.setEditModalVisible}
+      />
 
       {/* Document List Modal */}
       <Modal
@@ -1057,85 +815,17 @@ export default function KnowledgePage() {
       </Modal>
 
       {/* View Chunks Modal */}
-      <Modal
-        title={`分块详情: ${c1.chunksDoc?.filename || ''}`}
+      <ViewChunksModal
         open={c1.chunksModalOpen}
+        chunksDoc={c1.chunksDoc}
+        chunks={c1.chunks}
+        chunksLoading={c1.chunksLoading}
+        chunksPage={c1.chunksPage}
+        chunksPageSize={c1.chunksPageSize}
+        setChunksPage={c1.setChunksPage}
+        setChunksPageSize={c1.setChunksPageSize}
         onCancel={() => c1.setChunksModalOpen(false)}
-        footer={null}
-        width={800}
-      >
-        {c1.chunksDoc && (
-          <>
-            <div style={{ marginBottom: 12 }}>
-              <Text type="secondary">
-                共 {c1.chunksDoc.chunk_count ?? 0} 个分块
-              </Text>
-            </div>
-            <Table<DocumentChunk>
-              size="small"
-              dataSource={c1.chunks}
-              rowKey="id"
-              loading={c1.chunksLoading}
-              pagination={{
-                current: c1.chunksPage,
-                pageSize: c1.chunksPageSize,
-                total: c1.chunksDoc.chunk_count ?? 0,
-                showSizeChanger: true,
-                pageSizeOptions: [10, 20, 50, 100],
-                onChange: (p, ps) => {
-                  c1.setChunksPage(p);
-                  c1.setChunksPageSize(ps);
-                  // hook 内 bridge effect 监听 chunksPage/PageSize 自动 fetchChunks
-                },
-              }}
-              columns={[
-                { title: "#", dataIndex: "chunk_index", width: 60 },
-                {
-                  title: "内容",
-                  dataIndex: "content",
-                  render: (text: string) => (
-                    <pre
-                      style={{
-                        margin: 0,
-                        maxHeight: 120,
-                        overflow: "auto",
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-word",
-                        fontFamily: "monospace",
-                        fontSize: 12,
-                        background: "#f5f5f5",
-                        padding: 8,
-                        borderRadius: 4,
-                      }}
-                    >
-                      {text}
-                    </pre>
-                  ),
-                },
-                {
-                  title: "长度",
-                  dataIndex: "content",
-                  width: 80,
-                  render: (text: string) => <Text type="secondary">{text.length}</Text>,
-                },
-                {
-                  title: "向量ID",
-                  dataIndex: "vector_id",
-                  width: 120,
-                  render: (vid?: string) =>
-                    vid ? (
-                      <Text type="secondary" style={{ fontSize: 11 }} copyable>
-                        {vid.length > 8 ? `…${vid.slice(-8)}` : vid}
-                      </Text>
-                    ) : (
-                      <Text type="secondary">-</Text>
-                    ),
-                },
-              ]}
-            />
-          </>
-        )}
-      </Modal>
+      />
 
       {/* Re-chunk Modal */}
       <Modal
@@ -1214,72 +904,12 @@ export default function KnowledgePage() {
 
       {/* M28: 删 KB 失败时弹的 blockers Modal。toast 3 秒就消失,
           用户根本来不及想「我该去哪个 agent 解绑」,改成持久 Modal。 */}
-      <Modal
-        title="无法删除知识库"
-        open={kb.blockerModal.visible}
-        onCancel={() => kb.setBlockerModal((prev) => ({ ...prev, visible: false }))}
-        footer={[
-          <Button
-            key="ok"
-            type="primary"
-            onClick={() => kb.setBlockerModal((prev) => ({ ...prev, visible: false }))}
-          >
-            知道了
-          </Button>,
-        ]}
-      >
-        <p style={{ marginBottom: 16 }}>{kb.blockerModal.message}</p>
-
-        {kb.blockerModal.agents.length > 0 && (
-          <div style={{ marginBottom: 12 }}>
-            <Typography.Text strong>引用此知识库的 Agent</Typography.Text>
-            <List
-              size="small"
-              style={{ marginTop: 4 }}
-              dataSource={kb.blockerModal.agents}
-              renderItem={(a) => (
-                <List.Item>
-                  <span>
-                    {a.name}
-                    <Typography.Text type="secondary"> · id={a.id}</Typography.Text>
-                  </span>
-                </List.Item>
-              )}
-            />
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              请到 Agent 详情页的知识库区域取消绑定,或删除该 Agent。
-            </Typography.Text>
-          </div>
-        )}
-
-        {kb.blockerModal.documents.length > 0 && (
-          <div style={{ marginBottom: 12 }}>
-            <Typography.Text strong>关联的文档</Typography.Text>
-            <List
-              size="small"
-              style={{ marginTop: 4 }}
-              dataSource={kb.blockerModal.documents}
-              renderItem={(d) => (
-                <List.Item>
-                  <span>
-                    {d.filename}
-                    <Typography.Text type="secondary"> · id={d.id}</Typography.Text>
-                  </span>
-                </List.Item>
-              )}
-            />
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              请先删除这些文档(回到本页打开「文档列表」可批量删)。
-            </Typography.Text>
-          </div>
-        )}
-
-        {kb.blockerModal.truncated && (
-          <Typography.Text type="warning" style={{ fontSize: 12 }}>
-            列表已截断(后端每次最多返回 10 条),实际 blocker 数量可能更多。
-          </Typography.Text>
-        )}
-      </Modal>
+      <BlockerModal
+        state={kb.blockerModal}
+        onClose={() =>
+          kb.setBlockerModal((prev) => ({ ...prev, visible: false }))
+        }
+      />
       </Content>
 
       {/* M38.2: 新建 workspace modal */}
